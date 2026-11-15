@@ -3,7 +3,7 @@
 #include <filesystem>
 #include <string>
 
-#include "types.h"
+#include "pdf_identity.h"
 
 namespace clrop {
 
@@ -20,8 +20,8 @@ clrop::PdfId ComputePdfFastId(const std::wstring& pdfPath);
 // sha256 は path + size + mtime ベースのプロセス内キャッシュで再利用する。
 clrop::PdfId ComputePdfId(const std::wstring& pdfPath);
 
-bool PdfIdHasFastFingerprint(const clrop::PdfId& id);
-bool PdfIdFastMatches(const clrop::PdfId& lhs, const clrop::PdfId& rhs);
-bool PdfIdStrongMatches(const clrop::PdfId& lhs, const clrop::PdfId& rhs);
+// Start a new protected open with fresh identity, even if an external change
+// made while closed preserved size and mtime. Reuse remains within that open.
+void InvalidatePdfIdCache(const std::wstring& pdfPath);
 
 } // namespace clrop

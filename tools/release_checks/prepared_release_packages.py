@@ -16,7 +16,7 @@ PACKAGE_RECEIPT = "release_packages_receipt.json"
 
 
 def source_identity(repository: Path) -> dict:
-    policy = repository / "docs/internal/public_repo_release_allowlist_2026-08-24.txt"
+    policy = repository / "docs/internal/public_repo_release_allowlist_2026-11-13.txt"
     artifacts = repository / "docs/internal/public_repo_release_artifact_manifest_2026-08-12.tsv"
     gitignore = repository / "docs/internal/public_repo_gitignoreテンプレート_2026-07-02.gitignore"
     plan = build_snapshot_plan(repository, parse_allowlist(policy), git_tracked_files(repository), parse_artifact_manifest(repository, artifacts))

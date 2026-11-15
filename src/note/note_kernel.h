@@ -90,6 +90,8 @@ public:
     void DiscardPendingEditAndRequireFullRefresh();
     void ClearDerived();
     [[nodiscard]] bool SetClroAsciiOnly(bool value);
+    [[nodiscard]] bool SetQuoteLazyContinuation(bool value);
+    [[nodiscard]] bool UpdateFileMetadata(NoteMetadata metadata, NoteContentKind contentKind);
 
     bool valid() const { return text_core_.valid(); }
     bool has_pending_edit() const { return pending_transaction_.active(); }
@@ -109,6 +111,7 @@ public:
 
 private:
     friend class LocalNoteKernelRegistry;
+    [[nodiscard]] bool RebindFile(NoteId noteId, NoteMetadata metadata, NoteContentKind contentKind);
     bool TryApplyIncrementalSyntax(const TextEdit& edit,
                                    const NoteInfluenceScope* influence);
     [[nodiscard]] NoteKernelRefreshResult RebuildAll(

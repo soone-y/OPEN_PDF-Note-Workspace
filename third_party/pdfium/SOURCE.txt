@@ -1,12 +1,13 @@
-Package version: 158.0.8111.0
+Package version: 159.0.8152.0
 Distribution: PDFium binaries by Benoit Blanchon
-Release: https://github.com/bblanchon/pdfium-binaries/releases/tag/chromium/8111
-Asset: https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8111/pdfium-win-x64.tgz
-Asset SHA256: 3452d11031050ec65e57f180215b57b9e6d465e3fbedafa8a77ad90885c7d23e
-Runtime SHA256: a318c39c137482dc4687c2973b7ec1c27fc1c20253cf2dc31928f922eab89e8f
+Release: https://github.com/bblanchon/pdfium-binaries/releases/tag/chromium/8152
+Asset: https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8152/pdfium-win-x64.tgz
+Asset SHA256: cee2b0e9990bc67c0721774932961b9dbf2766046c10eec925acd4cfba6fdfe3
+Runtime SHA256: ba884cc5c6f2c3cd7c2ecca9dce36c2e341f78eb586abd691a2bbc017aa9871e
 Import library SHA256: 8842b071d21e96861bd5bd2960c143d8079bce1d7215905e7c4506016ab1fcdd
-Release attestation subject SHA256: 3452d11031050ec65e57f180215b57b9e6d465e3fbedafa8a77ad90885c7d23e
-Release attestation source commit: 2de99cdab0cd84493538ce141342515b95ebb15c
-Attestation verification: gh attestation verify --repo bblanchon/pdfium-binaries succeeded on 2026-10-26
-Local changes: patches/0001-fix-ijg-notice-link.patch (notice link only; no binary/header modifications)
-Security fixes confirmed in branch log: 58e11305710a506ce3369581662eeb14440639cf (570167922 / CVE-2026-110155); ac3cf1684db05bd68338acb84e3823e6feb72b5b and e764cc088a62b5f0510a73bed4e19c88c9af50bc (572237007 / CVE-2026-113212).
+Release attestation subject SHA256: cee2b0e9990bc67c0721774932961b9dbf2766046c10eec925acd4cfba6fdfe3
+Release attestation source commit: 0dc8e9598ab4496f8620043ec2c3f2eabf4eea33
+Attestation verification: gh attestation verify --repo bblanchon/pdfium-binaries succeeded on 2026-11-13
+PDFium branch head at review: 6688c576fd851f4159c6fae39396da50939de110
+Local changes: patches/0001-fix-ijg-notice-link.patch (notice link only; no binary/header modifications). The package's unused fpdfview.h.orig backup is omitted.
+Branch history retains 58e11305710a506ce3369581662eeb14440639cf (CVE-2026-110155) and ac3cf1684db05bd68338acb84e3823e6feb72b5b with e764cc088a62b5f0510a73bed4e19c88c9af50bc (CVE-2026-113212).

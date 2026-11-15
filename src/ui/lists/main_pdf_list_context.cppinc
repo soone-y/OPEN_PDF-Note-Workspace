@@ -91,51 +91,52 @@ static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
         AppendMenuW(menu.get(), MF_STRING, kCmdOpenReadOnly,
                     localization::Text(L"ui.pdf_list.154ade32c630").c_str());
     }
-    if (imageFile) {
-        AppendMenuW(menu.get(), MF_STRING, kCmdConvertImageToPdf,
-                    localization::Text(L"ui.pdf_list.4d1ad08173d8").c_str());
-    }
-    AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu.get(), MF_STRING, kCmdCopyName,
-                localization::Text(L"workspace.context.copy_name").c_str());
-    AppendMenuW(menu.get(), MF_STRING, kCmdReload,
-                localization::Text(L"workspace.context.reload_list").c_str());
-
-    HMENU fileMenu = CreatePopupMenu();
-    if (fileMenu) {
-        ui::context_menu::AppendPathContextMenuItems(fileMenu, {
-            {kCmdOpenExplorer, localization::Text(L"ui.pdf_list.9208055ca154").c_str()},
-            {kCmdShowHierarchy, localization::Text(L"ui.pdf_list.752b401aff9a").c_str(), canShowHierarchy},
-            {kCmdShowPath, localization::Text(L"ui.pdf_list.14a4b0c697e4").c_str()},
-            {kCmdCopyPath, localization::Text(L"ui.pdf_list.9806c16958b1").c_str()},
-        });
-        AppendMenuW(menu.get(), MF_POPUP, reinterpret_cast<UINT_PTR>(fileMenu),
-                    localization::Text(L"menu.context.file").c_str());
+    if (canCloseFile) {
+        AppendMenuW(menu.get(), MF_STRING, kCmdCloseFile,
+                    localization::Text(L"ui.pdf_list.ce4e384de3db").c_str());
     }
 
-    if (canRename || canCloseFile) {
+    if (canRename || imageFile) {
         AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
     }
     if (canRename) {
         AppendMenuW(menu.get(), MF_STRING, kCmdRename,
                     localization::Text(L"ui.pdf_list.b351979601ed").c_str());
     }
-    if (canCloseFile) {
-        AppendMenuW(menu.get(), MF_STRING, kCmdCloseFile,
-                    localization::Text(L"ui.pdf_list.ce4e384de3db").c_str());
+    if (imageFile) {
+        AppendMenuW(menu.get(), MF_STRING, kCmdConvertImageToPdf,
+                    localization::Text(L"ui.pdf_list.4d1ad08173d8").c_str());
+    }
+
+    AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu.get(), MF_STRING, kCmdOpenExplorer,
+                localization::Text(L"ui.pdf_list.9208055ca154").c_str());
+    if (ui::context_menu::PopupMenu locationMenu; locationMenu) {
+        ui::context_menu::AppendPathContextMenuItems(locationMenu.get(), {
+            {kCmdShowHierarchy, localization::Text(L"ui.pdf_list.752b401aff9a").c_str(), canShowHierarchy},
+            {kCmdShowPath, localization::Text(L"ui.pdf_list.14a4b0c697e4").c_str()},
+            {kCmdCopyPath, localization::Text(L"ui.pdf_list.9806c16958b1").c_str()},
+            {kCmdCopyName, localization::Text(L"workspace.context.copy_name").c_str()},
+        });
+        if (!menu.AppendSubmenu(locationMenu, localization::Text(L"menu.context.location").c_str())) return false;
     }
     if (isPinnedTemporaryPath || isTemporaryPath) {
-        AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(menu.get(), MF_STRING,
-                    isPinnedTemporaryPath ? kCmdUnpinTemporaryPath : kCmdPinTemporaryPath,
-                    isPinnedTemporaryPath
-                        ? (localization::Text(L"ui.pdf_list.8ba171ca98b1").c_str())
-                        : (localization::Text(L"ui.pdf_list.664d20d41490").c_str()));
-        if (isTemporaryPath) {
-            AppendMenuW(menu.get(), MF_STRING, kCmdRemoveTemporaryPath,
-                        localization::Text(L"ui.pdf_list.a56d092851ca").c_str());
+        if (ui::context_menu::PopupMenu temporaryMenu; temporaryMenu) {
+            AppendMenuW(temporaryMenu.get(), MF_STRING,
+                        isPinnedTemporaryPath ? kCmdUnpinTemporaryPath : kCmdPinTemporaryPath,
+                        localization::Text(isPinnedTemporaryPath ? L"ui.pdf_list.8ba171ca98b1"
+                                                                 : L"ui.pdf_list.664d20d41490").c_str());
+            if (isTemporaryPath) {
+                AppendMenuW(temporaryMenu.get(), MF_STRING, kCmdRemoveTemporaryPath,
+                            localization::Text(L"ui.pdf_list.a56d092851ca").c_str());
+            }
+            if (!menu.AppendSubmenu(temporaryMenu, localization::Text(L"menu.file.temporary_paths").c_str())) return false;
         }
     }
+
+    AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu.get(), MF_STRING, kCmdReload,
+                localization::Text(L"workspace.context.reload_list").c_str());
     if (canDeleteEmptyClro) {
         AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu.get(), MF_STRING, kCmdDeleteEmptyClro,

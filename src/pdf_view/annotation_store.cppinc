@@ -442,6 +442,8 @@ static void WriteAnnotationJson(std::ostringstream& oss, const Annotation& a) {
     if (a.type == Annotation::Type::TextBox) {
         oss << ",\"writing_mode\":";
         WriteJsonString(oss, TextWritingModeToString(a.writingMode));
+    }
+    if (a.type == Annotation::Type::TextBox || a.type == Annotation::Type::MathBox) {
         const char* backgroundAssistMode = "inherit";
         if (a.backgroundAssistMode == TextBackgroundAssistMode::Off) backgroundAssistMode = "off";
         else if (a.backgroundAssistMode == TextBackgroundAssistMode::Auto) backgroundAssistMode = "auto";
@@ -736,7 +738,8 @@ static bool ParseAnnotation(const AnnotHistoryJsonValue& v, Annotation& out,
     }
     if (out.type != Annotation::Type::TextBox) {
         out.writingMode = TextWritingMode::Horizontal;
-    } else {
+    }
+    if (out.type == Annotation::Type::TextBox || out.type == Annotation::Type::MathBox) {
         std::string backgroundAssistMode;
         if (GetStringField(v, "background_assist_mode", backgroundAssistMode)) {
             if (backgroundAssistMode == "off") out.backgroundAssistMode = TextBackgroundAssistMode::Off;
@@ -1456,10 +1459,12 @@ struct CurrentPdfAnnotationReloadSnapshot {
     }
 };
 
-bool OpenPdfWithAnnotations(HWND owner, const std::wstring& path) {
+[[nodiscard]] static bool OpenPdfWithAnnotationsImpl(HWND owner, const std::wstring& path,
+                                                     const std::wstring& movedFrom) {
     const ULONGLONG startTick = preview_trace::TickNow();
     DocKind previousKind = g_pdf.kind;
     std::wstring previousPath = g_pdf.path;
+    const bool reopeningMovedPdf = !movedFrom.empty() && IsSameDocumentPath(previousPath, movedFrom);
     std::string previousPasswordUtf8 = g_pdf.openPasswordUtf8;
     SecureStringScope previousPasswordScope(&previousPasswordUtf8);
     preview_trace::Append(
@@ -1499,13 +1504,14 @@ bool OpenPdfWithAnnotations(HWND owner, const std::wstring& path) {
             return false;
         }
         if (!SaveAnnotationsIfDirty(owner)) {
-            SaveLastPdfViewInfo();
+            if (!reopeningMovedPdf) SaveLastPdfViewInfo();
             preview_trace::Append(
                 L"OpenPdfWithAnnotations",
                 L"abort=save_annotations_if_dirty_failed elapsed_ms=" + preview_trace::ElapsedMs(startTick));
             return false;
         }
-        SaveLastPdfViewInfo();
+        // The workspace has already saved the old view and moved its record.
+        if (!reopeningMovedPdf) SaveLastPdfViewInfo();
         auto notifyLectureOpened = []() {
             if (g_hMainWnd) {
                 PostMessageW(g_hMainWnd, kMsgLectureContentOpened, 0, 0);
@@ -1520,7 +1526,7 @@ bool OpenPdfWithAnnotations(HWND owner, const std::wstring& path) {
         }
         g_pendingPdfRestore.reset();
         if (IsPdfFile(path)) {
-            QueuePendingPdfRestoreForPath(path, !reopeningCurrentPdf);
+            QueuePendingPdfRestoreForPath(path, !reopeningCurrentPdf && !reopeningMovedPdf);
         }
         if (reopeningCurrentPdf && !forceReloadCurrentPdf) {
             if (!LoadAnnotationsForCurrentPdf(owner)) {
@@ -1660,6 +1666,15 @@ bool OpenPdfWithAnnotations(HWND owner, const std::wstring& path) {
                              SoftNoticeKind::Error);
         return false;
     }
+}
+
+bool OpenPdfWithAnnotations(HWND owner, const std::wstring& path) {
+    return OpenPdfWithAnnotationsImpl(owner, path, L"");
+}
+
+bool OpenMovedPdfWithAnnotations(HWND owner, const std::wstring& source,
+                                 const std::wstring& destination) {
+    return OpenPdfWithAnnotationsImpl(owner, destination, source);
 }
 
 #endif

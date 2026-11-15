@@ -73,9 +73,11 @@ public:
     const NoteTextModel& model() const;
     bool clro_ascii_only() const noexcept { return metadata_.clro_ascii_only; }
     [[nodiscard]] bool SetClroAsciiOnly(bool value) noexcept;
+    bool quote_lazy_continuation() const noexcept { return metadata_.quote_lazy_continuation; }
+    [[nodiscard]] bool SetQuoteLazyContinuation(bool value) noexcept;
 
 private:
-    friend class LocalNoteKernelRegistry;
+    friend class LocalNoteKernel;
     // Retain canonical roots, revisions and undo snapshot coordinates.
     [[nodiscard]] bool RebindOwner(NoteId noteId, NoteMetadata metadata);
     void MaterializeModel() const;

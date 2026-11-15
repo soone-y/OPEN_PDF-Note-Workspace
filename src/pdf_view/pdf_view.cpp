@@ -1,6 +1,7 @@
 // file: pdf_view/pdf_view.cpp
 #include "pdf_view/pdf_view.h"
 #include "pdf_view/render_queue_policy.h"
+#include "pdf_view/scroll_travel.h"
 #include "pdf_view/view_rotation_record.h"
 #include "pdf_view/text_input_accessibility.h"
 #include "pdf_view/textbox_font_update.h"
@@ -8,12 +9,15 @@
 #include "pdf_view/worker_render.h"
 #include "pdf_view/path_multiply.h"
 #include "pdf_view/marker_composite.h"
+#include "pdf_view/magnifier_render.h"
 #include "pdf_view/text_selection_pdfium.h"
 #include "ui/scroll_input_win32.h"
 #include "ui/empty_view_guide.h"
 #include "ui/shortcut_help.h"
 #include "core/annotation_rotation.h"
 #include "ui/quarter_turn_bitmap.h"
+#include "ui/annotation_text_raster.h"
+#include "ui/vertical_text_gdi.h"
 #include "ui/core/main_window_api.h"
 #include "bridge/view_bridge.h"
 #include "core/ui_notify.h"
@@ -112,10 +116,6 @@ static bool BuildTextLayout(int innerWidth, const std::wstring& text, TextLayout
 static std::vector<TextLineLayout> LayoutTextLines(HDC hdc, const std::wstring& text, int maxWidth);
 static int MeasureIdeographicWidth(HDC hdc);
 static void AdjustDxForIdeographicSpace(std::wstring_view text, std::vector<int>& dx, int ideographicWidth);
-static void BuildAdvancesFromCumulative(const std::vector<int>& widths, std::vector<int>& advances);
-static bool BuildAdjustedAdvances(HDC hdc, std::wstring_view text, int ideographicWidth, std::vector<int>& advances);
-static void DrawAdjustedLine(HDC hdc, int x, int y, std::wstring_view line, int ideographicWidth,
-                             std::vector<int>& advances);
 static std::wstring NormalizeTextBoxTextForCommit(std::wstring text);
 static std::vector<std::wstring> SplitTextByNewlines(const std::wstring& text);
 static std::vector<std::wstring> LayoutResultToLines(const TextLayoutResult& layout, const std::wstring& text);
@@ -348,8 +348,8 @@ bool PromptPasswordAndReopenCurrentPdf(HWND owner, const std::wstring& title,
     const bool selectionByText = g_pdf.selectionByText;
     const int selCharAnchor = g_pdf.selCharAnchor;
     const int selCharFocus = g_pdf.selCharFocus;
-    const POINT selStart = g_pdf.selStart;
-    const POINT selEnd = g_pdf.selEnd;
+    const auto selectionAnchorPt = g_pdf.selectionAnchorPt;
+    const auto selectionFocusPt = g_pdf.selectionFocusPt;
 
     SilentDialogOptions options;
     options.title = title;
@@ -391,8 +391,8 @@ bool PromptPasswordAndReopenCurrentPdf(HWND owner, const std::wstring& title,
         g_pdf.selectionByText = selectionByText;
         g_pdf.selCharAnchor = selCharAnchor;
         g_pdf.selCharFocus = selCharFocus;
-        g_pdf.selStart = selStart;
-        g_pdf.selEnd = selEnd;
+        g_pdf.selectionAnchorPt = selectionAnchorPt;
+        g_pdf.selectionFocusPt = selectionFocusPt;
         if (g_hPdfView) {
             InvalidateRect(g_hPdfView, nullptr, FALSE);
         }
@@ -650,6 +650,22 @@ static bool CanonicalizeAnnotation(Annotation& annotation) {
 }
 
 #include "pdf_view/navigation.cppinc"
+
+static empty_view_guide::StartupVisibility g_startupGuideVisibility;
+
+void DismissPdfStartupGuide() {
+    if (!g_startupGuideVisibility.ShouldShow(0)) return;
+    g_startupGuideVisibility.Dismiss();
+    if (g_hPdfView) InvalidateRect(g_hPdfView, nullptr, FALSE);
+}
+
+static bool ShouldShowEmptyViewGuide() {
+    if (!g_currentLecturePath.empty() || !g_currentSessionPath.empty() ||
+        g_pdf.kind != DocKind::None || !g_currentNotePath.empty()) {
+        DismissPdfStartupGuide();
+    }
+    return g_startupGuideVisibility.ShouldShow(g_config.emptyViewGuideMode);
+}
 
 #include "pdf_view/render.cppinc"
 
@@ -2021,6 +2037,7 @@ bool TryBuildCurrentAnnotationSaveSnapshot(std::vector<Annotation>* outAnnotatio
             ann.text = committedText;
             ann.fontName = g_pdf.editFontName;
             ann.fontPt = g_pdf.editFontPt;
+            ann.writingMode = g_pdf.editWritingMode;
             ann.backgroundAssistMode = CurrentTextBoxBackgroundAssistMode();
             FinalizeTextBoxAnnotationLayout(ann);
             if (editingExistingAnnot && CanonicalizeAnnotation(ann)) {
@@ -2121,6 +2138,7 @@ static void CommitTextEditing(HWND hwnd, bool commit) {
             ann.text = g_pdf.editText;
             ann.fontName = g_pdf.editFontName;
             ann.fontPt = g_pdf.editFontPt;
+            ann.writingMode = g_pdf.editWritingMode;
             ann.backgroundAssistMode = CurrentTextBoxBackgroundAssistMode();
             FinalizeTextBoxAnnotationLayout(ann);
             if (editingExistingAnnot && CanonicalizeAnnotation(ann)) {
@@ -2267,39 +2285,6 @@ static void AdjustDxForIdeographicSpace(std::wstring_view text, std::vector<int>
     }
 }
 
-static void BuildAdvancesFromCumulative(const std::vector<int>& widths, std::vector<int>& advances) {
-    advances.resize(widths.size());
-    int prev = 0;
-    for (size_t i = 0; i < widths.size(); ++i) {
-        advances[i] = widths[i] - prev;
-        prev = widths[i];
-    }
-}
-
-static bool BuildAdjustedAdvances(HDC hdc, std::wstring_view text, int ideographicWidth, std::vector<int>& advances) {
-    advances.clear();
-    if (text.empty()) return false;
-    std::vector<int> dx(text.size());
-    SIZE sz{};
-    if (!GetTextExtentExPointW(hdc, text.data(), static_cast<int>(text.size()),
-                               std::numeric_limits<int>::max(), nullptr, dx.data(), &sz)) {
-        return false;
-    }
-    AdjustDxForIdeographicSpace(text, dx, ideographicWidth);
-    BuildAdvancesFromCumulative(dx, advances);
-    return true;
-}
-
-static void DrawAdjustedLine(HDC hdc, int x, int y, std::wstring_view line, int ideographicWidth,
-                             std::vector<int>& advances) {
-    if (line.empty()) return;
-    if (BuildAdjustedAdvances(hdc, line, ideographicWidth, advances)) {
-        ExtTextOutW(hdc, x, y, 0, nullptr, line.data(), static_cast<UINT>(line.size()), advances.data());
-    } else {
-        TextOutW(hdc, x, y, line.data(), static_cast<int>(line.size()));
-    }
-}
-
 static std::vector<TextLineLayout> LayoutTextLines(HDC hdc, const std::wstring& text, int maxWidth) {
     std::vector<TextLineLayout> lines;
     if (maxWidth <= 0) return lines;
@@ -2412,6 +2397,16 @@ static void ReflowMovedTextBox(Annotation& ann) {
     }
     const bool canonicalInput = !ann.projectedCoordinates;
     if (canonicalInput) ann = ProjectAnnotationForView(ann);
+    if (ann.writingMode == TextWritingMode::VerticalRl) {
+        TextBoxEditGeometry geometry;
+        if (MeasureTextBoxEditGeometry(ann, geometry)) {
+            const auto& b = geometry.bounds;
+            annotation_rotation::SetContentBounds(ann, {b.left, b.top}, b.right - b.left, b.top - b.bottom);
+            ann.textLines.clear();
+        }
+        if (canonicalInput) (void)CanonicalizeAnnotation(ann);
+        return;
+    }
     const auto origin = annotation_rotation::ContentOrigin(ann);
     const auto& page = g_pdf.pages[static_cast<size_t>(ann.pageIndex)];
     double availableWidth = page.widthPt - origin.x;
@@ -2543,13 +2538,13 @@ struct TextBoxRasterKey {
     int fontPx = 0; // Same high-DPI integer font height used by layout.
     int wPt1000 = 0;
     int hPt1000 = 0;
-    COLORREF color = 0;
     int rotation = 0;
+    bool vertical = false;
     bool operator==(const TextBoxRasterKey& o) const {
         return fontPx == o.fontPx &&
                wPt1000 == o.wPt1000 &&
                hPt1000 == o.hPt1000 &&
-               color == o.color && rotation == o.rotation &&
+               rotation == o.rotation && vertical == o.vertical &&
                fontName == o.fontName &&
                renderText == o.renderText;
     }
@@ -2568,13 +2563,13 @@ struct TextBoxRasterKeyHash {
         h = HashCombine(h, std::hash<int>{}(k.wPt1000));
         h = HashCombine(h, std::hash<int>{}(k.hPt1000));
         h = HashCombine(h, std::hash<int>{}(k.rotation));
-        h = HashCombine(h, std::hash<unsigned long>{}(static_cast<unsigned long>(k.color)));
+        h = HashCombine(h, std::hash<bool>{}(k.vertical));
         return h;
     }
 };
 
 struct TextBoxRasterEntry {
-    HBITMAP hbmp = nullptr; // 32bpp premultiplied BGRA
+    HBITMAP hbmp = nullptr; // 32bpp grayscale coverage
     int w = 0;
     int h = 0;
     uint64_t lastUsed = 0;
@@ -2595,6 +2590,7 @@ static void FreeTextBoxRasterEntry(TextBoxRasterEntry& e) {
 }
 
 static std::wstring BuildTextBoxRenderText(const Annotation& ann) {
+    if (ann.writingMode == TextWritingMode::VerticalRl) return ann.text;
     if (!ann.textLines.empty()) {
         std::wstring out;
         size_t total = 0;
@@ -2633,9 +2629,9 @@ static TextBoxRasterKey BuildTextBoxRasterKey(const Annotation& ann) {
     double wPt = extent.width;
     double hPt = extent.height;
     k.rotation = ann.contentRotation;
+    k.vertical = ann.writingMode == TextWritingMode::VerticalRl;
     k.wPt1000 = static_cast<int>(std::lround(wPt * 1000.0));
     k.hPt1000 = static_cast<int>(std::lround(hPt * 1000.0));
-    k.color = ann.color;
     return k;
 }
 
@@ -2665,118 +2661,9 @@ static void ClearTextBoxRasterCache() {
 
 static bool BuildTextBoxRaster(HDC refHdc, const TextBoxRasterKey& key, TextBoxRasterEntry& out) {
     FreeTextBoxRasterEntry(out);
-    if (key.wPt1000 <= 0 || key.hPt1000 <= 0) return false;
-    const double wPt = key.wPt1000 / 1000.0;
-    const double hPt = key.hPt1000 / 1000.0;
-    int wPx = std::max(1, static_cast<int>(std::lround(wPt * kTextBoxStableRasterDpi / 72.0)));
-    int hPx = std::max(1, static_cast<int>(std::lround(hPt * kTextBoxStableRasterDpi / 72.0)));
-    BITMAPINFO bmi{};
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = wPx;
-    bmi.bmiHeader.biHeight = -hPx; // top-down
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-    void* bits = nullptr;
-    HBITMAP hbmp = CreateDIBSection(refHdc, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
-    if (!hbmp || !bits) {
-        if (hbmp) DeleteObject(hbmp);
-        return false;
-    }
-    std::fill_n(static_cast<DWORD*>(bits), static_cast<size_t>(wPx) * hPx, 0);
-
-    HDC mem = CreateCompatibleDC(refHdc);
-    if (!mem) {
-        DeleteObject(hbmp);
-        return false;
-    }
-    HGDIOBJ oldBmp = SelectObject(mem, hbmp);
-
-    LOGFONTW lf{};
-    lf.lfHeight = -key.fontPx;
-    lf.lfQuality = ANTIALIASED_QUALITY; // grayscale (avoid ClearType color fringes)
-    lf.lfCharSet = DEFAULT_CHARSET;
-    if (!key.fontName.empty()) {
-        wcsncpy_s(lf.lfFaceName, key.fontName.c_str(), LF_FACESIZE - 1);
-    }
-    HFONT hFont = CreateFontIndirectW(&lf);
-    HGDIOBJ oldFont = nullptr;
-    if (hFont) oldFont = SelectObject(mem, hFont);
-
-    SetBkMode(mem, TRANSPARENT);
-    SetTextColor(mem, RGB(255, 255, 255)); // build coverage mask in RGB
-
-    TEXTMETRICW tm{};
-    GetTextMetricsW(mem, &tm);
-    const int lineHeight = std::max(1, static_cast<int>(tm.tmHeight));
-
-    const int padPx = std::max(1, static_cast<int>(std::lround(kTextPadPx * kTextBoxStableRasterDpi / kDpi)));
-    const int x0 = padPx;
-    int y = padPx;
-    const int bottomLimit = hPx - padPx;
-
-    int ideographicWidth = MeasureIdeographicWidth(mem);
-    std::vector<int> advances;
-
-    // Render pre-wrapped lines (each '\n' is a new line).
-    size_t start = 0;
-    while (start <= key.renderText.size()) {
-        size_t nl = key.renderText.find(L'\n', start);
-        size_t end = (nl == std::wstring::npos) ? key.renderText.size() : nl;
-        std::wstring_view line(key.renderText.data() + start, end - start);
-        if (y >= bottomLimit) break;
-        if (!line.empty()) {
-            DrawAdjustedLine(mem, x0, y, line, ideographicWidth, advances);
-        }
-        y += lineHeight;
-        if (nl == std::wstring::npos) break;
-        start = nl + 1;
-        if (start == key.renderText.size()) {
-            // Trailing newline -> draw a final empty line.
-            if (y < bottomLimit) y += lineHeight;
-            break;
-        }
-    }
-
-    if (oldFont) SelectObject(mem, oldFont);
-    if (hFont) DeleteObject(hFont);
-    SelectObject(mem, oldBmp);
-    DeleteDC(mem);
-
-    // Convert the grayscale mask (white-on-black) into premultiplied color with alpha.
-    DWORD* px = static_cast<DWORD*>(bits);
-    BYTE rC = GetRValue(key.color);
-    BYTE gC = GetGValue(key.color);
-    BYTE bC = GetBValue(key.color);
-    for (int i = 0; i < wPx * hPx; ++i) {
-        DWORD v = px[i];
-        BYTE b = static_cast<BYTE>(v & 0xFF);
-        BYTE g = static_cast<BYTE>((v >> 8) & 0xFF);
-        BYTE r = static_cast<BYTE>((v >> 16) & 0xFF);
-        BYTE a = std::max(r, std::max(g, b));
-        if (a == 0) {
-            px[i] = 0;
-            continue;
-        }
-        BYTE rT = static_cast<BYTE>((static_cast<unsigned int>(rC) * a + 127) / 255);
-        BYTE gT = static_cast<BYTE>((static_cast<unsigned int>(gC) * a + 127) / 255);
-        BYTE bT = static_cast<BYTE>((static_cast<unsigned int>(bC) * a + 127) / 255);
-        px[i] = (static_cast<DWORD>(a) << 24) |
-                (static_cast<DWORD>(rT) << 16) |
-                (static_cast<DWORD>(gT) << 8) |
-                (static_cast<DWORD>(bT));
-    }
-
-    if (key.rotation != 0) {
-        HBITMAP rotated = ui::RotateTopDownDibQuarterTurns(refHdc, hbmp, key.rotation, &wPx, &hPx);
-        if (!rotated) { DeleteObject(hbmp); return false; }
-        DeleteObject(hbmp);
-        hbmp = rotated;
-    }
-    out.hbmp = hbmp;
-    out.w = wPx;
-    out.h = hPx;
-    return true;
+    out.hbmp = annotation_text::BuildMask(refHdc, key.wPt1000 / 1000.0, key.hPt1000 / 1000.0,
+        key.fontPx, key.fontName, key.renderText, key.rotation, key.vertical, true, &out.w, &out.h);
+    return out.hbmp != nullptr;
 }
 
 static const TextBoxRasterEntry* GetTextBoxRaster(HDC refHdc, const Annotation& ann) {
@@ -2857,29 +2744,11 @@ static void DrawTextBoxStable(HDC hdc, HDC scratchDc, const RECT& r, const Annot
     const TextBoxRasterEntry* ras = GetTextBoxRaster(hdc, ann);
     if (!ras || !ras->hbmp || ras->w <= 0 || ras->h <= 0) return;
 
-    int w = r.right - r.left;
-    int h = r.bottom - r.top;
-    if (w <= 0 || h <= 0) return;
-    int saved = SaveDC(hdc);
-    IntersectClipRect(hdc, r.left, r.top, r.right, r.bottom);
-
-    int oldMode = SetStretchBltMode(hdc, HALFTONE);
-    POINT oldOrg{};
-    SetBrushOrgEx(hdc, 0, 0, &oldOrg);
-
     HGDIOBJ oldBmp = SelectObject(scratchDc, ras->hbmp);
-    BLENDFUNCTION bf{ AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
-    AlphaBlend(hdc, r.left, r.top, w, h, scratchDc, 0, 0, ras->w, ras->h, bf);
-    BYTE boostAlpha = TextBoxLowZoomBoostAlpha(ann);
-    if (boostAlpha > 0) {
-        BLENDFUNCTION boost{ AC_SRC_OVER, 0, boostAlpha, AC_SRC_ALPHA };
-        AlphaBlend(hdc, r.left, r.top, w, h, scratchDc, 0, 0, ras->w, ras->h, boost);
-    }
+    if (!oldBmp) return;
+    (void)annotation_text::BlendMask(hdc, r, scratchDc, ras->w, ras->h,
+        ann.color, TextBoxLowZoomBoostAlpha(ann));
     SelectObject(scratchDc, oldBmp);
-
-    SetStretchBltMode(hdc, oldMode);
-    SetBrushOrgEx(hdc, oldOrg.x, oldOrg.y, nullptr);
-    if (saved != 0) RestoreDC(hdc, saved);
 }
 
 static bool BuildTextLayout(int innerWidth, const std::wstring& text, TextLayoutResult* out) {
@@ -2903,7 +2772,13 @@ static bool BuildTextLayout(int innerWidth, const std::wstring& text, TextLayout
     HGDIOBJ oldFont = nullptr;
     if (hFont) oldFont = SelectObject(hdc, hFont);
     GetTextMetricsW(hdc, &out->tm);
-    out->lines = LayoutTextLines(hdc, text, innerWidth);
+    out->vertical = g_pdf.editWritingMode == TextWritingMode::VerticalRl;
+    if (out->vertical) {
+        const int cell = std::max(1, static_cast<int>(out->tm.tmHeight));
+        const int height = PtToLayoutPx(std::abs(g_pdf.editY1 - g_pdf.editY2)) - 2 * LayoutPadPx();
+        out->verticalLayout = vertical_text::Build(text, std::max(1, height / cell));
+        out->lines = {{0, text.size(), {}}};
+    } else out->lines = LayoutTextLines(hdc, text, innerWidth);
     if (oldFont) SelectObject(hdc, oldFont);
     if (hFont) DeleteObject(hFont);
     ReleaseDC(g_hPdfView, hdc);
@@ -3062,6 +2937,11 @@ static size_t HitTestLineForX(const TextLineLayout& line, int x) {
 }
 
 static size_t HitTestCaretIndex(const TextLayoutResult& layout, const RECT& inner, const POINT& pt) {
+    if (layout.vertical) {
+        const int cell = std::max(1, static_cast<int>(layout.tm.tmHeight));
+        return vertical_text::Hit(layout.verticalLayout, (inner.right - pt.x) / cell,
+                                  static_cast<double>(pt.y - inner.top) / cell);
+    }
     if (layout.lines.empty()) return 0;
     int relX = pt.x - inner.left;
     int relY = pt.y - inner.top;
@@ -3080,6 +2960,13 @@ static bool MoveCaretVertical(int direction) {
     if (!EnsureEditLayoutCache(true)) return false;
     const auto& layout = g_pdf.editLayout;
     if (layout.lines.empty()) return false;
+    if (layout.vertical) {
+        const auto p = vertical_text::Caret(layout.verticalLayout, EditCaretDisplayIndex());
+        const int column = p.column + direction;
+        if (column < 0 || column >= static_cast<int>(layout.verticalLayout.columns.size())) return false;
+        g_pdf.editCaret = DisplayIndexToEditIndex(vertical_text::Hit(layout.verticalLayout, column, p.row));
+        return true;
+    }
     size_t displayCaret = EditCaretDisplayIndex();
     size_t lineIndex = FindLineForCaret(layout.lines, displayCaret);
     const auto& line = layout.lines[lineIndex];
@@ -3100,6 +2987,12 @@ static bool MoveCaretToLineBoundary(bool toEnd) {
     if (!EnsureEditLayoutCache(true)) return false;
     const auto& layout = g_pdf.editLayout;
     if (layout.lines.empty()) return false;
+    if (layout.vertical) {
+        const auto p = vertical_text::Caret(layout.verticalLayout, EditCaretDisplayIndex());
+        const auto& column = layout.verticalLayout.columns[p.column];
+        g_pdf.editCaret = DisplayIndexToEditIndex(column.start + (toEnd ? column.length : 0));
+        return true;
+    }
     size_t displayCaret = EditCaretDisplayIndex();
     size_t lineIndex = FindLineForCaret(layout.lines, displayCaret);
     const auto& line = layout.lines[lineIndex];
@@ -3115,6 +3008,12 @@ static bool IsCaretAtLineBoundary(bool toEnd) {
     if (!EnsureEditLayoutCache(true)) return false;
     const auto& layout = g_pdf.editLayout;
     if (layout.lines.empty()) return false;
+    if (layout.vertical) {
+        const size_t index = EditCaretDisplayIndex();
+        const auto p = vertical_text::Caret(layout.verticalLayout, index);
+        const auto& column = layout.verticalLayout.columns[p.column];
+        return index == column.start + (toEnd ? column.length : 0);
+    }
     size_t displayCaret = EditCaretDisplayIndex();
     size_t lineIndex = FindLineForCaret(layout.lines, displayCaret);
     const auto& line = layout.lines[lineIndex];
@@ -3422,6 +3321,17 @@ static bool InlineCaretClientPoint(POINT& out, int* outLineHeight) {
     }
     const auto& layout = g_pdf.editLayout;
     if (layout.lines.empty()) return false;
+    if (layout.vertical) {
+        const auto p = vertical_text::Caret(layout.verticalLayout, EditCaretDisplayIndex());
+        const int cell = std::max(1, static_cast<int>(layout.tm.tmHeight));
+        const double scale = LayoutToClientScale();
+        const int right = PtToLayoutPx(std::abs(g_pdf.editX2 - g_pdf.editX1)) - LayoutPadPx();
+        out = {outer.left + static_cast<LONG>(std::lround((right - (p.column + 1) * cell) * scale)),
+               outer.top + static_cast<LONG>(std::lround((LayoutPadPx() + p.row * cell) * scale))};
+        out = EditingLogicalToClient(out);
+        if (outLineHeight) *outLineHeight = std::max(1, static_cast<int>(std::lround(cell * scale)));
+        return true;
+    }
     size_t caretLogical = EditCaretDisplayIndex();
     size_t lineIndex = FindLineForCaret(layout.lines, caretLogical);
     const auto& line = layout.lines[lineIndex];
@@ -3600,6 +3510,25 @@ static void ForceImeComplete(HWND hwnd, bool commit) {
     int lineHeight = std::max(1, static_cast<int>(tm.tmHeight));
     TextLayoutResult layout;
     layout.tm = tm;
+    if (box.writingMode == TextWritingMode::VerticalRl) {
+        layout.vertical = true;
+        const int height = std::max(1, PtToLayoutPx(maxHeightPt) - padPx * 2);
+        layout.verticalLayout = vertical_text::Build(text, std::max(1, height / lineHeight));
+        layout.lines.push_back({0, text.size(), {}});
+        const double width = std::min(maxWidthPt,
+            LayoutPxToPt(static_cast<int>(layout.verticalLayout.columns.size()) * lineHeight + padPx * 2));
+        const double heightPt = std::min(maxHeightPt,
+            LayoutPxToPt(layout.verticalLayout.rows * lineHeight + padPx * 2));
+        const auto extent = annotation_rotation::ContentExtent(box);
+        const double newLeft = box.contentRotation == 0 ? std::max(0.0, left + extent.width - width) : left;
+        out.bounds = {newLeft, top, newLeft + width, top - heightPt};
+        out.innerWidth = std::max(1, PtToLayoutPx(width) - padPx * 2);
+        out.layout = std::move(layout);
+        if (oldFont) SelectObject(hdc, oldFont);
+        if (hFont) DeleteObject(hFont);
+        ReleaseDC(g_hPdfView, hdc);
+        return true;
+    }
     layout.lines = LayoutTextLines(hdc, text, innerPxW);
     if (layout.lines.empty()) layout.lines.push_back({ 0, 0, {} });
     int maxLineW = 0;
@@ -3655,6 +3584,7 @@ static void RecalcEditingTextboxSize(bool includeComp) {
     Annotation box;
     box.pageIndex = g_pdf.editPage;
     box.contentRotation = g_pdf.editContentRotation;
+    box.writingMode = g_pdf.editWritingMode;
     annotation_rotation::SetContentBounds(box,
         {std::min(g_pdf.editX1, g_pdf.editX2), std::max(g_pdf.editY1, g_pdf.editY2)},
         std::abs(g_pdf.editX2 - g_pdf.editX1), std::abs(g_pdf.editY2 - g_pdf.editY1));
@@ -3705,6 +3635,17 @@ static void RecalcEditingTextboxSize(bool includeComp) {
     const RECT inner{pad, pad, std::max(pad + 1, PtToLayoutPx(width) - pad),
                                std::max(pad + 1, PtToLayoutPx(height) - pad)};
     const size_t caret = std::min(HitTestCaretIndex(geometry.layout, inner, local), box.text.size());
+    if (geometry.layout.vertical) {
+        const auto p = vertical_text::Caret(geometry.layout.verticalLayout, caret);
+        const int cell = std::max(1, static_cast<int>(geometry.layout.tm.tmHeight));
+        lineHeight = std::max(1, static_cast<int>(std::lround(cell * scale)));
+        const POINT at{logical.left + static_cast<LONG>(std::lround((inner.right - (p.column + 1) * cell) * scale)),
+                       logical.top + static_cast<LONG>(std::lround((pad + p.row * cell) * scale))};
+        start = TextBoxLogicalToClient({at.x + 2, at.y}, bounds, logical, box.contentRotation);
+        end = TextBoxLogicalToClient({at.x + std::max(2, lineHeight - 2), at.y}, bounds, logical, box.contentRotation);
+        if (caretIndex) *caretIndex = caret;
+        return true;
+    }
     const size_t row = FindLineForCaret(geometry.layout.lines, caret);
     const auto& line = geometry.layout.lines[row];
     const int x = ColumnWidthForLine(line, caret > line.start ? std::min(caret - line.start, line.len) : 0);
@@ -3788,6 +3729,7 @@ void SetModeButtons() {
     if (g_hChkTextAutoWrap)
         SendMessageW(g_hChkTextAutoWrap, BM_SETCHECK,
                      g_textBoxAutoWrap ? BST_CHECKED : BST_UNCHECKED, 0);
+    SyncToolbarTextWritingMode();
     if (g_hChkPanMouseWheelZoom)
         SendMessageW(g_hChkPanMouseWheelZoom, BM_SETCHECK,
                      g_config.panMouseWheelZoom ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -3823,18 +3765,23 @@ void SetModeButtons() {
 }
 
 
-static bool RotatePdfPageViews(HWND pdfWnd, int quarterTurns, bool reset, bool allPages) {
+enum class PdfPageRotationScope { Current, Remaining, All };
+
+[[nodiscard]] static bool RotatePdfPageViews(HWND pdfWnd, int quarterTurns, bool reset, PdfPageRotationScope scope,
+                                            PdfPageRotationMode mode) {
     if (!pdfWnd || g_pdf.kind != DocKind::Pdf || IsSaveTransactionRunning()) return false;
     CommitActiveTextEditing(true);
     if (g_pdf.editingText) return false;
     const int index = PageAtCurrentView();
     if (index < 0 || index >= static_cast<int>(g_pdf.pages.size()) ||
         g_pdf.pages.size() != static_cast<size_t>(g_pdf.pageCount)) return false;
-    const size_t first = allPages ? 0 : static_cast<size_t>(index);
-    const size_t last = allPages ? g_pdf.pages.size() : first + 1;
+    const size_t first = scope == PdfPageRotationScope::All ? 0 : static_cast<size_t>(index);
+    const size_t last = scope == PdfPageRotationScope::Current ? first + 1 : g_pdf.pages.size();
     const int delta = page_rotation::Normalize(quarterTurns);
-    const auto nextTurn = [reset, delta](const PageCache& page) {
-        return reset ? 0 : page_rotation::Normalize(page.viewRotation + delta);
+    const bool persist = mode == PdfPageRotationMode::Saved;
+    const auto nextTurn = [reset, delta, persist](size_t i) {
+        if (reset) return persist ? 0 : g_pdf.savedPageRotations[i];
+        return page_rotation::Normalize(g_pdf.pageViewRotations[i] + delta);
     };
     bool changed = false;
     // Preflight metadata already available from layout; do not load every PDF
@@ -3844,14 +3791,20 @@ static bool RotatePdfPageViews(HWND pdfWnd, int quarterTurns, bool reset, bool a
         if (target.index != static_cast<int>(i) || !std::isfinite(target.canonicalWidthPt) ||
             !std::isfinite(target.canonicalHeightPt) || target.canonicalWidthPt <= 0 || target.canonicalHeightPt <= 0)
             return false;
-        changed = changed || nextTurn(target) != target.viewRotation;
+        changed = changed || nextTurn(i) != target.viewRotation;
+    }
+    if (changed && !EnsurePdfPageCoordinates(index)) return false;
+    if (persist) {
+        auto savedTurns = g_pdf.savedPageRotations;
+        for (size_t i = first; i < last; ++i) savedTurns[i] = nextTurn(i);
+        if (savedTurns != g_pdf.savedPageRotations) {
+            if (!TrySaveLastPdfViewInfo(savedTurns)) return false;
+            g_pdf.savedPageRotations = std::move(savedTurns);
+        }
     }
     if (!changed) return true;
-    if (!EnsurePdfPageCoordinates(index)) return false;
-    // Allocate the session vector before changing any page in the batch.
-    g_pdf.pageViewRotations.resize(static_cast<size_t>(g_pdf.pageCount), 0);
     const auto& page = g_pdf.pages[static_cast<size_t>(index)];
-    const int next = nextTurn(page);
+    const int next = nextTurn(static_cast<size_t>(index));
     RECT client{};
     GetClientRect(pdfWnd, &client);
     const int viewW = client.right - client.left, viewH = client.bottom - client.top;
@@ -3879,7 +3832,7 @@ static bool RotatePdfPageViews(HWND pdfWnd, int quarterTurns, bool reset, bool a
     if (GetCapture() == pdfWnd) ReleaseCapture();
     for (size_t i = first; i < last; ++i) {
         auto& target = g_pdf.pages[i];
-        const int rotation = nextTurn(target);
+        const int rotation = nextTurn(i);
         g_pdf.pageViewRotations[i] = rotation;
         if (rotation == target.viewRotation) continue;
         target.viewRotation = rotation;
@@ -3902,16 +3855,20 @@ static bool RotatePdfPageViews(HWND pdfWnd, int quarterTurns, bool reset, bool a
     ClampPdfScroll(viewH, viewW);
     UpdatePdfVirtualScrollCaches(pdfWnd);
     InvalidateRect(pdfWnd, nullptr, FALSE);
-    SaveLastPdfViewInfo();
     return true;
 }
 
-bool RotateCurrentPdfPageView(HWND pdfWnd, int quarterTurns, bool reset) {
-    return RotatePdfPageViews(pdfWnd, quarterTurns, reset, false);
+bool RotateCurrentPdfPageView(HWND pdfWnd, int quarterTurns, bool reset, PdfPageRotationMode mode) {
+    return RotatePdfPageViews(pdfWnd, quarterTurns, reset, PdfPageRotationScope::Current, mode);
 }
 
-bool RotateAllPdfPagesView(HWND pdfWnd, int quarterTurns, bool reset) {
-    return RotatePdfPageViews(pdfWnd, quarterTurns, reset, true);
+bool RotateAllPdfPagesView(HWND pdfWnd, int quarterTurns, bool reset, PdfPageRotationMode mode) {
+    return RotatePdfPageViews(pdfWnd, quarterTurns, reset, PdfPageRotationScope::All, mode);
+}
+
+bool RotateRemainingPdfPagesView(HWND pdfWnd, int quarterTurns, bool reset, PdfPageRotationMode mode) {
+    return RotatePdfPageViews(pdfWnd, quarterTurns, reset, PdfPageRotationScope::Remaining, mode);
 }
 
 #include "pdf_view/page_rotation_tests.cppinc"
+#include "pdf_view/annotation_page_target_tests.cppinc"

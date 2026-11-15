@@ -299,6 +299,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     }}
     .flowchart-arrow {{ color: var(--accent); font-size: 1.3em; font-weight: 700; }}
     .flowchart-branch {{ color: var(--text-muted); font-size: 0.82em; font-weight: 600; }}
+    .flowchart-steps {{ list-style: none; margin: 0; padding: 0; }}
+    .flowchart-steps > li {{ margin: 0; }}
+    .flowchart-steps .flowchart-node {{ display: block; max-width: none; }}
+    .flowchart-next {{ display: block; padding: 4px 12px; color: var(--text-muted); }}
+    .flowchart-options {{ list-style: none; margin: 8px 0 0 12px; padding: 0 0 0 12px; border-left: 2px dashed var(--border-color); }}
+    .flowchart-options li {{ display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 8px; margin: 8px 0; }}
+    .flowchart-options .flowchart-branch {{ padding-top: 10px; }}
 
     blockquote {{
       border-left: 4px solid var(--note-border);
@@ -831,6 +838,38 @@ def render_mermaid_flowchart(lines: list[str]) -> str | None:
                 parts.append("<br>")
                 cursor = tag_start + len(matched_tag)
         return f'<span class="flowchart-node">{"".join(parts)}</span>'
+
+    # A single main sequence with side options is a procedure, not a list of
+    # independent edges. Render each node once, keeping options at their source.
+    main_edges = [(source, target) for source, target, label in edges if label is None]
+    main_nodes = {node for edge in main_edges for node in edge}
+    next_nodes = dict(main_edges)
+    roots = main_nodes - {target for _, target in main_edges}
+    option_edges = [(source, target, label) for source, target, label in edges if label is not None]
+    option_targets = [target for _, target, _ in option_edges]
+    sequence: list[str] = []
+    if (len(roots) == 1 and len(next_nodes) == len(main_edges)
+            and len(main_edges) == len(main_nodes) - 1
+            and all(source in main_nodes and target not in main_nodes for source, target, _ in option_edges)
+            and len(set(option_targets)) == len(option_targets)):
+        current = next(iter(roots))
+        while current not in sequence:
+            sequence.append(current)
+            if current not in next_nodes:
+                break
+            current = next_nodes[current]
+    if sequence and len(sequence) == len(main_nodes):
+        step_html = []
+        for index, node in enumerate(sequence):
+            arrow = '<span class="flowchart-next" aria-hidden="true">↓</span>' if index else ""
+            options = [
+                f'<li><span class="flowchart-branch">{html.escape(label)}</span>{node_html(node_labels.get(target, target))}</li>'
+                for source, target, label in option_edges if source == node
+            ]
+            options_html = '<ul class="flowchart-options">' + "".join(options) + '</ul>' if options else ""
+            step_html.append(f'<li>{arrow}{node_html(node_labels.get(node, node))}{options_html}</li>')
+        return ('<figure class="flowchart-diagram" aria-label="フロー図"><figcaption>フロー図</figcaption>'
+                '<ol class="flowchart-steps">' + "".join(step_html) + '</ol></figure>')
 
     edge_html = []
     for source, target, branch_label in edges:

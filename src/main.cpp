@@ -15,6 +15,7 @@
 #include "file_output/file_output.h"
 #include "recovery/stage_recovery.h"
 #include "search/search.h"
+#include "search/search_process.h"
 #include "lecture_order/lecture_order.h"
 #include "workspace/workspace_memo.h"
 #include "settings/settings.h"
@@ -43,9 +44,11 @@
 #include "app/main_close_policy.h"
 #include "ui/menus/main_debug_menu.h"
 #include "ui/dialogs/write_checks_dialog.h"
+#include "ui/dialogs/pdf_pair_finder.h"
 #include "ui/dialogs/pending_write_retry.h"
 #include "diagnostics/write_checks.h"
 #include "ui/menus/context_menu_helpers.h"
+#include "core/identity_path_scope.h"
 #include "app/main_escape_backup.h"
 
 bool HandleAnnotToolShortcutInLoop(HWND owner, const MSG& msg);
@@ -182,7 +185,7 @@ static void OnPdfSelChange(HWND hWnd);
 static void OnNoteSelChange(HWND hWnd);
 static bool FocusAutoOpenedSoleNoteForEditing();
 void ReloadSessionsAndSelect(const std::wstring& lecturePath,
-                                    const std::wstring& desiredName,
+                                    const std::wstring& desiredPath,
                                     bool reopenFiles);
 void RefreshStatusDisplay(HWND hWnd);
 int CurrentLectureIndex();
@@ -768,18 +771,6 @@ static std::wstring FilenameOrPath(const std::filesystem::path& path) {
     return path.wstring();
 }
 
-static std::wstring RelativeOrPathForDisplay(const std::filesystem::path& path,
-                                             const std::filesystem::path& root) {
-    std::error_code ec;
-    if (!root.empty()) {
-        auto rel = std::filesystem::relative(path, root, ec);
-        if (!ec && !rel.empty()) {
-            return rel.wstring();
-        }
-    }
-    return FilenameOrPath(path);
-}
-
 std::wstring DirectFilesSessionLabel() {
     return localization::Text(L"main.ui.edaca69ae4a6").c_str();
 }
@@ -792,29 +783,29 @@ static bool IsDirectFilesSessionPath(const std::wstring& sessionPath,
 
 std::wstring LectureDisplayLabelForPath(const std::wstring& lecturePath,
                                                const std::vector<std::wstring>& lecturePaths) {
-    std::wstring base = TempExternalLectureLabel(lecturePath);
-    if (!IsTempExternalLecturePath(lecturePath)) {
-        std::filesystem::path path(lecturePath);
-        base = FilenameOrPath(path);
-    }
+    const auto makeBase = [](const std::wstring& path) {
+        return IsTempExternalLecturePath(path) ? TempExternalLectureLabel(path)
+                                               : FilenameOrPath(std::filesystem::path(path));
+    };
+    const auto base = makeBase(lecturePath);
+    const auto parent = workspace_display::ParentSuffixForLabel(lecturePath, base, lecturePaths,
+        makeBase, [](const std::wstring& path) -> const auto& { return path; });
+    return workspace_display::WithParentSuffix(base, parent);
+}
 
-    size_t duplicates = 0;
-    std::wstring baseKey = ToLowerAscii(base);
-    for (const auto& item : lecturePaths) {
-        std::wstring other = TempExternalLectureLabel(item);
-        if (!IsTempExternalLecturePath(item)) {
-            other = FilenameOrPath(std::filesystem::path(item));
-        }
-        if (ToLowerAscii(other) == baseKey) {
-            ++duplicates;
-        }
-    }
-    if (duplicates <= 1) return base;
+static std::wstring SessionBaseLabel(const SessionEntry& session) {
+    return session.displayName.empty() ? FilenameOrPath(std::filesystem::path(session.path))
+                                       : session.displayName;
+}
 
-    std::filesystem::path path(lecturePath);
-    std::wstring parent = path.parent_path().wstring();
-    if (parent.empty()) return base;
-    return base + L" [" + parent + L"]";
+[[nodiscard]] static std::wstring NestedSessionLabel(const SessionEntry& session,
+                                                     const std::filesystem::path& lecture) {
+    if (lecture.empty()) return {};
+    auto path = session.path;
+    std::replace(path.begin(), path.end(), L'/', L'\\');
+    const auto relative = std::filesystem::path(path).lexically_relative(lecture);
+    if (!relative.has_parent_path() || relative.begin()->wstring() == L"..") return {};
+    return relative.wstring();
 }
 
 std::wstring SessionDisplayLabelForEntry(const SessionEntry& session,
@@ -823,26 +814,14 @@ std::wstring SessionDisplayLabelForEntry(const SessionEntry& session,
     if (IsDirectFilesSessionPath(session.path, lecturePath)) {
         return DirectFilesSessionLabel();
     }
+    auto lecture = lecturePath;
+    std::replace(lecture.begin(), lecture.end(), L'/', L'\\');
+    if (auto nested = NestedSessionLabel(session, lecture); !nested.empty()) return nested;
 
-    std::wstring base = session.displayName.empty()
-        ? FilenameOrPath(std::filesystem::path(session.path))
-        : session.displayName;
-    size_t duplicates = 0;
-    std::wstring baseKey = ToLowerAscii(base);
-    for (const auto& item : sessions) {
-        std::wstring other = item.displayName.empty()
-            ? FilenameOrPath(std::filesystem::path(item.path))
-            : item.displayName;
-        if (ToLowerAscii(other) == baseKey) {
-            ++duplicates;
-        }
-    }
-    if (duplicates <= 1) return base;
-
-    std::filesystem::path path(session.path);
-    std::wstring parent = path.parent_path().wstring();
-    if (parent.empty()) return base;
-    return base + L" [" + parent + L"]";
+    const auto base = SessionBaseLabel(session);
+    const auto parent = workspace_display::ParentSuffixForLabel(session.path, base, sessions,
+        SessionBaseLabel, [](const SessionEntry& item) -> const auto& { return item.path; });
+    return workspace_display::WithParentSuffix(base, parent);
 }
 
 std::vector<std::wstring> LectureDisplayLabelsForPaths(const std::vector<std::wstring>& paths) {
@@ -853,22 +832,23 @@ std::vector<std::wstring> LectureDisplayLabelsForPaths(const std::vector<std::ws
         const bool external = externalPaths.count(path) != 0;
         return external ? TempExternalLectureLabel(path) : FilenameOrPath(std::filesystem::path(path));
     });
+    const auto parents = labels.ParentSuffixes(paths, [](const std::wstring& path) -> const auto& { return path; });
     std::vector<std::wstring> result;
     result.reserve(paths.size());
     for (size_t index = 0; index < paths.size(); ++index) {
-        const auto& base = labels.Base(index);
-        const auto parent = labels.Duplicated(base) ? std::filesystem::path(paths[index]).parent_path().wstring() : L"";
-        result.push_back(parent.empty() ? base : base + L" [" + parent + L"]");
+        result.push_back(workspace_display::WithParentSuffix(labels.Base(index), parents[index]));
     }
     return result;
 }
 
 std::vector<std::wstring> SessionDisplayLabelsForEntries(const std::vector<SessionEntry>& sessions,
                                                        const std::wstring& lecturePath) {
-    const workspace_display::LabelBatch labels(sessions, [](const SessionEntry& session) {
-        return session.displayName.empty() ? FilenameOrPath(std::filesystem::path(session.path)) : session.displayName;
-    });
+    const workspace_display::LabelBatch labels(sessions, SessionBaseLabel);
+    const auto parents = labels.ParentSuffixes(sessions, [](const SessionEntry& item) -> const auto& { return item.path; });
     const auto lectureKey = SessionKeyFromPath(lecturePath);
+    auto lecture = lecturePath;
+    std::replace(lecture.begin(), lecture.end(), L'/', L'\\');
+    const std::filesystem::path lectureRoot(lecture);
     std::vector<std::wstring> result;
     result.reserve(sessions.size());
     for (size_t index = 0; index < sessions.size(); ++index) {
@@ -877,9 +857,11 @@ std::vector<std::wstring> SessionDisplayLabelsForEntries(const std::vector<Sessi
             result.push_back(DirectFilesSessionLabel());
             continue;
         }
-        const auto& base = labels.Base(index);
-        const auto parent = labels.Duplicated(base) ? std::filesystem::path(session.path).parent_path().wstring() : L"";
-        result.push_back(parent.empty() ? base : base + L" [" + parent + L"]");
+        if (auto nested = NestedSessionLabel(session, lectureRoot); !nested.empty()) {
+            result.push_back(std::move(nested));
+            continue;
+        }
+        result.push_back(workspace_display::WithParentSuffix(labels.Base(index), parents[index]));
     }
     return result;
 }
@@ -1128,26 +1110,6 @@ static bool DrawThemedMenuItem(const DRAWITEMSTRUCT* dis) {
 }
 
 
-
-SessionNumberingMode ParseSessionNumberingMode(const std::wstring& mode) {
-    std::wstring m = mode;
-    std::transform(m.begin(), m.end(), m.begin(), ::towlower);
-    if (m == L"max_number" || m == L"max" || m == L"maximum") return SessionNumberingMode::MaxNumberPlusOne;
-    return SessionNumberingMode::CountPlusOne;
-}
-
-
-int NextSessionNumberForSuggestions(const std::vector<SessionEntry>& sessions,
-                                           SessionNumberingMode mode) {
-    if (mode == SessionNumberingMode::MaxNumberPlusOne) {
-        int maxNumber = 0;
-        for (const auto& s : sessions) {
-            if (auto n = ExtractNumericKey(s.displayName)) maxNumber = std::max(maxNumber, *n);
-        }
-        return std::max(1, maxNumber + 1);
-    }
-    return std::max(1, static_cast<int>(sessions.size()) + 1);
-}
 
 static SessionAutoOpenMode ParseSessionAutoOpenMode(const std::wstring& mode) {
     std::wstring m = mode;
@@ -1479,32 +1441,25 @@ static bool OpenStartupDocumentPath(HWND hWnd, const std::wstring& rawPath) {
     }
 
     std::filesystem::path canonPath = CanonicalOrSelf(path);
-    std::filesystem::path classesRoot = WorkspaceClassesPath(g_workspaceRoot, g_config);
-    if (IsPathUnderRoot(canonPath, classesRoot)) {
-        std::filesystem::path parentDir = canonPath.parent_path();
-        if (IsPathUnderRoot(parentDir, classesRoot) && parentDir != classesRoot) {
-            std::filesystem::path grandParent = parentDir.parent_path();
-            if (IsPathUnderRoot(grandParent, classesRoot) && grandParent != classesRoot) {
-                g_currentLecturePath = grandParent.wstring();
-                g_currentSessionPath = parentDir.wstring();
-            } else {
-                g_currentLecturePath = parentDir.wstring();
-                g_currentSessionPath = parentDir.wstring();
+    const auto classesRoot = CanonicalOrSelf(WorkspaceClassesPath(g_workspaceRoot, g_config));
+    auto sessionRoot = canonPath.parent_path();
+    if (IsPathUnderRoot(sessionRoot, classesRoot) && sessionRoot != classesRoot) {
+        // The lecture is the first component below classes, even for files
+        // opened from a nested session or its conventional storage folders.
+        const auto relative = sessionRoot.lexically_relative(classesRoot);
+        if (!relative.empty() && *relative.begin() != L"..") {
+            const auto lectureRoot = classesRoot / *relative.begin();
+            const auto kind = ToLowerAscii(sessionRoot.filename().wstring());
+            if (sessionRoot != lectureRoot && (kind == L"pdf" || kind == L"note")) {
+                sessionRoot = sessionRoot.parent_path();
             }
+            g_currentLecturePath = lectureRoot.wstring();
             LoadLectures();
-            if (!g_currentLecturePath.empty()) {
-                LoadSessions(g_currentLecturePath);
-            }
-            if (!g_currentSessionPath.empty()) {
-                SessionEntry targetSession{ g_currentSessionPath };
-                for (const auto& s : g_sessions) {
-                    if (CanonicalOrSelf(std::filesystem::path(s.path)) == CanonicalOrSelf(std::filesystem::path(g_currentSessionPath))) {
-                        targetSession = s;
-                        break;
-                    }
-                }
+            LoadSessions(g_currentLecturePath);
+            const int index = FindSessionIndexByPath(sessionRoot.wstring());
+            if (index >= 0) {
                 std::wstring prefPdf, prefNote;
-                LoadFiles(targetSession, prefPdf, prefNote);
+                LoadFiles(g_sessions[static_cast<size_t>(index)], prefPdf, prefNote);
             }
         }
     }
@@ -2238,14 +2193,7 @@ static bool LaunchReadOnlyViewerForPdf(HWND owner, const std::wstring& pdfPath) 
 
 bool LaunchReadOnlyViewerForFile(HWND owner, const std::wstring& filePath);
 
-static bool OpenReadOnlyViewerCurrentOrPickFile(HWND owner) {
-    const std::wstring currentFile = CurrentLogicalPdfPath();
-    if (!currentFile.empty()) {
-        return IsPdfFile(std::filesystem::path(currentFile))
-                   ? LaunchReadOnlyViewerForPdf(owner, currentFile)
-                   : LaunchReadOnlyViewerForFile(owner, currentFile);
-    }
-
+static bool PickFileForReadOnlyViewer(HWND owner) {
     // The picker is only shown after an explicit menu action.  Its helper
     // accepts existing local paths and rejects network locations before a
     // viewer process is started.
@@ -2581,6 +2529,10 @@ static bool IsCurrentSessionTargetPath(const std::filesystem::path& path) {
            SessionKeyFromPath(g_currentSessionPath) == SessionKeyFromPath(path.wstring());
 }
 
+static bool ContainsCurrentSession(const std::filesystem::path& path) {
+    return !g_currentSessionPath.empty() && IsPathUnderRoot(g_currentSessionPath, path);
+}
+
 static bool IsWorkspaceManagedDirectoryTarget(const std::filesystem::path& path) {
     if (path.empty() || g_workspaceRoot.empty()) return false;
     if (IsPotentialNetworkPath(path)) return false;
@@ -2596,7 +2548,7 @@ static bool EnsureDirectoryMutationReady(HWND owner,
     if (target.empty()) return false;
 
     const bool touchesCurrentLecture = IsCurrentLectureTargetPath(target);
-    const bool touchesCurrentSession = IsCurrentSessionTargetPath(target);
+    const bool touchesCurrentSession = ContainsCurrentSession(target);
     const bool touchesCurrentPdf = !CurrentLogicalPdfPath().empty() &&
                                    IsPathUnderRoot(std::filesystem::path(CurrentLogicalPdfPath()), target);
     const bool touchesCurrentNote = !g_currentNotePath.empty() &&
@@ -2883,7 +2835,10 @@ static bool RenameSessionDirectoryFromContext(HWND owner,
         return false;
     }
 
-    const bool wasCurrentSession = IsCurrentSessionTargetPath(sessionPath);
+    const std::wstring previousSession = g_currentSessionPath;
+    const bool wasCurrentSession = ContainsCurrentSession(sessionPath);
+    const auto remappedSession = IsCurrentSessionTargetPath(sessionPath) ? dest.wstring()
+        : RemapChildPathAfterDirectoryMove(sessionPath, dest, previousSession);
     const std::wstring remappedPdf = RemapChildPathAfterDirectoryMove(sessionPath, dest, CurrentLogicalPdfPath());
     const std::wstring remappedNote = RemapChildPathAfterDirectoryMove(sessionPath, dest, g_currentNotePath);
 
@@ -2903,13 +2858,14 @@ static bool RenameSessionDirectoryFromContext(HWND owner,
     if (wasCurrentSession) {
         ClearPdfAndNoteSelection();
         ResetSessionAndFiles();
-        const int sessionIndex = FindSessionIndexByPath(dest.wstring());
+        const int sessionIndex = FindSessionIndexByPath(remappedSession);
         if (sessionIndex >= 0) {
             SetListboxSelAndNotify(g_hSessionList, sessionIndex);
             if (!remappedPdf.empty()) OpenPdfIfDifferent(owner, remappedPdf);
             if (!remappedNote.empty()) OpenNoteIfDifferent(owner, remappedNote);
         }
     } else {
+        g_currentSessionPath = previousSession;
         SyncLeftPaneSelection();
         RefreshMainWindowUiState(owner);
     }
@@ -3007,6 +2963,8 @@ static bool DeleteSessionDirectoryFromContext(HWND owner,
         return false;
     }
 
+    const std::wstring previousSession = g_currentSessionPath;
+    const bool wasCurrentSession = ContainsCurrentSession(sessionPath);
     std::filesystem::path movedPath;
     std::wstring err;
     if (!MoveDirectoryToDeletedItemsEscape(sessionPath, L"session_", &movedPath, &err)) {
@@ -3016,7 +2974,6 @@ static bool DeleteSessionDirectoryFromContext(HWND owner,
         return false;
     }
 
-    const bool wasCurrentSession = IsCurrentSessionTargetPath(sessionPath);
     if (wasCurrentSession) {
         ClearPdfAndNoteSelection();
         ResetSessionAndFiles();
@@ -3032,6 +2989,7 @@ static bool DeleteSessionDirectoryFromContext(HWND owner,
             RefreshMainWindowUiState(owner);
         }
     } else {
+        g_currentSessionPath = previousSession;
         SyncLeftPaneSelection();
         RefreshMainWindowUiState(owner);
     }
@@ -4215,6 +4173,7 @@ static void NotifyDirectoryListDblClick(HWND list) {
 
 enum class DirectoryHierarchyItemKind {
     Info,
+    ParentFolder,
     Folder,
     Pdf,
     Image,
@@ -4230,6 +4189,8 @@ struct DirectoryHierarchyItem {
 
 struct DirectoryHierarchyPopupData {
     std::wstring title;
+    std::filesystem::path root;
+    std::filesystem::path directory;
     std::vector<DirectoryHierarchyItem> items;
     HWND hTitle = nullptr;
     HWND hList = nullptr;
@@ -4304,17 +4265,16 @@ static void AddDirectoryHierarchyTruncatedLine(std::vector<DirectoryHierarchyIte
         items, ancestorLast, localization::Text(L"main.ui.162cdb94e6ed").c_str());
 }
 
-static void AppendDirectoryHierarchyChildren(const std::filesystem::path& dir,
+[[nodiscard]] static bool AppendDirectoryHierarchyChildren(const std::filesystem::path& dir,
                                              int depth,
                                              std::vector<bool>& ancestorLast,
-                                             std::vector<DirectoryHierarchyItem>& items) {
-    if (items.size() >= kDirectoryHierarchyMaxLines) {
+                                             std::vector<DirectoryHierarchyItem>& items,
+                                             bool preview,
+                                             size_t limit = kDirectoryHierarchyMaxLines) {
+    if (preview && items.size() >= limit) return true;
+    if (preview && depth > kDirectoryHierarchyMaxDepth) {
         AddDirectoryHierarchyTruncatedLine(items, ancestorLast);
-        return;
-    }
-    if (depth > kDirectoryHierarchyMaxDepth) {
-        AddDirectoryHierarchyTruncatedLine(items, ancestorLast);
-        return;
+        return true;
     }
 
     struct ScanEntry {
@@ -4325,15 +4285,16 @@ static void AppendDirectoryHierarchyChildren(const std::filesystem::path& dir,
 
     std::vector<ScanEntry> children;
     std::error_code ec;
-    std::filesystem::directory_iterator it(
-        dir, std::filesystem::directory_options::skip_permission_denied, ec);
+    std::filesystem::directory_iterator it(dir, ec);
     for (; !ec && it != std::filesystem::directory_iterator(); it.increment(ec)) {
         const auto path = it->path();
         bool isReparse = false;
-        if (TryIsReparsePointNoFollow(path, isReparse) && isReparse) continue;
+        if (!TryIsReparsePointNoFollow(path, isReparse) || isReparse) continue;
         std::error_code stEc;
         if (it->is_directory(stEc) && !stEc) {
-            children.push_back({path, DirectoryHierarchyDisplayName(path), DirectoryHierarchyItemKind::Folder});
+            if (_wcsicmp(path.filename().c_str(), kLectureSettingsDirName) != 0) {
+                children.push_back({path, DirectoryHierarchyDisplayName(path), DirectoryHierarchyItemKind::Folder});
+            }
             continue;
         }
         stEc.clear();
@@ -4348,20 +4309,25 @@ static void AppendDirectoryHierarchyChildren(const std::filesystem::path& dir,
             children.push_back({path, DirectoryHierarchyDisplayName(path), DirectoryHierarchyItemKind::Note});
         }
     }
+    if (ec) return false;
 
     std::sort(children.begin(), children.end(),
               [](const ScanEntry& a, const ScanEntry& b) {
+                  const bool aFolder = a.kind == DirectoryHierarchyItemKind::Folder;
+                  const bool bFolder = b.kind == DirectoryHierarchyItemKind::Folder;
+                  if (aFolder != bFolder) return aFolder;
                   if (a.name != b.name) return a.name < b.name;
                   return static_cast<int>(a.kind) < static_cast<int>(b.kind);
               });
 
-    for (size_t i = 0; i < children.size(); ++i) {
+    // Reserve rows for siblings before spending the remaining preview budget
+    // on descendants. Opening a folder shows its complete immediate contents.
+    const size_t remaining = preview ? limit - items.size() : children.size();
+    const bool truncated = children.size() > remaining;
+    const size_t visible = truncated ? remaining - 1 : children.size();
+    for (size_t i = 0; i < visible; ++i) {
         const auto& child = children[i];
-        const bool isLast = (i + 1 == children.size());
-        if (items.size() >= kDirectoryHierarchyMaxLines) {
-            AddDirectoryHierarchyTruncatedLine(items, ancestorLast);
-            return;
-        }
+        const bool isLast = !truncated && (i + 1 == visible);
         const wchar_t* prefix = L"[?] ";
         switch (child.kind) {
         case DirectoryHierarchyItemKind::Folder: prefix = L"[D] "; break;
@@ -4369,17 +4335,25 @@ static void AppendDirectoryHierarchyChildren(const std::filesystem::path& dir,
         case DirectoryHierarchyItemKind::Image: prefix = L"[I] "; break;
         case DirectoryHierarchyItemKind::Note: prefix = L"[N] "; break;
         case DirectoryHierarchyItemKind::Clrop: prefix = L"[C] "; break;
-        case DirectoryHierarchyItemKind::Info: break;
+        case DirectoryHierarchyItemKind::Info:
+        case DirectoryHierarchyItemKind::ParentFolder: break;
         }
         items.push_back({DirectoryHierarchyTreePrefix(ancestorLast, isLast) + prefix + child.name,
                          child.path.wstring(),
                          child.kind});
-        if (child.kind == DirectoryHierarchyItemKind::Folder) {
+        if (preview && child.kind == DirectoryHierarchyItemKind::Folder) {
+            const size_t childLimit = limit - (visible - i - 1) - (truncated ? 1 : 0);
+            if (items.size() >= childLimit) continue;
             ancestorLast.push_back(isLast);
-            AppendDirectoryHierarchyChildren(child.path, depth + 1, ancestorLast, items);
+            if (!AppendDirectoryHierarchyChildren(child.path, depth + 1, ancestorLast, items, true, childLimit)) {
+                AddDirectoryHierarchyInfo(items, ancestorLast,
+                    localization::Text(L"ui.directory_list.folder_read_failed"));
+            }
             ancestorLast.pop_back();
         }
     }
+    if (truncated) AddDirectoryHierarchyTruncatedLine(items, ancestorLast);
+    return true;
 }
 
 static std::vector<DirectoryHierarchyItem> BuildDirectoryHierarchyItems(const std::filesystem::path& root) {
@@ -4396,7 +4370,9 @@ static std::vector<DirectoryHierarchyItem> BuildDirectoryHierarchyItems(const st
     }
 
     bool isReparse = false;
-    if (TryIsReparsePointNoFollow(root, isReparse) && isReparse) {
+    const auto local = identity_path_scope::LocalPath(root.wstring());
+    if (!local || !identity_path_scope::NoReparseAncestors(*local) ||
+        !TryIsReparsePointNoFollow(root, isReparse) || isReparse) {
         std::vector<bool> ancestors;
         AddDirectoryHierarchyInfo(items, ancestors, localization::Text(L"main.ui.c3c1cd6bdc51").c_str());
         return items;
@@ -4404,7 +4380,9 @@ static std::vector<DirectoryHierarchyItem> BuildDirectoryHierarchyItems(const st
 
     const size_t before = items.size();
     std::vector<bool> ancestors;
-    AppendDirectoryHierarchyChildren(root, 1, ancestors, items);
+    if (!AppendDirectoryHierarchyChildren(root, 1, ancestors, items, true)) {
+        AddDirectoryHierarchyInfo(items, ancestors, localization::Text(L"ui.directory_list.folder_read_failed"));
+    }
     if (items.size() == before) {
         AddDirectoryHierarchyInfo(items, ancestors, localization::Text(L"main.ui.508876dcd97e").c_str());
     }
@@ -4413,13 +4391,12 @@ static std::vector<DirectoryHierarchyItem> BuildDirectoryHierarchyItems(const st
 
 static int FindFileListIndexByPath(const std::vector<FileEntry>& files, const std::wstring& path);
 
-static void PopulateFileListBox(HWND list, const std::vector<FileEntry>& files,
-                                const std::filesystem::path& displayRoot) {
+static void PopulateFileListBox(HWND list, const std::vector<FileEntry>& files) {
     if (!list) return;
     const ui::ListBoxUpdate update(list);
     ui::RememberOpenListIndex(list, -1);
     SendMessageW(list, LB_RESETCONTENT, 0, 0);
-    for (const auto& label : FileDisplayLabelsForPaths(files, displayRoot)) {
+    for (const auto& label : FileDisplayLabelsForPaths(files)) {
         SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
     }
     ui::RememberOpenListIndex(list, FindFileListIndexByPath(files,
@@ -4464,10 +4441,7 @@ static void AddTemporaryOpenedFileToFileList(const std::wstring& path,
         s_hierarchyTempOriginLectureKey = NormalizePathKeyForList(g_currentLecturePath);
     }
 
-    std::filesystem::path displayRoot = !g_currentSessionPath.empty()
-        ? std::filesystem::path(g_currentSessionPath)
-        : std::filesystem::path(path).parent_path();
-    PopulateFileListBox(list, files, displayRoot);
+    PopulateFileListBox(list, files);
     SendMessageW(list, LB_SETCURSEL, static_cast<WPARAM>(targetIndex), 0);
     InvalidateRect(list, nullptr, TRUE);
 }
@@ -4550,10 +4524,7 @@ bool RemoveTemporaryFilePathFromCurrentList(const std::wstring& path, bool isNot
     }), files.end());
     HWND list = isNote ? g_hNoteList : g_hPdfList;
     if (list) {
-        const std::filesystem::path displayRoot = !g_currentSessionPath.empty()
-            ? std::filesystem::path(g_currentSessionPath)
-            : std::filesystem::path(g_currentLecturePath);
-        PopulateFileListBox(list, files, displayRoot);
+        PopulateFileListBox(list, files);
         InvalidateRect(list, nullptr, TRUE);
     }
     return true;
@@ -4588,11 +4559,7 @@ bool OpenSearchResultFileInCurrentFileList(HWND owner, const std::wstring& path)
 }
 
 static void RebuildFileListBox(HWND list, const std::vector<FileEntry>& files) {
-    if (!list) return;
-    std::filesystem::path displayRoot = !g_currentSessionPath.empty()
-        ? std::filesystem::path(g_currentSessionPath)
-        : std::filesystem::path(g_currentLecturePath);
-    PopulateFileListBox(list, files, displayRoot);
+    PopulateFileListBox(list, files);
 }
 
 void RefreshTemporaryFileListDisplay(bool isNote) {
@@ -4647,6 +4614,9 @@ static void ClearHierarchyTemporaryFileDisplaysIfSafe() {
     }
 }
 
+[[nodiscard]] static bool BrowseDirectoryHierarchyFolder(HWND popup, DirectoryHierarchyPopupData& data,
+                                                         const std::filesystem::path& directory);
+
 static bool OpenDirectoryHierarchySelection(HWND list) {
     if (!list) return false;
     HWND popup = GetAncestor(list, GA_ROOT);
@@ -4662,6 +4632,9 @@ static bool OpenDirectoryHierarchySelection(HWND list) {
     if (!owner) owner = g_hMainWnd;
 
     switch (item.kind) {
+    case DirectoryHierarchyItemKind::Folder:
+    case DirectoryHierarchyItemKind::ParentFolder:
+        return BrowseDirectoryHierarchyFolder(popup, *data, item.path);
     case DirectoryHierarchyItemKind::Pdf:
     case DirectoryHierarchyItemKind::Image:
         if (!OpenPdfIfDifferent(owner, item.path)) return false;
@@ -4677,7 +4650,8 @@ static bool OpenDirectoryHierarchySelection(HWND list) {
 }
 
 static bool IsDirectoryHierarchyAppOpenable(DirectoryHierarchyItemKind kind) {
-    return kind == DirectoryHierarchyItemKind::Pdf ||
+    return kind == DirectoryHierarchyItemKind::Folder ||
+           kind == DirectoryHierarchyItemKind::Pdf ||
            kind == DirectoryHierarchyItemKind::Image ||
            kind == DirectoryHierarchyItemKind::Note;
 }
@@ -5068,7 +5042,25 @@ static void SyncToolbarFontSizeComboForSlot(HWND combo, double pt, bool useA4Sca
     cache.previewPt = preview ? pt : 0.0;
 }
 
+void SyncToolbarTextWritingMode() {
+    if (!g_hChkTextVertical) return;
+    bool vertical = g_textBoxVertical;
+    if (g_pdf.editingText) vertical = g_pdf.editWritingMode == TextWritingMode::VerticalRl;
+    else {
+        int selected = GetActiveSelectedAnnotationIndex();
+        if (selected < 0 && g_hAnnotList)
+            selected = static_cast<int>(SendMessageW(g_hAnnotList, LB_GETCURSEL, 0, 0));
+        if (selected >= 0 && selected < static_cast<int>(g_annots.size()) &&
+            g_annots[static_cast<size_t>(selected)].type == Annotation::Type::TextBox)
+            vertical = g_annots[static_cast<size_t>(selected)].writingMode == TextWritingMode::VerticalRl;
+    }
+    const auto checked = vertical ? BST_CHECKED : BST_UNCHECKED;
+    if (SendMessageW(g_hChkTextVertical, BM_GETCHECK, 0, 0) != checked)
+        SendMessageW(g_hChkTextVertical, BM_SETCHECK, checked, 0);
+}
+
 void SyncToolbarFontSizeCombo(bool activeSizeOnly) {
+    SyncToolbarTextWritingMode();
     g_textFontActiveSizeSlot = std::clamp(g_textFontActiveSizeSlot, 0, 1);
     double actualPt = 0.0;
     std::wstring actualFont = g_textFontName;
@@ -5215,6 +5207,7 @@ static void RemoveOwnerDrawButtonsOnly(HWND hWnd) {
     RestoreButtonType(g_hRadioTextReadableBackgroundNormal, BS_AUTORADIOBUTTON);
     RestoreButtonType(g_hRadioTextReadableBackgroundInverted, BS_AUTORADIOBUTTON);
     RestoreButtonType(g_hChkTextAutoWrap, BS_AUTOCHECKBOX);
+    RestoreButtonType(g_hChkTextVertical, BS_AUTOCHECKBOX);
     RestoreButtonType(g_hChkPanMouseWheelZoom, BS_AUTOCHECKBOX);
     RestoreButtonType(g_hChkShortcutHeading1, BS_AUTOCHECKBOX);
     RestoreButtonType(g_hChkShortcutBack, BS_AUTOCHECKBOX);
@@ -5366,6 +5359,9 @@ static void OnLectureSelChange(HWND hWnd) {
         return;
     }
     timing.Mark(L"PrepareStagedDiffsForSwitch");
+    // Dismiss before clearing documents: a synchronous repaint during the
+    // directory switch must not bring startup guidance back.
+    DismissPdfStartupGuide();
     {
         ScopedDeferredMainWindowUiRefresh deferredUi(hWnd);
         ScopedDeferredLeftPaneSelection deferredLeftPaneSelection;
@@ -5470,6 +5466,15 @@ static void OnSessionSelChange(HWND hWnd) {
         return;
     }
     timing.Mark(L"SaveNoteIfDirty");
+    const auto lecture = identity_path_scope::LocalPath(g_currentLecturePath);
+    const auto selected = identity_path_scope::LocalPath(target.path);
+    if (!lecture || !selected || (*selected != *lecture && !identity_path_scope::Below(*selected, *lecture)) ||
+        !identity_path_scope::NoReparseAncestors(*selected)) {
+        timing.SetOutcome(L"cancelled_unsafe_dir");
+        SyncLeftPaneSelection();
+        ShowSoftNotice(hWnd, localization::Text(L"ui.directory_list.folder_read_failed"), SoftNoticeKind::Warning);
+        return;
+    }
     if (!VerifyWorkspaceWritableForEditing(hWnd) ||
         !VerifyDirReadableWritableForEditing(hWnd, std::filesystem::path(target.path),
                                              L"workspace.directory.session.student")) {
@@ -5489,6 +5494,7 @@ static void OnSessionSelChange(HWND hWnd) {
         return;
     }
     timing.Mark(L"PrepareStagedDiffsForSwitch");
+    DismissPdfStartupGuide();
     {
         ScopedDeferredMainWindowUiRefresh deferredUi(hWnd);
         ScopedDeferredLeftPaneSelection deferredLeftPaneSelection;
@@ -7400,25 +7406,6 @@ void ApplySessionAutoOpenPreference(const SessionEntry& session,
     }
 }
 
-void SortSessionsForDisplay(std::vector<SessionEntry>& sessions, SessionSortMode mode) {
-    if (mode == SessionSortMode::Name) {
-        std::sort(sessions.begin(), sessions.end(),
-            [](const SessionEntry& a, const SessionEntry& b) { return a.displayName < b.displayName; });
-        return;
-    }
-    std::sort(sessions.begin(), sessions.end(), [&](const SessionEntry& a, const SessionEntry& b) {
-        auto na = ExtractNumericKey(a.displayName);
-        auto nb = ExtractNumericKey(b.displayName);
-        if (na && nb && *na != *nb) {
-            return mode == SessionSortMode::NumericDesc ? *na > *nb : *na < *nb;
-        }
-        if (na && !nb) return true;
-        if (!na && nb) return false;
-        return mode == SessionSortMode::NumericDesc ? a.displayName > b.displayName
-                                                    : a.displayName < b.displayName;
-    });
-}
-
 std::filesystem::path LectureLastOpenFilePath() {
     auto settingsDir = LectureSettingsDir();
     if (settingsDir.empty()) return {};
@@ -7434,21 +7421,14 @@ LectureSortMode ParseLectureSortMode(const std::wstring& mode) {
     return LectureSortMode::Manual;
 }
 
-SessionSortMode ParseSessionSortMode(const std::wstring& mode) {
-    std::wstring m = mode;
-    std::transform(m.begin(), m.end(), m.begin(), ::towlower);
-    if (m == L"numeric_desc" || m == L"desc" || m == L"number_desc") return SessionSortMode::NumericDesc;
-    if (m == L"name" || m == L"lexical") return SessionSortMode::Name;
-    return SessionSortMode::NumericAsc;
+static std::wstring FileBaseLabel(const FileEntry& file) {
+    return FilenameOrPath(std::filesystem::path(file.path));
 }
 
-static std::wstring FileDisplayLabelWithBatch(const std::wstring& filePath,
-                                            const std::vector<FileEntry>& files,
-                                            const std::filesystem::path& root,
-                                            const workspace_display::LabelBatch* labels) {
+static std::wstring FileDisplayLabel(const std::wstring& filePath, const std::wstring& base,
+                                     const std::wstring& parent) {
     if (filePath.empty()) return L"-";
 
-    std::filesystem::path path(filePath);
     const bool hasTemporaryFiles = !s_searchTempPdfKeys.empty() || !s_searchTempNoteKeys.empty() ||
         !s_hierarchyTempPdfKeys.empty() || !s_hierarchyTempNoteKeys.empty() ||
         !s_pinnedTempPdfKeys.empty() || !s_pinnedTempNoteKeys.empty();
@@ -7473,41 +7453,26 @@ static std::wstring FileDisplayLabelWithBatch(const std::wstring& filePath,
     } else if (hierarchyTemp) {
         prefix = localization::Text(L"main.ui.441dd4e29aa1").c_str();
     }
-    std::wstring base = FilenameOrPath(path);
-    bool duplicated = labels && labels->Duplicated(base);
-    if (!labels) {
-        size_t duplicates = 0;
-        const std::wstring baseKey = ToLowerAscii(base);
-        for (const auto& item : files) {
-            if (ToLowerAscii(FilenameOrPath(std::filesystem::path(item.path))) == baseKey) ++duplicates;
-        }
-        duplicated = duplicates > 1;
-    }
-    if (!duplicated) return prefix + base;
-
-    std::wstring rel = RelativeOrPathForDisplay(path, root);
-    if (!rel.empty() && rel != base) return prefix + rel;
-
-    std::wstring parent = path.parent_path().filename().wstring();
-    if (parent.empty()) parent = path.parent_path().wstring();
-    if (parent.empty()) return prefix + base;
-    return prefix + base + L" [" + parent + L"]";
+    return workspace_display::WithParentSuffix(prefix + base, parent);
 }
 
 std::wstring FileDisplayLabelForPath(const std::wstring& filePath,
-                                   const std::vector<FileEntry>& files,
-                                   const std::filesystem::path& root) {
-    return FileDisplayLabelWithBatch(filePath, files, root, nullptr);
+                                   const std::vector<FileEntry>& files) {
+    if (filePath.empty()) return L"-";
+    const auto base = FilenameOrPath(std::filesystem::path(filePath));
+    const auto parent = workspace_display::ParentSuffixForLabel(filePath, base, files,
+        FileBaseLabel, [](const FileEntry& item) -> const auto& { return item.path; });
+    return FileDisplayLabel(filePath, base, parent);
 }
 
-std::vector<std::wstring> FileDisplayLabelsForPaths(const std::vector<FileEntry>& files,
-                                                  const std::filesystem::path& root) {
-    const workspace_display::LabelBatch labels(files, [](const FileEntry& file) {
-        return FilenameOrPath(std::filesystem::path(file.path));
-    });
+std::vector<std::wstring> FileDisplayLabelsForPaths(const std::vector<FileEntry>& files) {
+    const workspace_display::LabelBatch labels(files, FileBaseLabel);
+    const auto parents = labels.ParentSuffixes(files, [](const FileEntry& item) -> const auto& { return item.path; });
     std::vector<std::wstring> result;
     result.reserve(files.size());
-    for (const auto& file : files) result.push_back(FileDisplayLabelWithBatch(file.path, files, root, &labels));
+    for (size_t i = 0; i < files.size(); ++i) {
+        result.push_back(FileDisplayLabel(files[i].path, labels.Base(i), parents[i]));
+    }
     return result;
 }
 
@@ -7603,13 +7568,10 @@ std::wstring BuildStatusDisplayText() {
             }
         }
     }
-    std::filesystem::path sessionRoot = g_currentSessionPath.empty()
-        ? std::filesystem::path{}
-        : std::filesystem::path(g_currentSessionPath);
     const std::wstring& logicalPdfPath = CurrentLogicalPdfPath();
-    std::wstring pdf = FileDisplayLabelForPath(logicalPdfPath, g_pdfFiles, sessionRoot);
+    std::wstring pdf = FileDisplayLabelForPath(logicalPdfPath, g_pdfFiles);
     if (logicalPdfPath.empty()) pdf = L"-";
-    std::wstring note = FileDisplayLabelForPath(g_currentNotePath, g_noteFiles, sessionRoot);
+    std::wstring note = FileDisplayLabelForPath(g_currentNotePath, g_noteFiles);
     if (g_currentNotePath.empty()) note = L"-";
 
     std::wstring text;
@@ -7669,6 +7631,11 @@ static bool IsStatusDisplayOnSecondMenuRow(HWND hWnd, HMENU menu) {
 void RefreshMainWindowUiState(HWND hWnd) {
     HWND owner = g_hMainWnd ? g_hMainWnd : hWnd;
     if (!owner) return;
+    // Observe successful opens even when UI refresh/painting is deferred.
+    if (!g_currentLecturePath.empty() || !g_currentSessionPath.empty() ||
+        g_pdf.kind != DocKind::None || !g_currentNotePath.empty()) {
+        DismissPdfStartupGuide();
+    }
     if (s_deferredMainWindowUiRefreshDepth > 0) {
         s_deferredMainWindowUiRefreshPending = true;
         s_deferredMainWindowUiRefreshOwner = owner;
@@ -8126,11 +8093,7 @@ static void RestoreLectureSessionStateAfterException(HWND owner,
             return;
         }
 
-        std::wstring desiredSessionName;
-        if (!previousSessionPath.empty()) {
-            desiredSessionName = std::filesystem::path(previousSessionPath).filename().wstring();
-        }
-        ReloadSessionsAndSelect(previousLecturePath, desiredSessionName, /*reopenFiles=*/false);
+        ReloadSessionsAndSelect(previousLecturePath, previousSessionPath, /*reopenFiles=*/false);
         if (!previousPdfPath.empty()) {
             EndIntegratedPdfPreviewMode(owner, true);
             OpenPdfWithAnnotations(owner, previousPdfPath);

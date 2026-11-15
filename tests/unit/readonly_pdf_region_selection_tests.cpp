@@ -190,6 +190,27 @@ int wmain(int argc, wchar_t** argv) {
              point(jpLast.right - (jpLast.right-jpLast.left)*0.15, (jpLast.top+jpLast.bottom)/2));
         SendMessageW(viewer, WM_COPY, 0, 0);
         Require(ClipboardText(viewer) == L"日本語", "actual PDF Japanese substring copies as UTF-16");
+
+        const auto beforeScroll = page.rect;
+        mouse(WM_LBUTTONDOWN, point(95, 755));
+        Require(panel::g_state.selectingRect, "rectangle drag started");
+        panel::ScrollHorizontalBy(viewer, 36);
+        for (int i = 0; i < 12; ++i) panel::ScrollContinuousBy(viewer, 0.6);
+        Require(panel::PageLayoutForIndex(viewer, 0, page) &&
+                    page.rect.left != beforeScroll.left && page.rect.top != beforeScroll.top,
+                "rectangle drag scrolled on both axes");
+        mouse(WM_LBUTTONUP, point(290, 670));
+        Require(panel::g_state.hasRectSelection &&
+                    std::abs(panel::g_state.selectionLeftPt - 95.0) < 1.0 &&
+                    std::abs(panel::g_state.selectionTopPt - 755.0) < 1.0 &&
+                    std::abs(panel::g_state.selectionRightPt - 290.0) < 1.0 &&
+                    std::abs(panel::g_state.selectionBottomPt - 670.0) < 1.0,
+                "scrolling during the drag preserves its page-space anchor");
+        panel::ScrollContinuousBy(viewer, 180);
+        SendMessageW(viewer, WM_COPY, 0, 0);
+        Require(ClipboardText(viewer).find(L"ALPHA BETA GAMMA") != std::wstring::npos &&
+                    ClipboardText(viewer).find(L"OUTSIDE") == std::wstring::npos,
+                "scrolling after the drag preserves the copied rectangle");
         DestroyWindow(parent); parent = viewer = nullptr;
         FPDF_DestroyLibrary(); pdfium = false;
         if (clipboard_payload) GlobalFree(clipboard_payload);

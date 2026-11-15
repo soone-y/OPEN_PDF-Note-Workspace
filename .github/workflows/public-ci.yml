@@ -1,0 +1,48 @@
+name: Public source checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source-checks:
+    runs-on: windows-2025
+    timeout-minutes: 10
+    env:
+      PYTHONUTF8: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Check tracked text
+        run: python -B tools/release_checks/text_integrity_gate.py
+
+      - name: Check Python, PowerShell and JSON syntax
+        run: python -B tools/release_checks/repo_hygiene_gate.py
+
+      - name: Test dependency review gate
+        run: python -B -m unittest discover -s tests/python -p test_dependency_security_gate.py
+
+      - name: Build documentation portal
+        run: python -B site/github/scripts/build_public_site.py --replace --documentation-portal
+
+      - name: Validate documentation portal
+        run: python -B site/github/scripts/validate_public_site.py --site site/github/output/public

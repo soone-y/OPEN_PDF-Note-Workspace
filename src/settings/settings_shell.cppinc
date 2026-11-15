@@ -196,7 +196,10 @@ static SettingsPageSnapshot CaptureUnifiedDraft(UnifiedSettingsShellCtx* ctx, in
     if (!child || page == kSettingsNavPalette) return values;
     SettingsSnapshotCapture capture{page, &values};
     EnumChildWindows(child, CaptureSettingsControl, reinterpret_cast<LPARAM>(&capture));
-    if (ctx->generalPages[page]) values.push_back(std::to_wstring(ctx->generalPages[page]->noteBgCustomColor));
+    if (ctx->generalPages[page]) {
+        values.push_back(std::to_wstring(ctx->generalPages[page]->noteBgCustomColor));
+        values.push_back(std::to_wstring(ctx->generalPages[page]->noteFgCustomColor));
+    }
     if (page == kSettingsNavMarkup && ctx->markupCtx) {
         StoreActiveMarkupCustomTagPreset(ctx->markupCtx.get());
         for (int mask : ctx->markupCtx->customPresetMasks) values.push_back(std::to_wstring(mask));
@@ -404,7 +407,10 @@ static void RevertUnifiedSettingsPage(HWND window, UnifiedSettingsShellCtx* ctx)
         if (result == SilentDialogResult::Yes && !ApplyUnifiedSettings(window, ctx)) return false;
     }
     if (ctx->childPalette && !IsUnifiedColorSelection(ctx) && !FinishPaletteEditing(ctx->childPalette, ctx->paletteCtx.get(), true)) return false;
-    ctx->done = true; DestroyWindow(window); return true;
+    ctx->done = true;
+    RestoreOwnerAfterModal(ctx->owner);
+    DestroyWindow(window);
+    return true;
 }
 static bool CreateUnifiedSettingsNavigation(HWND window, UnifiedSettingsShellCtx* ctx) {
     ctx->tree = CreateWindowExW(WS_EX_CLIENTEDGE, WC_TREEVIEWW, L"",
@@ -484,7 +490,10 @@ static LRESULT CALLBACK UnifiedSettingsShellProc(HWND window, UINT message, WPAR
                 COLORREF color{}; if (!ReadPaletteEditorColor(ctx->childPalette, &color)) return 0;
                 ctx->paletteRequest->selectedColor = color; ctx->paletteRequest->accepted = true;
             } else if (!ApplyUnifiedSettings(window, ctx)) return 0;
-            ctx->done = true; DestroyWindow(window); return 0;
+            ctx->done = true;
+            RestoreOwnerAfterModal(ctx->owner);
+            DestroyWindow(window);
+            return 0;
         }
         if (id == IDC_UNIFIED_SETTINGS_APPLY) {
             if (ApplyUnifiedSettings(window, ctx)) { ApplyThemeToDialog(window); ShowSoftNotice(window, localization::Text(L"settings.annot.fca7cf56577e")); }

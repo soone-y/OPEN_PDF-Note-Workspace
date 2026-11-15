@@ -19,7 +19,14 @@ Dependencies are vendored in the repository. The build and the application must 
 ./build.ps1
 ```
 
-`build.ps1` builds the Full edition, Lite edition, and read-only viewer in the Release configuration and writes ready-to-package executables below `out/`.
+`build.ps1` builds the Full edition, Lite edition, and read-only viewer in the Release configuration. To prepare a test environment with sample data, run `./build.ps1 -Run`, then launch `out/run/pdf_note_workspace.exe` (Full) or `out/run_lite/pdf_note_workspace.exe` (Lite). With `-Locale en`, use `out/run_en/` and `out/run_lite_en/` instead. Each folder also contains the read-only viewer.
+
+The first build seeds `sample_workspace/` from the release template for that language and edition, and sets it as the default if no setup file exists. Later builds preserve edits and settings. If a build says the running application needs a binary update, close the application and run the build again.
+
+- `./build.ps1 -Clean` removes the selected artifacts under `out/obj*` and `out/bin*`. Add `-Run` to remove the local runtime binaries as well. Both keep sample data and settings.
+- `./build.ps1 -HardClean` does everything `-Clean -Run` does, and deletes the displayed `out/run*/sample_workspace/` directories and any edits they contain. Close any application using the sample first. Settings and other workspaces are kept. The next `./build.ps1 -Run` reinstalls a fresh sample.
+
+Both commands target Full and Lite by default. Use `-Lite` for only the Lite run folder, or `-AllLocales` to include both languages. The `out/run*/` folders are for testing inside the repository. Full can convert Office documents if the verified conversion runtime is present in the repository. Use a release set when checking the distribution itself.
 
 To build individual targets:
 

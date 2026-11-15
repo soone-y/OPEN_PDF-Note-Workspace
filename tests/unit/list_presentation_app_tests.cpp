@@ -77,6 +77,7 @@ static void CheckLabels(const std::filesystem::path& lecture, const std::filesys
     const std::vector<std::wstring> lectures{CanonicalOrSelf(lecture).wstring(),
         CanonicalOrSelf(root / L"other/LECTURE").wstring(), CanonicalOrSelf(root / L"third/lecture").wstring()};
     const auto lectureLabels = LectureDisplayLabelsForPaths(lectures);
+    assert(lectureLabels == std::vector<std::wstring>({L"lecture [workspace]", L"LECTURE [other]", L"lecture [third]"}));
     for (size_t i = 0; i < lectures.size(); ++i)
         assert(lectureLabels[i] == LectureDisplayLabelForPath(lectures[i], lectures));
     const auto savedExternal = g_tempExternalLectures;
@@ -88,24 +89,37 @@ static void CheckLabels(const std::filesystem::path& lecture, const std::filesys
     const std::vector<SessionEntry> sessions{{L"資料", session.wstring()},
         {L"資料", (root / L"other/session").wstring()}, {L"", lecture.wstring()}};
     const auto sessionLabels = SessionDisplayLabelsForEntries(sessions, lecture.wstring());
+    assert(sessionLabels[0] == L"資料 [workspace\\lecture]" && sessionLabels[1] == L"資料 [other]");
     for (size_t i = 0; i < sessions.size(); ++i)
         assert(sessionLabels[i] == SessionDisplayLabelForEntry(sessions[i], sessions, lecture.wstring()));
     const std::vector<FileEntry> files{{(session / L"pdf/same.pdf").wstring(), true},
         {(session / L"same.pdf").wstring(), true}, {(session / L"資料.txt").wstring(), false},
         {(session / L"other/SAME.PDF").wstring(), true}, {L"", false}};
-    const auto fileLabels = FileDisplayLabelsForPaths(files, session);
+    const auto fileLabels = FileDisplayLabelsForPaths(files);
+    assert(fileLabels == std::vector<std::wstring>({L"same.pdf [pdf]", L"same.pdf [.]", L"資料.txt",
+        L"SAME.PDF [other]", L"-"}));
     for (size_t i = 0; i < files.size(); ++i)
-        assert(fileLabels[i] == FileDisplayLabelForPath(files[i].path, files, session));
+        assert(fileLabels[i] == FileDisplayLabelForPath(files[i].path, files));
+
+    const std::vector<std::wstring> branches{L"C:/資料/共通/前期/同じ/数学", L"c:\\資料\\共通\\後期\\同じ\\数学",
+        L"C:/資料/共通/A/英語", L"C:/資料/共通/AB/英語", L"D:/資料/共通/A/国語", L"E:/資料/共通/A/国語"};
+    const auto branchLabels = LectureDisplayLabelsForPaths(branches);
+    assert(branchLabels == std::vector<std::wstring>({L"数学 [前期\\同じ]", L"数学 [後期\\同じ]",
+        L"英語 [A]", L"英語 [AB]", L"国語 [D:\\資料\\共通\\A]", L"国語 [E:\\資料\\共通\\A]"}));
+
+    const std::wstring longParent = L"C:\\" + std::wstring(180, L'a') + L"\\" + std::wstring(180, L'b');
+    const std::vector<std::wstring> longPaths{longParent + L"\\前期\\数学", longParent + L"\\後期\\数学"};
+    assert(LectureDisplayLabelsForPaths(longPaths) == std::vector<std::wstring>({L"数学 [前期]", L"数学 [後期]"}));
 }
 
-static void CheckLabelCost(const std::filesystem::path& session) {
+static void CheckLabelCost() {
     for (const size_t count : {128u, 512u, 1000u}) {
         const std::vector<FileEntry> files(g_pdfFiles.begin(), g_pdfFiles.begin() + count);
         std::vector<std::wstring> individual;
         const auto begin = std::chrono::steady_clock::now();
-        for (const auto& file : files) individual.push_back(FileDisplayLabelForPath(file.path, files, session));
+        for (const auto& file : files) individual.push_back(FileDisplayLabelForPath(file.path, files));
         const auto middle = std::chrono::steady_clock::now();
-        const auto batch = FileDisplayLabelsForPaths(files, session);
+        const auto batch = FileDisplayLabelsForPaths(files);
         const auto end = std::chrono::steady_clock::now();
         assert(batch == individual);
         std::cout << "labels=" << count << " individual_us="
@@ -309,7 +323,7 @@ static void CheckListScroll() {
             const auto before = SendMessageW(lists[i], LB_GETTOPINDEX, 0, 0);
             const int rendersBefore = observations[i].renders;
             SendMessageW(lists[i], WM_MOUSEWHEEL, MAKEWPARAM(0, static_cast<WORD>(-1)), 0);
-            assert(SendMessageW(lists[i], LB_GETTOPINDEX, 0, 0) == 100 + (packet + 1) * rows[i] / 120);
+            assert(SendMessageW(lists[i], LB_GETTOPINDEX, 0, 0) == 100 + ((packet + 1) * rows[i] + 60) / 120);
             assert(SendMessageW(lists[i], LB_GETCURSEL, 0, 0) == 10);
             if (before != SendMessageW(lists[i], LB_GETTOPINDEX, 0, 0)) {
                 if (observations[i].renders <= rendersBefore) {
@@ -387,6 +401,54 @@ static void CheckContextReload(const std::filesystem::path& lecture, const std::
     std::cout << "List context reload PASS: 4 directory lists reflect external additions/removals; open paths, dirty note and scroll positions preserved.\n";
 }
 
+static void CheckNestedSessions(const std::filesystem::path& lecture) {
+    const auto first = lecture / L"spring/week1";
+    const auto second = lecture / L"fall/week1";
+    Write(lecture / L"lecture.txt", "lecture");
+    Write(first / L"note/spring.txt", "spring");
+    Write(second / L"pdf/fall.pdf", "fall");
+    Write(second / L"pdf/extra/extra.txt", "extra");
+    Write(second / L"__pdf_note_workspace__/private/hidden.txt", "private");
+    assert(std::filesystem::create_directory(second / L"empty"));
+    assert(RefreshWorkspaceList(g_hSessionList));
+
+    const auto row = [](const std::wstring& name) {
+        for (int i = 0; i < SendMessageW(g_hSessionList, LB_GETCOUNT, 0, 0); ++i) {
+            if (ui::ListBoxText(g_hSessionList, i) == name) return i;
+        }
+        return -1;
+    };
+    const auto select = [&](const std::wstring& name) {
+        const int index = row(name);
+        assert(index >= 0);
+        assert(SendMessageW(g_hSessionList, LB_SETCURSEL, index, 0) == index);
+        SendMessageW(g_hMainWnd, WM_COMMAND, MAKEWPARAM(0, LBN_SELCHANGE), reinterpret_cast<LPARAM>(g_hSessionList));
+    };
+    assert(row(L"fall\\week1\\empty") >= 0);
+    assert(row(L"fall\\week1\\pdf") < 0);
+    assert(row(L"fall\\week1\\__pdf_note_workspace__\\private") < 0);
+    select(L"spring\\week1");
+    assert(CanonicalOrSelf(g_currentSessionPath) == CanonicalOrSelf(first));
+    assert(g_pdfFiles.empty() && g_noteFiles.size() == 1);
+    assert(ui::ListBoxText(g_hNoteList, 0) == L"spring.txt");
+    select(L"fall\\week1");
+    assert(CanonicalOrSelf(g_currentSessionPath) == CanonicalOrSelf(second));
+    assert(g_noteFiles.empty() && g_pdfFiles.size() == 1);
+    assert(ui::ListBoxText(g_hPdfList, 0) == L"fall.pdf");
+    select(L"fall\\week1\\pdf\\extra");
+    assert(g_pdfFiles.empty() && g_noteFiles.size() == 1);
+    assert(ui::ListBoxText(g_hNoteList, 0) == L"extra.txt");
+    select(DirectFilesSessionLabel());
+    assert(CanonicalOrSelf(g_currentSessionPath) == CanonicalOrSelf(lecture));
+    assert(g_pdfFiles.empty() && g_noteFiles.size() == 1);
+    assert(ui::ListBoxText(g_hNoteList, 0) == L"lecture.txt");
+
+    ReloadSessionsAndSelect(lecture.wstring(), first.wstring(), true);
+    assert(CanonicalOrSelf(g_currentSessionPath) == CanonicalOrSelf(first));
+    assert(ui::ListBoxText(g_hNoteList, 0) == L"spring.txt");
+    std::cout << "Nested sessions PASS: full-path selection, direct files, type folders and internal folder exclusion.\n";
+}
+
 static void CALLBACK GuardModal(HWND, UINT, UINT_PTR, DWORD) {
     HWND window = nullptr;
     while ((window = FindWindowExW(nullptr, window, L"SilentDialogClass", nullptr))) {
@@ -428,7 +490,7 @@ static void CALLBACK CheckApp(HWND, UINT, UINT_PTR, DWORD) {
     }
     std::cout << "reload_4x1000_ms=" << std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - start).count() << '\n';
-    CheckLabelCost(session);
+    CheckLabelCost();
     CheckLayout();
     CheckEmptyListPixels(session);
     CheckListScroll();
@@ -477,6 +539,7 @@ static void CALLBACK CheckApp(HWND, UINT, UINT_PTR, DWORD) {
     assert(ui::OpenListIndex(g_hPdfList) == -1 && ui::OpenListIndex(g_hNoteList) == -1);
     CheckLabels(lecture, session);
     CheckContextReload(lecture, session);
+    CheckNestedSessions(lecture);
     std::error_code ec;
     assert(std::filesystem::file_size(session / L"note0.txt", ec) == 4 && !ec);
     KillTimer(nullptr, guard);

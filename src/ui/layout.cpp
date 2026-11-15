@@ -138,8 +138,11 @@ static void RedrawChangedLayout(HWND hWnd, const LayoutApplyResult& result,
     }
     for (const HWND control : changedControls) {
         if (redrawToolbar && (control == g_hPdfToolbar || GetParent(control) == g_hPdfToolbar)) continue;
+        // The owner-drawn annotation list paints its rows. The listbox must
+        // erase the client area below them after a move or resize.
+        const UINT erase = control == g_hAnnotList ? RDW_ERASE : RDW_NOERASE;
         RedrawWindow(control, nullptr, nullptr,
-                     RDW_INVALIDATE | RDW_NOERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
+                     RDW_INVALIDATE | erase | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
     }
 }
 
@@ -179,11 +182,11 @@ static int ClampInt(int v, int lo, int hi) {
 
 template <typename PlaceFn>
 static int LayoutAnnotToolbar(int baseX, int baseY, int areaW, PlaceFn place) {
-    const int padding = 6;
+    const int padding = 8;
     const int rowGap = 4;
-    const int sectionGap = 8;
+    const int sectionGap = 10;
     const int btnH = 26;
-    const int comboH = 24;
+    const int comboH = 28;
     const int colorSize = 20;
     const int gap = 6;
     // Keep the tool families in two columns in a narrow right pane. This leaves
@@ -237,36 +240,10 @@ static int LayoutAnnotToolbar(int baseX, int baseY, int areaW, PlaceFn place) {
         y += sectionGap;
     }
 
-    if (w > 0 && (g_hBtnToggleAnn || g_hAnnotShow)) {
-        int cols = (w >= minColW * 2 + gap) ? 2 : 1;
-        int colW = (cols == 2) ? (w - gap) / 2 : w;
-        int rowCount = 0;
-
-        if (cols == 2) {
-            if (g_hBtnToggleAnn) {
-                placeCtl(g_hBtnToggleAnn, x, y, colW, btnH);
-            }
-            if (g_hAnnotShow) {
-                int px = g_hBtnToggleAnn ? (x + colW + gap) : x;
-                placeCtl(g_hAnnotShow, px, y, colW, btnH);
-            }
-            rowCount = 1;
-        } else {
-            if (g_hBtnToggleAnn) {
-                placeCtl(g_hBtnToggleAnn, x, y, colW, btnH);
-                rowCount++;
-            }
-            if (g_hAnnotShow) {
-                int py = y + rowCount * (btnH + rowGap);
-                placeCtl(g_hAnnotShow, x, py, colW, btnH);
-                rowCount++;
-            }
-        }
-
-        if (rowCount > 0) {
-            y += rowCount * btnH + (rowCount - 1) * rowGap;
-            y += sectionGap;
-        }
+    // A single stateful control replaces the duplicate show/hide action.
+    if (w > 0 && g_hAnnotShow) {
+        placeFull(g_hAnnotShow, btnH);
+        y += sectionGap - rowGap;
     }
 
     bool showColor = ToolbarHasColorOptions(g_toolMode);
@@ -305,7 +282,8 @@ static int LayoutAnnotToolbar(int baseX, int baseY, int areaW, PlaceFn place) {
     // appearance of the selected annotation tool.
     bool showFont = ToolbarHasFontOptions(g_toolMode);
     if (showFont) {
-        const int radioW = 34;
+        placeFull(g_hComboFont, comboH);
+        const int radioW = 38;
         const int slotGap = 4;
         auto placeFontSizeSlot = [&](HWND radio, HWND combo) {
             if (radio) placeCtl(radio, x, y, radioW, comboH);
@@ -318,14 +296,39 @@ static int LayoutAnnotToolbar(int baseX, int baseY, int areaW, PlaceFn place) {
         };
         placeFontSizeSlot(g_hRadioFontSizeSlotA, g_hComboFontSize);
         placeFontSizeSlot(g_hRadioFontSizeSlotB, g_hComboFontSizeAlt);
-        placeFull(g_hComboFont, comboH);
         if (g_toolMode == ToolMode::TextBox) {
-            const int assistCheckW = std::min(120, std::max(72, w / 2));
-            const int assistRadioW = std::max(0, (w - assistCheckW) / 2);
-            placeCtl(g_hChkTextReadableBackground, x, y, assistCheckW, comboH);
-            placeCtl(g_hRadioTextReadableBackgroundNormal, x + assistCheckW, y, assistRadioW, comboH);
-            placeCtl(g_hRadioTextReadableBackgroundInverted, x + assistCheckW + assistRadioW, y,
-                     std::max(0, w - assistCheckW - assistRadioW), comboH);
+            y += sectionGap - rowGap;
+            placeFull(g_hChkTextVertical, comboH);
+            placeFull(g_hChkTextReadableBackground, comboH);
+            const int indent = 18;
+            const int optionW = std::max(0, w - indent);
+            // Measure labels with the UI font so English and enlarged fonts
+            // can wrap onto separate rows instead of clipping radio captions.
+            const auto optionWidth = [](HWND control) {
+                const int length = GetWindowTextLengthW(control);
+                std::wstring label(static_cast<size_t>(length) + 1, L'\0');
+                GetWindowTextW(control, label.data(), length + 1);
+                HDC dc = GetDC(control);
+                SIZE size{};
+                if (dc) {
+                    auto old = SelectObject(dc, reinterpret_cast<HFONT>(SendMessageW(control, WM_GETFONT, 0, 0)));
+                    GetTextExtentPoint32W(dc, label.c_str(), length, &size);
+                    if (old) SelectObject(dc, old);
+                    ReleaseDC(control, dc);
+                }
+                return static_cast<int>(size.cx) + GetSystemMetrics(SM_CXMENUCHECK) + 16;
+            };
+            const int normalW = optionWidth(g_hRadioTextReadableBackgroundNormal);
+            const int invertedW = optionWidth(g_hRadioTextReadableBackgroundInverted);
+            if (normalW + gap + invertedW > optionW) {
+                placeCtl(g_hRadioTextReadableBackgroundNormal, x + indent, y, optionW, comboH);
+                y += comboH + rowGap;
+                placeCtl(g_hRadioTextReadableBackgroundInverted, x + indent, y, optionW, comboH);
+            } else {
+                placeCtl(g_hRadioTextReadableBackgroundNormal, x + indent, y, normalW, comboH);
+                placeCtl(g_hRadioTextReadableBackgroundInverted, x + indent + normalW + gap, y,
+                         std::max(0, optionW - normalW - gap), comboH);
+            }
             y += comboH + rowGap;
             placeFull(g_hChkTextAutoWrap, comboH);
         }
@@ -850,6 +853,7 @@ LayoutApplyResult ApplyLayout(HWND hWnd, LayoutPass pass) {
         }
         addPos(w, 0, 0, 0, 0, false, true);
     };
+    hideToolbarOptionIfUnused(g_hBtnToggleAnn);
     hideToolbarOptionIfUnused(g_hComboAnnotMethod);
     hideToolbarOptionIfUnused(g_hComboShapeGeometry);
     hideToolbarOptionIfUnused(g_hComboFreehandCorrection);
@@ -870,6 +874,7 @@ LayoutApplyResult ApplyLayout(HWND hWnd, LayoutPass pass) {
     hideToolbarOptionIfUnused(g_hRadioTextReadableBackgroundNormal);
     hideToolbarOptionIfUnused(g_hRadioTextReadableBackgroundInverted);
     hideToolbarOptionIfUnused(g_hChkTextAutoWrap);
+    hideToolbarOptionIfUnused(g_hChkTextVertical);
     hideToolbarOptionIfUnused(g_hChkPanMouseWheelZoom);
     hideToolbarOptionIfUnused(g_hComboWidth);
     hideToolbarOptionIfUnused(g_hComboMarkerAlpha);
@@ -965,8 +970,12 @@ LayoutApplyResult ApplyLayout(HWND hWnd, LayoutPass pass) {
     };
     for (const auto& p : positions) {
         if (!p.hwnd) continue;
-        RECT desired{ p.x, p.y, p.x + p.w, p.y + p.h };
         RECT current = GetWindowRectInParentCoords(p.hwnd);
+        const HWND parent = GetParent(p.hwnd);
+        const int dropDownHeight = parent == g_hPdfToolbar ? toolbar_scroll::DropDownHeight(p.hwnd) : 0;
+        const int fieldHeight = dropDownHeight > 0 ? current.bottom - current.top : p.h;
+        RECT desired{ p.x, p.y, p.x + p.w, p.y + fieldHeight };
+        if (dropDownHeight > 0 && !p.visible) desired = current;
         const bool boundsChanged = !RectEquals(current, desired);
         const bool visibilityChanged =
             p.manageVisibility && (((GetWindowLongPtrW(p.hwnd, GWL_STYLE) & WS_VISIBLE) != 0) != p.visible);
@@ -979,7 +988,6 @@ LayoutApplyResult ApplyLayout(HWND hWnd, LayoutPass pass) {
             MarkChanged(result, p.hwnd);
             RECT currentInRoot = current;
             RECT desiredInRoot = desired;
-            HWND parent = GetParent(p.hwnd);
             if (parent && parent != hWnd) {
                 MapWindowPoints(parent, hWnd, reinterpret_cast<POINT*>(&currentInRoot), 2);
                 MapWindowPoints(parent, hWnd, reinterpret_cast<POINT*>(&desiredInRoot), 2);
@@ -994,8 +1002,9 @@ LayoutApplyResult ApplyLayout(HWND hWnd, LayoutPass pass) {
             flags |= p.visible ? SWP_SHOWWINDOW : SWP_HIDEWINDOW;
         }
 
-        ParentBatch& batch = batchForParent(GetParent(p.hwnd));
-        batch.ops.push_back(ApplyOp{ p.hwnd, batch.parent, p.x, p.y, p.w, p.h, flags });
+        ParentBatch& batch = batchForParent(parent);
+        batch.ops.push_back(ApplyOp{ p.hwnd, batch.parent, p.x, p.y, p.w,
+            dropDownHeight > 0 ? dropDownHeight : p.h, flags });
     }
 
     for (const auto& batch : batches) {

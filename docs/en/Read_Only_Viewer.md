@@ -14,6 +14,8 @@ Start `readonly_viewer.exe` from the Full or Lite distribution folder, then choo
 
 When a same-named `.clrop` file is in the same folder, the viewer displays the saved annotations over the PDF.
 
+Text annotations use their saved font, point size, line breaks, vertical writing, and content orientation. Stars retain their pentagram-line, outline, or filled form and whole-shape rotation, combined with the PDF's original orientation and temporary view rotation.
+
 ```text
 lecture.pdf     original PDF
 lecture.clrop   annotations for this PDF
@@ -26,9 +28,30 @@ Keep both files together when copying, moving, or sharing them. Save annotations
 - Select several files in **Open File**, or add files from the file list, then switch tabs. `Ctrl+Tab` selects the next tab; `Ctrl+Shift+Tab` selects the previous one.
 - Choose files and headings on the left and read the document on the right. You can open a folder and navigate back or up to its parent.
 - Drag tabs to reorder them, move them to another viewer window, or detach them by dragging outside the window. Separate windows let you read documents side by side. The tab context menu also provides move commands.
-- Press `Ctrl+F` to search document text or PDF text. `F3` finds the next result and `Shift+F3` the previous one. `Ctrl+B` hides the left pane for focused reading.
+- Press `Ctrl+F` to search document text or PDF text. `F3` finds the next result and `Shift+F3` the previous one.
+- Choose **View → Focus Mode** (`Ctrl+B`) to use the full area below the menu bar for reading. Switch documents from **Tab List** and change zoom or display format from **View**. The search field opens when requested and closes when you run a search or press `Esc`. Choose **Focus Mode** again or press `Ctrl+B` to restore the regular layout.
 
 The narrow band to the right of document text normally marks lines containing Japanese characters. While the search field contains a query, it marks only matching lines in the current text view. Clearing the query restores the normal display. Click the band to move to that part of the document.
+
+## Choose where to read a long file
+
+Text larger than 50 MiB and files detected as binary that exceed 64 KiB prompt for a range before loading the whole file. The default byte count is 64 KiB.
+
+- Enter a zero-based byte offset and byte count in decimal or `0x`-prefixed hexadecimal. The end offset is excluded.
+- The start slider moves the range while keeping its byte count. The end slider changes its extent. **Previous Range** and **Next Range** move by the current byte count. Edits update the selection and load warning; reading starts with **Open This Range**.
+- Use **Read Range**, the View menu, or the tab context menu to choose another range. Use the menu if the button is hidden in a narrow window. Ordinary-sized text and binary files also support range selection.
+
+Each read is limited to 256 MiB. Confirmation is disabled if the estimated load is too high for available memory. Invalid input, cancellation, and read failures preserve the current display. The original file is never written. Ranges belong to the current tab and are not restored on the next launch.
+
+**Hex** shows each byte as two hexadecimal digits; **Binary** shows it as eight binary digits (0 and 1). Both show the original file offset in hexadecimal on the left and printable ASCII characters on the right. Other values appear as `.`, without decoding Japanese or other text encodings. Hex uses 16 bytes per row; Binary uses eight. The view stays selected when switching tabs within the same window or changing the read range. Switching views changes neither the original file nor the read range.
+
+Both display at most the first 64 KiB of a loaded range, with a notice when more bytes are omitted. Change the read range to view another part. Cutting text inside a character may produce garbled text in Source view. Use Hex or Binary to inspect the exact bytes.
+
+## Check the PDF and annotation pairing
+
+An open PDF is protected against external editing, deletion, renaming and replacement. Close its views before editing it in another application. A same-name `.clrop` is checked against file size, page count and original page dimensions; recorded SHA-256 is also checked. Mismatched annotations are hidden and a notice appears in the PDF panel. Use the main application to review the pairing or update its identity. A changed `.clrop` is checked again. The viewer never rewrites the original or its pairing information.
+
+The main application's `Tools → Find PDF / CLROP candidates` can open a dedicated candidate preview. This read-only, unconfirmed overlay can include mismatched annotations for inspection. It is separate from normal pairing acceptance and saves no viewer settings or pairing information. See [finding PDF candidates](CLROP_Annotation_Format.md#find-pdf-candidates) for the two search modes.
 
 ## Select a PDF region and its text
 

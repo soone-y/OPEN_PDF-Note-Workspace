@@ -42,8 +42,9 @@ inline LRESULT CALLBACK Proc(HWND list, UINT message, WPARAM wParam, LPARAM lPar
         SCROLLINFO range{};
         range.cbSize = sizeof(range);
         range.fMask = SIF_RANGE | SIF_PAGE;
+        int64_t last = count - 1;
         if (GetScrollInfo(list, SB_VERT, &range)) {
-            const auto last = std::max<int64_t>(0, static_cast<int64_t>(range.nMax) - std::max<UINT>(1, range.nPage) + 1);
+            last = std::max<int64_t>(0, static_cast<int64_t>(range.nMax) - std::max<UINT>(1, range.nPage) + 1);
             const int delta = GET_WHEEL_DELTA_WPARAM(wParam);
             if ((top == 0 && delta > 0) || (top >= last && delta < 0)) {
                 state->wheel.Reset();
@@ -57,7 +58,9 @@ inline LRESULT CALLBACK Proc(HWND list, UINT message, WPARAM wParam, LPARAM lPar
             SendMessageW(list, LB_SETTOPINDEX, static_cast<WPARAM>(target), 0);
             state->applyingWheel = false;
             const auto actual = SendMessageW(list, LB_GETTOPINDEX, 0, 0);
-            if (actual != requested) state->wheel.Reset(); // no buffered distance at an edge
+            if (actual != requested || actual == 0 || actual >= last) {
+                state->wheel.Reset(); // no fractional credit or debt at an edge
+            }
             // LISTBOX can draw directly during LB_SETTOPINDEX. Complete any
             // pending paint before the next packet without forcing a full erase.
             if (actual != top) UpdateWindow(list);

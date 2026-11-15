@@ -145,8 +145,6 @@ static void ScrollMarkupSettingsTo(HWND hWnd, MarkupSettingsCtx* ctx, int newPos
     if (clamped == ctx->scrollPos) return;
     int delta = ctx->scrollPos - clamped;
     ctx->scrollPos = clamped;
-    ScrollWindowEx(ctx->scrollPanel, 0, delta, nullptr, nullptr, nullptr, nullptr,
-                   SW_INVALIDATE | SW_ERASE | SW_SCROLLCHILDREN);
     SCROLLINFO si{};
     si.cbSize = sizeof(si);
     si.fMask = SIF_POS;
@@ -154,6 +152,7 @@ static void ScrollMarkupSettingsTo(HWND hWnd, MarkupSettingsCtx* ctx, int newPos
     SetScrollInfo(hWnd, SB_VERT, &si, TRUE);
     UpdateMarkupSectionNavUi(ctx, SettingsSectionForScrollPosition(
         ctx->sectionTops, ctx->sectionCount, ctx->scrollPos));
+    ScrollSettingsContents(ctx->scrollPanel, delta);
 }
 
 static void JumpMarkupSettingsToSection(HWND hWnd, MarkupSettingsCtx* ctx, int sectionIndex) {
@@ -644,6 +643,7 @@ static LRESULT CALLBACK MarkupSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, L
         }
 
         ApplyThemeToDialog(hWnd);
+        PrepareSettingsScroll(hWnd, ctx->scrollPanel);
         return 0;
     }
     case WM_SHOWWINDOW:
@@ -763,6 +763,7 @@ static LRESULT CALLBACK MarkupSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, L
                 return 0;
             }
             ctx->nextDialog = category;
+            RestoreOwnerAfterModal(ctx->owner);
             DestroyWindow(hWnd);
             return 0;
         }
@@ -797,6 +798,7 @@ static LRESULT CALLBACK MarkupSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, L
         if (id == IDCANCEL || id == 0) {
             if (!ctx->embedded) {
                 ctx->notifyCancelDiscard = true;
+                RestoreOwnerAfterModal(ctx->owner);
                 DestroyWindow(hWnd);
             }
             return 0;
@@ -805,6 +807,7 @@ static LRESULT CALLBACK MarkupSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, L
     }
     case WM_CLOSE:
         if (ctx && ctx->embedded) return 0;
+        if (ctx && !ctx->embedded) RestoreOwnerAfterModal(ctx->owner);
         DestroyWindow(hWnd);
         return 0;
     case WM_DESTROY:

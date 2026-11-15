@@ -37,8 +37,15 @@ inline std::wstring Key(const std::filesystem::path& path) {
     return key;
 }
 
-// Open existing local files only, retaining data-read sharing semantics that
-// enforce denial of DELETE. FILE_COMPLETE_IF_OPLOCKED returns a usable handle
+// PDFs remain immutable while owned: deny WRITE as well as DELETE. Other
+// documents retain external-write sharing (their reload workflow depends on it).
+[[nodiscard]] inline DWORD SourceSharing(const std::wstring& path) {
+    auto extension = std::filesystem::path(path).extension().wstring();
+    for (auto& ch : extension) ch = static_cast<wchar_t>(std::towlower(ch));
+    return extension == L".pdf" ? FILE_SHARE_READ : FILE_SHARE_READ | FILE_SHARE_WRITE;
+}
+
+// Open existing local files only. FILE_COMPLETE_IF_OPLOCKED returns a usable handle
 // without waiting for the external oplock acknowledgement. We never read data
 // through this handle. Do not fall back to a potentially blocking CreateFile.
 [[nodiscard]] inline HANDLE OpenWithoutOplockWait(const std::wstring& path, DWORD* error) {
@@ -69,7 +76,7 @@ inline std::wstring Key(const std::filesystem::path& path) {
     IO_STATUS_BLOCK io{};
     HANDLE handle = nullptr;
     const NTSTATUS status = create(&handle, FILE_GENERIC_READ, &attributes, &io, nullptr,
-        FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_OPEN,
+        FILE_ATTRIBUTE_NORMAL, SourceSharing(path), FILE_OPEN,
         FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT | FILE_COMPLETE_IF_OPLOCKED,
         nullptr, 0);
     if (status < 0) { *error = mapError(status); return INVALID_HANDLE_VALUE; }

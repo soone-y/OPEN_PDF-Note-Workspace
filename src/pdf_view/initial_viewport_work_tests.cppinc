@@ -1,5 +1,65 @@
 // Invoked only by the isolated UI automation fixture. Kept in this translation
 // unit to exercise the real private fit/restore/cache boundaries, not a replica.
+[[nodiscard]] static bool RunPdfBitmapRetentionProbe(HWND pdfWnd, std::wstring* outError) {
+    const auto fail = [&](const wchar_t* message) {
+        if (outError) *outError = message;
+        return false;
+    };
+    g_config.pdfFlowMode = L"v_ttb";
+    g_config.pdfSinglePageMode = false;
+    UpdatePageLayout(pdfWnd);
+    const auto viewport = ComputePdfVirtualViewport(pdfWnd);
+    const double first = g_pdf.pageRects.front().top;
+    const double distant = std::min(g_pdf.pageRects.back().top, MaxScrollY(viewport.viewH));
+    if (!viewport.valid || distant - g_pdf.pageRects.front().bottom <=
+        std::max(viewport.viewH, viewport.retainMargin))
+        return fail(L"PDF fixture does not have a distant viewport for bitmap retention.");
+
+    auto& page = g_pdf.pages.front();
+    EvictPageBitmap(page);
+    const auto [width, height] = ComputePageBitmapTargetSize(page, true);
+    if (!RenderPdfPageBitmap(0, width, height, page.pixels, page.stride))
+        return fail(L"Cannot render the bitmap retention fixture.");
+    page.bmpW = width;
+    page.bmpH = height;
+    page.pixelsGeneration = g_pdf.renderGeneration;
+    page.bitmapCoarse = true;
+    const auto* pixels = page.pixels.data();
+    g_pdf.scrollY = first;
+    UpdatePdfVirtualScrollCaches(pdfWnd, PdfVirtualUpdateMode::Paint);
+    g_pdf.scrollY = distant;
+    UpdatePdfVirtualScrollCaches(pdfWnd, PdfVirtualUpdateMode::Paint);
+    if (page.pixels.empty() || page.pixels.data() != pixels || g_pdfBitmapRetentionTimerHwnd != pdfWnd)
+        return fail(L"A fast jump discarded the bitmap we just left or failed to arm its expiry.");
+    g_pdf.scrollY = first;
+    UpdatePdfVirtualScrollCaches(pdfWnd, PdfVirtualUpdateMode::Paint);
+    if (page.pixels.empty() || page.pixels.data() != pixels)
+        return fail(L"Returning to a recently shown PDF page lost its bitmap.");
+    g_pdf.scrollY = distant;
+    UpdatePdfVirtualScrollCaches(pdfWnd, PdfVirtualUpdateMode::Paint);
+
+    // Dispatch the due message deterministically, without sleeping in the UI.
+    page.bitmapRetainUntilTick = g_pdfBitmapRetentionDeadline = preview_trace::TickNow();
+    SendMessageW(pdfWnd, WM_TIMER, kPdfBitmapRetentionTimerId, 0);
+    if (!page.pixels.empty()) return fail(L"An expired distant PDF bitmap stayed cached.");
+
+    // 33 MiB is below the offscreen per-page cap and above the minimum budget.
+    // A fresh expiry must not protect it from the ordinary budget trim.
+    page.bmpW = 3072;
+    page.bmpH = 2816;
+    page.stride = page.bmpW * 4;
+    page.pixels.resize(static_cast<size_t>(page.stride) * page.bmpH);
+    page.pixelsGeneration = g_pdf.renderGeneration;
+    page.bitmapRetainUntilTick = preview_trace::TickNow() + kPdfBitmapRetentionMs;
+    const int savedBudget = g_config.pdfBitmapBudgetMiB;
+    g_config.pdfBitmapBudgetMiB = kPdfBitmapBudgetMiBMin;
+    UpdatePdfVirtualScrollCaches(pdfWnd, PdfVirtualUpdateMode::Paint);
+    g_config.pdfBitmapBudgetMiB = savedBudget;
+    if (!page.pixels.empty()) return fail(L"Timed PDF bitmap retention overrode the memory budget.");
+    preview_trace::Append(L"PdfBitmapRetention", L"fast_jump=true reversal=true expiry=true budget=true");
+    return true;
+}
+
 bool RunPdfInitialViewportWorkProbe(HWND pdfWnd, std::wstring* outError) {
     const auto fail = [&](const wchar_t* message) {
         if (outError) *outError = message;
@@ -233,5 +293,5 @@ bool RunPdfInitialViewportWorkProbe(HWND pdfWnd, std::wstring* outError) {
         !BuildCurrentPdfViewRecord(reloaded) || reloaded.pageIndex != targetPage)
         return fail(L"Persisted PDF reload repeated work or lost its saved page.");
     preview_trace::Append(L"PdfInitialViewportWork", L"cases=" + std::to_wstring(cases) + L" reload=true passed=true");
-    return cases == 44;
+    return cases == 44 && RunPdfBitmapRetentionProbe(pdfWnd, outError);
 }

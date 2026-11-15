@@ -3,6 +3,7 @@
 #include "pdf_view/marker_composite.h"
 #include "pdf_view/path_multiply.h"
 #include "pdf_view/text_selection_pdfium.h"
+#include "pdf_view/magnifier_render.h"
 #include "core/page_rotation.h"
 #include "fpdf_annot.h"
 #include "fpdf_save.h"
@@ -451,9 +452,97 @@ void WritingDirectionCases() {
 }
 } // namespace
 
+void MagnifierCases() {
+    size_t cases = 0, coverageCases = 0, detailedPixels = 0;
+    for (int intrinsic = 0; intrinsic < 4; ++intrinsic) for (bool crop : {false, true}) {
+        auto document = Fixture(0, false, intrinsic, crop);
+        auto page = FPDF_LoadPage(document, 0);
+        auto font = FPDFText_LoadStandardFont(document, "Helvetica");
+        auto text = FPDFPageObj_CreateTextObj(document, font, 9);
+        Require(text && FPDFText_SetText(text, reinterpret_cast<FPDF_WIDESTRING>(L"Magnifier fine text 123")) &&
+            FPDFPageObj_SetFillColor(text, 0, 0, 0, 255), "magnifier text fixture");
+        FPDFPageObj_Transform(text, 1, 0, 0, 1, 50, 45);
+        FPDFPage_InsertObject(page, text);
+        Require(FPDFPage_GenerateContent(page), "magnifier content");
+        const auto before = RenderPage(document);
+        for (int rotation = 0; rotation < 4; ++rotation)
+            for (double zoom : {1.25, 2.0, 4.0}) for (int dpi : {96, 192}) {
+                const int width = static_cast<int>(std::lround(FPDF_GetPageWidth(page)*zoom*dpi/96));
+                const int height = static_cast<int>(std::lround(FPDF_GetPageHeight(page)*zoom*dpi/96));
+                const int w = rotation % 2 ? height : width, h = rotation % 2 ? width : height;
+                std::vector<uint8_t> full(static_cast<size_t>(w)*h*4, 255);
+                auto bitmap = FPDFBitmap_CreateEx(w, h, FPDFBitmap_BGRA, full.data(), w*4);
+                Require(bitmap != nullptr, "magnifier reference bitmap");
+                FPDF_RenderPageBitmap(bitmap, page, 0, 0, w, h, rotation, FPDF_ANNOT | FPDF_LCD_TEXT);
+                FPDFBitmap_Destroy(bitmap);
+                for (bool edge : {false, true}) {
+                    const int x = edge ? 13 : -w/2, y = edge ? 17 : -h/2;
+                    const RECT pageRect{x, y, x+w, y+h}, viewport{0, 0, 151, 99};
+                    pdf_magnifier::Region region;
+                    Require(pdf_magnifier::Render(document, 0, pageRect, viewport, rotation, region), "magnifier region render");
+                    const int rw = region.rect.right-region.rect.left, rh = region.rect.bottom-region.rect.top;
+                    Require(region.pixels.size() == static_cast<size_t>(rw)*rh*4 && rw <= 151 && rh <= 99,
+                        "magnifier must allocate only its clipped visible region");
+                    for (int row = 0; row < rh; ++row) for (int col = 0; col < rw; ++col) {
+                        const size_t expected = (static_cast<size_t>(row+region.rect.top-y)*w+col+region.rect.left-x)*4;
+                        const size_t actual = (static_cast<size_t>(row)*rw+col)*4;
+                        if (!std::equal(full.begin()+expected, full.begin()+expected+4, region.pixels.begin()+actual)) {
+                            std::cerr << "magnifier mismatch intrinsic=" << intrinsic << " crop=" << crop << " rotation=" << rotation
+                                << " zoom=" << zoom << " dpi=" << dpi << " edge=" << edge << " x=" << col << " y=" << row
+                                << " expected=" << int(full[expected]) << ',' << int(full[expected+1]) << ',' << int(full[expected+2])
+                                << " actual=" << int(region.pixels[actual]) << ',' << int(region.pixels[actual+1]) << ',' << int(region.pixels[actual+2]) << '\n';
+                            Require(false, "magnifier pixels must match native high resolution PDF rendering");
+                        }
+                        if (region.pixels[actual] != 255) ++detailedPixels;
+                    }
+                    if (zoom == 2.0 && dpi == 96 && !edge) {
+                        std::vector<uint8_t> expectedCoverage;
+                        Require(pdf_text_coverage::Render(document, 0, w, h, rotation, expectedCoverage), "magnifier coverage reference");
+                        pdf_magnifier::Coverage coverage;
+                        Require(pdf_magnifier::RenderCoverage(document, 0, pageRect, viewport, rotation, coverage), "magnifier text color coverage");
+                        const int cw = coverage.rect.right-coverage.rect.left;
+                        for (int row = 0; row < rh; ++row) for (int col = 0; col < rw; ++col) {
+                            const size_t expected = static_cast<size_t>(row+region.rect.top-y)*w+col+region.rect.left-x;
+                            const size_t actual = static_cast<size_t>(row+region.rect.top-coverage.rect.top)*cw+col+region.rect.left-coverage.rect.left;
+                            Require(coverage.alpha[actual] == expectedCoverage[expected], "text color coverage must match lens resolution and rotation");
+                        }
+                        ++coverageCases;
+                    }
+                    ++cases;
+                }
+            }
+        Require(RenderPage(document) == before, "magnifier must preserve the source page");
+        FPDF_ClosePage(page); FPDFFont_Close(font); FPDF_CloseDocument(document);
+    }
+    Require(detailedPixels > 1000, "magnifier reference must contain fine text");
+    const pdf_magnifier::Transform transform{4.0, 85.0, 45.0};
+    Require(transform.X(100) == 60 && transform.Y(60) == 60, "magnifier keeps the cursor at the lens center");
+    const auto mapped = transform.Page(80, 40, 100, 200);
+    Require(mapped.left == -20 && mapped.top == -20 && mapped.right == 380 && mapped.bottom == 780,
+        "magnifier page and annotation geometry share one transform");
+    const auto invalid = pdf_magnifier::Transform{std::numeric_limits<double>::infinity(), 0, 0}.Page(0, 0, 100, 100);
+    Require(IsRectEmpty(&invalid), "magnifier rejects invalid geometry before integer conversion");
+    pdf_magnifier::Region retained{{1,2,3,4}, {9,8,7}};
+    Require(!pdf_magnifier::Render(nullptr, 0, {0,0,100,100}, {0,0,10,10}, 0, retained) &&
+        retained.pixels == std::vector<uint8_t>({9,8,7}), "magnifier failure preserves caller data");
+    auto document = Fixture(0, false);
+    pdf_magnifier::Coverage coverageRetained{{1,2,3,4}, {9,8,7}};
+    Require(!pdf_magnifier::Render(document, 0, {0,0,100000,100000}, {0,0,100000,100000}, 0, retained) &&
+        !pdf_magnifier::Render(document, 99, {0,0,100,100}, {0,0,10,10}, 0, retained) &&
+        !pdf_magnifier::Render(document, 0, {20,20,100,100}, {0,0,10,10}, 0, retained) &&
+        retained.pixels == std::vector<uint8_t>({9,8,7}), "magnifier rejects excess allocation, missing pages and empty intersections");
+    Require(!pdf_magnifier::RenderCoverage(document, 0, {0,0,100000,100000}, {0,0,100000,100000}, 0, coverageRetained) &&
+        !pdf_magnifier::RenderCoverage(document, 99, {0,0,100,100}, {0,0,10,10}, 0, coverageRetained) &&
+        coverageRetained.alpha == std::vector<uint8_t>({9,8,7}), "magnifier coverage failure preserves caller data");
+    FPDF_CloseDocument(document);
+    std::cout << "magnifier_render:ok cases=" << cases << " coverage_cases=" << coverageCases
+        << " rotations=4 intrinsic_rotations=4 crops=2 zooms=3 dpis=2\n";
+}
+
 int main() {
     FPDF_InitLibrary();
     try {
+        MagnifierCases();
         ScaledTextSelectionCases();
         WritingDirectionCases();
         MarkerPaintBoundsCases();

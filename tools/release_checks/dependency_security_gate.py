@@ -30,6 +30,8 @@ ALLOWED_SOURCE_HOSTS = {
 
 LOCAL_PATCHES = (
     ("third_party/md4c", "patches/0001-japanese-whitespace-and-punctuation.patch"),
+    ("third_party/md4c", "patches/0002-explicit-quote-continuation.patch"),
+    ("third_party/md4c", "patches/0003-double-underscore-underline.patch"),
     ("third_party/pdfium", "patches/0001-fix-ijg-notice-link.patch"),
 )
 
@@ -113,8 +115,8 @@ def local_version(component: dict, evidence: Path) -> str:
             raise ValueError("MD4C VERSION must pin a release baseline and full upstream commit")
         return version
     if name == "zlib runtime":
-        version = evidence.read_text(encoding="utf-8").splitlines()[0].strip()
-        if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        version = evidence.read_text(encoding="utf-8").partition("\n")[0].strip()
+        if not re.fullmatch(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?", version):
             raise ValueError("zlib VERSION is malformed")
         return version
     raise ValueError(f"unsupported reviewed component: {name!r}")

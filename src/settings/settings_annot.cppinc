@@ -551,8 +551,6 @@ static void ScrollAnnotSettingsTo(HWND hWnd, AnnotSettingsCtx* ctx, int newPos) 
     if (clamped == ctx->scrollPos) return;
     int delta = ctx->scrollPos - clamped;
     ctx->scrollPos = clamped;
-    ScrollWindowEx(ctx->scrollPanel, 0, delta, nullptr, nullptr, nullptr, nullptr,
-                   SW_INVALIDATE | SW_ERASE | SW_SCROLLCHILDREN);
     SCROLLINFO si{};
     si.cbSize = sizeof(si);
     si.fMask = SIF_POS;
@@ -560,6 +558,7 @@ static void ScrollAnnotSettingsTo(HWND hWnd, AnnotSettingsCtx* ctx, int newPos) 
     SetScrollInfo(hWnd, SB_VERT, &si, TRUE);
     UpdateAnnotSectionNavUi(ctx, SettingsSectionForScrollPosition(
         ctx->sectionTops, ctx->sectionCount, ctx->scrollPos));
+    ScrollSettingsContents(ctx->scrollPanel, delta);
 }
 
 static void JumpAnnotSettingsToSection(HWND hWnd, AnnotSettingsCtx* ctx, int sectionIndex) {
@@ -1499,6 +1498,7 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
 
         ApplyThemeToDialog(hWnd);
         UpdateLineToolsShareUi(ctx);
+        PrepareSettingsScroll(hWnd, ctx->scrollPanel);
         return 0;
     }
     case WM_SHOWWINDOW:
@@ -1650,6 +1650,7 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
                 return 0;
             }
             ctx->nextDialog = category;
+            RestoreOwnerAfterModal(ctx->owner);
             DestroyWindow(hWnd);
             return 0;
         }
@@ -1664,6 +1665,7 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
         if ((id == IDCANCEL || id == 0) && ctx) {
             if (!ctx->embedded) {
                 ctx->notifyCancelDiscard = true;
+                RestoreOwnerAfterModal(ctx->owner);
                 DestroyWindow(hWnd);
             }
             return 0;
@@ -1758,6 +1760,7 @@ static LRESULT CALLBACK AnnotSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, LP
     }
     case WM_CLOSE:
         if (ctx && ctx->embedded) return 0;
+        if (ctx && !ctx->embedded) RestoreOwnerAfterModal(ctx->owner);
         DestroyWindow(hWnd);
         return 0;
     case WM_DESTROY:

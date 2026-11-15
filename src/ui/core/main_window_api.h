@@ -1,4 +1,5 @@
 #pragma once
+#include "workspace/session_order.h"
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -59,11 +60,8 @@ std::optional<std::wstring> PromptExistingLocalPathAppFirst(HWND owner, const st
                                                           const std::wstring& confirmLabel = {});
 
 
-enum class SessionNumberingMode { CountPlusOne, MaxNumberPlusOne };
 void LoadLectures();
 bool UpdateLectureOpenTime(const std::wstring& lecturePath);
-SessionNumberingMode ParseSessionNumberingMode(const std::wstring& mode);
-int NextSessionNumberForSuggestions(const std::vector<SessionEntry>& sessions, SessionNumberingMode mode);
 // Workspace items access
 const std::vector<std::wstring>& GetLectures();
 const std::vector<struct SessionEntry>& GetSessions();
@@ -74,7 +72,7 @@ std::wstring BestMatchByStem(const std::filesystem::path& anchor,
                              const std::vector<struct FileEntry>& candidates);
 std::wstring ToLowerAscii(std::wstring s);
 HWND MainDialogOwner(HWND hWnd);
-void ReloadSessionsAndSelect(const std::wstring& lecturePath, const std::wstring& selectSession, bool editNew);
+void ReloadSessionsAndSelect(const std::wstring& lecturePath, const std::wstring& desiredPath, bool reopenFiles);
 std::vector<std::wstring> PromptExistingLocalFolders(HWND owner, const std::filesystem::path& initialDir, const std::wstring& title, bool allowMultiple,
                                                   const std::wstring& confirmLabel = {});
 int CurrentSessionIndex();

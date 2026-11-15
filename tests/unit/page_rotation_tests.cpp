@@ -6,6 +6,9 @@
 #include "ui/quarter_turn_bitmap.h"
 #include "ui/alpha_polygon.h"
 #include "ui/dashed_shape_outline.h"
+#include "ui/vertical_text_gdi.h"
+#include "ui/annotation_text_raster.h"
+#include "readonly_viewer/annotation_text.h"
 #include "fpdf_edit.h"
 #include "fpdf_transformpage.h"
 #include <cstdlib>
@@ -22,6 +25,46 @@ bool Near(double x, double y) { return std::abs(x - y) < 1e-10; }
 
 int main() {
     FPDF_InitLibrary();
+    const auto vertical = vertical_text::Build(L"甲乙丙丁", 3);
+    Expect(vertical.columns.size() == 2 && vertical.rows == 3 && vertical.glyphs.size() == 4,
+           "vertical text wraps downward then starts the column to its left");
+    Expect(vertical_text::Caret(vertical, 3).column == 1 && vertical_text::Caret(vertical, 3).row == 0,
+           "vertical wrap caret starts the next column");
+    Expect(vertical_text::Hit(vertical, 0, 3) == 3 && vertical_text::Hit(vertical, 1, 0.9) == 4,
+           "vertical hit uses insertion stops including a wrapped column end");
+    const auto breaks = vertical_text::Build(L"甲\r\n乙\n", 10);
+    Expect(breaks.columns.size() == 3 && breaks.glyphs.size() == 2 &&
+           vertical_text::Caret(breaks, 3).column == 1 && vertical_text::Caret(breaks, 5).column == 2,
+           "vertical CRLF and trailing newline keep original UTF16 indices");
+    const auto clusters = vertical_text::Build(L"\xd83d\xde00か\x3099", 1);
+    Expect(clusters.glyphs.size() == 2 && clusters.glyphs[0].length == 2 && clusters.glyphs[1].length == 2 &&
+           vertical_text::Hit(clusters, 0, 0.25) == 0 && vertical_text::Hit(clusters, 1, 0.8) == 4,
+           "vertical layout never splits surrogate pairs or combining kana into separate cells");
+    Expect(vertical_text::Build(L"", 0).columns.size() == 1,
+           "empty vertical input has a valid first caret even with no available height");
+    HDC verticalDc = CreateCompatibleDC(nullptr);
+    BITMAPINFO verticalInfo{};
+    verticalInfo.bmiHeader = {sizeof(BITMAPINFOHEADER), 64, -64, 1, 32, BI_RGB, 0, 0, 0, 0, 0};
+    void* verticalBits = nullptr;
+    HBITMAP verticalBitmap = CreateDIBSection(verticalDc, &verticalInfo, DIB_RGB_COLORS, &verticalBits, nullptr, 0);
+    Expect(verticalDc && verticalBitmap && verticalBits, "vertical text native canvas allocation");
+    auto verticalOldBitmap = SelectObject(verticalDc, verticalBitmap);
+    HFONT verticalFont = CreateFontW(-10, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, NONANTIALIASED_QUALITY, DEFAULT_PITCH, L"Arial");
+    auto verticalOldFont = SelectObject(verticalDc, verticalFont);
+    SetBkMode(verticalDc, TRANSPARENT); SetTextColor(verticalDc, RGB(255,255,255));
+    std::fill_n(static_cast<DWORD*>(verticalBits), 64 * 64, 0);
+    vertical_text::Draw(verticalDc, {4,4,60,52}, L"HHHH", 16);
+    const auto hasInk = [&](int left, int top, int right, int bottom) {
+        for(int y=top;y<bottom;++y) for(int x=left;x<right;++x)
+            if(static_cast<DWORD*>(verticalBits)[y*64+x] & 0xffffff) return true;
+        return false;
+    };
+    Expect(hasInk(44,4,60,20) && hasInk(44,20,60,36) && hasInk(44,36,60,52) &&
+           hasInk(28,4,44,20) && !hasInk(28,20,44,52) && !hasInk(0,0,4,64),
+           "GDI vertical text paints three downward cells then the upper cell to the left, with clipping");
+    SelectObject(verticalDc,verticalOldFont); DeleteObject(verticalFont);
+    SelectObject(verticalDc,verticalOldBitmap); DeleteObject(verticalBitmap); DeleteDC(verticalDc);
     const double quarter=shape_rotation::kPi/2;
     const double pi=shape_rotation::kPi;
     const double starH=100*(1+std::cos(pi/5))/(2*std::sin(2*pi/5));
@@ -219,6 +262,46 @@ int main() {
     Expect(GetRValue(blended)==255 && std::abs(int(GetGValue(blended))-127)<=1 &&
            std::abs(int(GetBValue(blended))-127)<=1,"readonly shape fill retains the stored translucency");
     SelectObject(dc,old);DeleteObject(source);DeleteDC(dc);
+
+    // The reader consumes the current editor's saved lines and physical sizes.
+    HDC textDc=CreateCompatibleDC(nullptr);
+    BITMAPINFO textInfo{};textInfo.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);
+    textInfo.bmiHeader.biWidth=320;textInfo.bmiHeader.biHeight=-320;
+    textInfo.bmiHeader.biPlanes=1;textInfo.bmiHeader.biBitCount=32;textInfo.bmiHeader.biCompression=BI_RGB;
+    void* textBits=nullptr;
+    HBITMAP textBitmap=CreateDIBSection(textDc,&textInfo,DIB_RGB_COLORS,&textBits,nullptr,0);
+    Expect(textDc && textBitmap && textBits,"reader text surface allocation");
+    const auto previousTextBitmap=SelectObject(textDc,textBitmap);
+    for (double pointSize:{6.0,10.0626,18.0,36.0}) for (bool vertical:{false,true}) {
+        clrop::Item item;item.kind=clrop::Item::Kind::Text;item.id=L"saved-text-id";
+        item.pt=pointSize;item.font=L"Arial";item.color="#2040C0";
+        item.content=L"MMMM　WWWW";item.lines={L"MMMM",L"",L"WWWW"};
+        item.writingMode=vertical ? "vertical_rl" : "horizontal";
+        int inkWidth=0,inkHeight=0;
+        for (int turn=0;turn<4;++turn) {
+            const int w=turn%2 ? 100 : 240,h=turn%2 ? 240 : 100;
+            item.contentRotation=turn*90;item.bbox=std::array<double,4>{0,double(h),double(w),double(h)};
+            PatBlt(textDc,0,0,320,320,WHITENESS);
+            Expect(readonly_viewer::DrawAnnotationText(textDc,RECT{0,0,w,h},item),"reader draws current saved text at every font and rotation");
+            GdiFlush();int l=320,t=320,r=-1,b=-1;
+            const auto* pixels=static_cast<const DWORD*>(textBits);
+            for(int y=0;y<320;++y)for(int x=0;x<320;++x)if((pixels[y*320+x]&0xffffff)!=0xffffff) {
+                l=std::min(l,x);r=std::max(r,x);t=std::min(t,y);b=std::max(b,y);
+            }
+            Expect(r>=l && b>=t && r<w && b<h,"reader text stays inside its saved physical box");
+            const int iw=r-l+1,ih=b-t+1;
+            if (!turn) {inkWidth=iw;inkHeight=ih;}
+            else Expect(std::abs(iw-(turn%2?inkHeight:inkWidth))<=2 &&
+                        std::abs(ih-(turn%2?inkWidth:inkHeight))<=2,"rotation retains the exact text size and line arrangement");
+            Expect(item.id==L"saved-text-id" && item.lines.size()==3,"reader painting retains source IDs and saved line breaks");
+        }
+    }
+    Expect(annotation_text::FontHeight(10.0626)==81,"reader uses the editor's 576-DPI font-height rounding");
+    Expect(annotation_text::FontHeight(1e300)==0,"unrepresentable font sizes fail before integer conversion");
+    clrop::Item invalidText;invalidText.bbox=std::array<double,4>{0,1,1e200,1};
+    Expect(!readonly_viewer::DrawAnnotationText(textDc,RECT{0,0,100,100},invalidText),"oversized annotation rasters fail locally");
+    readonly_viewer::ClearAnnotationTextCache();
+    SelectObject(textDc,previousTextBitmap);DeleteObject(textBitmap);DeleteDC(textDc);
 
     FPDF_DOCUMENT document=FPDF_CreateNewDocument();
     FPDF_PAGE page=FPDFPage_New(document,0,600,800);

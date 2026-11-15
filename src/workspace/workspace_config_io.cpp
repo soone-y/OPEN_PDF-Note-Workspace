@@ -99,6 +99,7 @@ void ApplyConfigToUI(HWND hWnd) {
     g_textBoxReadableBackground = g_config.textBoxReadableBackground;
     g_textBoxReadableBackgroundInverted = g_config.textBoxReadableBackgroundInverted;
     g_textBoxAutoWrap = g_config.textBoxAutoWrap;
+    g_textBoxVertical = g_config.textBoxVertical;
     if (!g_config.noteFontName.empty()) g_noteFontName = g_config.noteFontName;
     if (g_noteFontName.empty()) g_noteFontName = GetDefaultFontFaceName();
     g_noteFontName = ResolveFontFaceName(g_noteFontName);
@@ -281,6 +282,7 @@ void ApplyConfigToUI(HWND hWnd) {
         SendMessageW(g_hChkTextAutoWrap, BM_SETCHECK,
                      g_textBoxAutoWrap ? BST_CHECKED : BST_UNCHECKED, 0);
     }
+    SyncToolbarTextWritingMode();
     if (g_hChkPanMouseWheelZoom) {
         SendMessageW(g_hChkPanMouseWheelZoom, BM_SETCHECK,
                      g_config.panMouseWheelZoom ? BST_CHECKED : BST_UNCHECKED, 0);

@@ -529,6 +529,12 @@ bool LocalNoteKernel::SetClroAsciiOnly(bool value) {
     return true;
 }
 
+bool LocalNoteKernel::SetQuoteLazyContinuation(bool value) {
+    if (!text_core_.SetQuoteLazyContinuation(value)) return false;
+    ResetDerivedState(true);
+    return true;
+}
+
 bool LocalNoteKernel::CanReadSyntax() const {
     return text_core_.valid() && syntax_ready_ &&
            !pending_transaction_.active() && !deferred_full_refresh_ &&
@@ -814,17 +820,24 @@ LocalNoteKernel* LocalNoteKernelRegistry::Find(NoteId noteId) {
     return it != kernels_.end() ? &it->second : nullptr;
 }
 
+bool LocalNoteKernel::UpdateFileMetadata(NoteMetadata metadata, NoteContentKind contentKind) {
+    return RebindFile(text_core_.note_id(), std::move(metadata), contentKind);
+}
+
+bool LocalNoteKernel::RebindFile(NoteId noteId, NoteMetadata metadata, NoteContentKind contentKind) {
+    if (!text_core_.RebindOwner(noteId, std::move(metadata))) return false;
+    // Preserve canonical roots and undo coordinates. The filename and route
+    // can change the derived document without changing its text.
+    ClearDerived();
+    content_kind_ = contentKind;
+    return true;
+}
+
 LocalNoteKernel* LocalNoteKernelRegistry::Rekey(
     NoteId from, NoteId to, NoteMetadata metadata, NoteContentKind contentKind) {
     if (!from.valid() || !to.valid() || from == to || Find(to)) return nullptr;
     LocalNoteKernel* kernel = Find(from);
-    if (!kernel || !kernel->valid()) return nullptr;
-    if (!kernel->text_core().RebindOwner(to, std::move(metadata))) return nullptr;
-    // No canonical edit occurs here: the immutable roots held by history and
-    // the source-line map stay identical. Only derived owners become stale.
-    kernel->ClearDerived();
-    // The caller chooses the route from the final filename before promotion.
-    kernel->content_kind_ = contentKind;
+    if (!kernel || !kernel->RebindFile(to, std::move(metadata), contentKind)) return nullptr;
     auto node = kernels_.extract(from.value);
     node.key() = to.value;
     return &kernels_.insert(std::move(node)).position->second;

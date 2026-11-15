@@ -394,6 +394,15 @@ std::optional<Utf16CodeUnitOffset> NoteSourceLineMap::RichEditIndexToCanonicalOf
     return std::nullopt;
 }
 
+std::optional<Utf16CodeUnitOffset> NoteSourceLineMap::RichEditSelectionEndpointToCanonicalOffset(
+    const Snapshot& snapshot, size_t richEditIndex) noexcept {
+    if (snapshot.valid() && richEditIndex > snapshot.rich_edit_text_length_ &&
+        richEditIndex - snapshot.rich_edit_text_length_ == 1) {
+        return Utf16CodeUnitOffset{snapshot.text_length_};
+    }
+    return RichEditIndexToCanonicalOffset(snapshot, richEditIndex);
+}
+
 bool NoteSourceLineMap::SameSnapshotIdentity(
     const Snapshot& lhs,
     const Snapshot& rhs) noexcept {

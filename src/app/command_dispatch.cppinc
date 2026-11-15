@@ -943,6 +943,7 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
             result.pages.push_back(spec);
         }
         result.standardTextAnnots = g_config.quickPdfStandardTextAnnots;
+        result.embedEditableData = g_config.quickPdfEmbedEditableData;
         result.matchPdfPaneTextLayout = g_config.quickPdfMatchPdfPaneTextLayout;
         result.textColor.mode = static_cast<pdf_annotation_export::TextColorMode>(g_config.quickPdfTextColorMode);
         result.textColor.background = g_config.quickPdfTextColorBackground;
@@ -1178,14 +1179,19 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
     case ID_OP_MOVE_NOTE:
         RenameOrMoveCurrentOperationTarget(hWnd, /*isPdf=*/false, /*renameOnly=*/false);
         break;
-    case ID_OP_OPEN_READONLY_VIEWER:
-        LaunchReadOnlyViewerForPdf(hWnd, CurrentLogicalPdfPath());
+    case ID_TOOLS_PDF_PAIR_DIRECTORY:
+    case ID_TOOLS_PDF_PAIR_CLROP:
+        ShowPdfPairFinder(hWnd, id == ID_TOOLS_PDF_PAIR_DIRECTORY
+            ? clrop::discovery::Mode::Directory : clrop::discovery::Mode::ForClrop,
+            CurrentPdfDirectory(), [](HWND owner, const std::filesystem::path& pdf, const std::filesystem::path& clrop) {
+                return LaunchReadOnlyViewerWithParams(owner, L"--pair-preview " + QuoteProcessArg(pdf.wstring()) + L" " + QuoteProcessArg(clrop.wstring()));
+            });
         break;
     case ID_OP_LAUNCH_READONLY_VIEWER:
         LaunchReadOnlyViewerEmpty(hWnd);
         break;
     case ID_OP_OPEN_READONLY_VIEWER_FILE:
-        OpenReadOnlyViewerCurrentOrPickFile(hWnd);
+        PickFileForReadOnlyViewer(hWnd);
         break;
     case ID_OP_CLOSE_ALL_READONLY_VIEWERS:
         CloseAllReadOnlyViewerWindows(hWnd);
@@ -1194,16 +1200,28 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
         ConvertOfficeFilesToCurrentSession(hWnd);
         break;
     case ID_OP_CONVERT_IMAGE_TO_PDF: {
-        if (!IsImageFile(std::filesystem::path(CurrentLogicalPdfPath()))) break;
-        std::wstring outputPath;
-        if (file_output::ConvertImageToPdf(hWnd, CurrentLogicalPdfPath(), &outputPath)) {
-            RefreshCurrentSessionFiles();
-            OpenPdfIfDifferent(hWnd, outputPath);
+        const std::filesystem::path currentFile(CurrentLogicalPdfPath());
+        const bool useCurrentImage = IsImageFile(currentFile) &&
+            write_checks::IsSafeLocalPath(currentFile) && RegularFileExistsWin32(currentFile);
+        const auto source = PromptExistingLocalPath(hWnd,
+            useCurrentImage ? currentFile.parent_path() : DialogContextInitialFolder(),
+            localization::Text(L"file_output.image_pdf.select_source"), /*requireDirectory=*/false,
+            useCurrentImage ? currentFile : std::filesystem::path{},
+            localization::Text(L"dialog.action.convert"));
+        if (!source) break;
+        if (!IsImageFile(std::filesystem::path(*source)) ||
+            !write_checks::IsSafeLocalPath(std::filesystem::path(*source))) {
+            ShowSoftNotice(hWnd, localization::Text(L"file_output.image_pdf.select_source"), SoftNoticeKind::Warning);
+            break;
         }
+        (void)file_output::ConvertImageToPdf(hWnd, *source);
         break;
     }
     case ID_OP_CREATE_BLANK_PDF:
         CreateBlankPdfInCurrentSession(hWnd);
+        break;
+    case ID_TOOLS_DETACH_PDF_ANNOTATIONS:
+        (void)file_output::DetachPdfAnnotationsToCopy(hWnd);
         break;
     case ID_OP_STAGE_MANAGE:
         ShowStageManagerDialog(hWnd);
@@ -1222,6 +1240,30 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
     case ID_VIEW_ROTATE_ALL_RESET:
         (void)RotateAllPdfPagesView(g_hPdfView, id == ID_VIEW_ROTATE_ALL_LEFT ? -1 : 1,
                                    id == ID_VIEW_ROTATE_ALL_RESET);
+        break;
+    case ID_VIEW_ROTATE_REMAINING_LEFT:
+    case ID_VIEW_ROTATE_REMAINING_RIGHT:
+    case ID_VIEW_ROTATE_REMAINING_RESET:
+        (void)RotateRemainingPdfPagesView(g_hPdfView, id == ID_VIEW_ROTATE_REMAINING_LEFT ? -1 : 1,
+                                         id == ID_VIEW_ROTATE_REMAINING_RESET);
+        break;
+    case ID_EDIT_ROTATE_PAGE_LEFT:
+    case ID_EDIT_ROTATE_PAGE_RIGHT:
+    case ID_EDIT_ROTATE_PAGE_RESET:
+        (void)RotateCurrentPdfPageView(g_hPdfView, id == ID_EDIT_ROTATE_PAGE_LEFT ? -1 : 1,
+                                      id == ID_EDIT_ROTATE_PAGE_RESET, PdfPageRotationMode::Saved);
+        break;
+    case ID_EDIT_ROTATE_ALL_LEFT:
+    case ID_EDIT_ROTATE_ALL_RIGHT:
+    case ID_EDIT_ROTATE_ALL_RESET:
+        (void)RotateAllPdfPagesView(g_hPdfView, id == ID_EDIT_ROTATE_ALL_LEFT ? -1 : 1,
+                                   id == ID_EDIT_ROTATE_ALL_RESET, PdfPageRotationMode::Saved);
+        break;
+    case ID_EDIT_ROTATE_REMAINING_LEFT:
+    case ID_EDIT_ROTATE_REMAINING_RIGHT:
+    case ID_EDIT_ROTATE_REMAINING_RESET:
+        (void)RotateRemainingPdfPagesView(g_hPdfView, id == ID_EDIT_ROTATE_REMAINING_LEFT ? -1 : 1,
+                                         id == ID_EDIT_ROTATE_REMAINING_RESET, PdfPageRotationMode::Saved);
         break;
     case ID_VIEW_FIT_PAGE:
         (void)FitCurrentPdfPageToView(g_hPdfView);
@@ -1810,6 +1852,13 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
                 InvalidateRect(g_hPdfView, nullptr, FALSE);
                 SetFocus(g_hPdfView);
             }
+        } else if (id == ID_TOOL_TEXT_VERTICAL && code == BN_CLICKED) {
+            g_textBoxVertical = SendMessageW(g_hChkTextVertical, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            (void)ApplyPdfTextBoxWritingMode(g_hPdfView, g_textBoxVertical
+                ? TextWritingMode::VerticalRl : TextWritingMode::Horizontal);
+            PersistConfig();
+            SyncToolbarTextWritingMode();
+            if (g_hPdfView) SetFocus(g_hPdfView);
         } else if (id == ID_TOOL_TEXT_AUTO_WRAP && code == BN_CLICKED) {
             g_textBoxAutoWrap =
                 SendMessageW(g_hChkTextAutoWrap, BM_GETCHECK, 0, 0) == BST_CHECKED;

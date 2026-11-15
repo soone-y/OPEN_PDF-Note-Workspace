@@ -3,9 +3,30 @@
 #include "note/note_model.h"
 
 #include <cstddef>
+#include <algorithm>
 #include <string_view>
 
 namespace note {
+
+// Standalone heading names. <m> is tier one, <m1>...<m5> are tiers two...six.
+// Values such as m=5 and relative line-height shorthand are not heading names.
+[[nodiscard]] inline int ParseNoteHeadingTagLevel(std::wstring_view name) noexcept {
+    if (name.empty()) return 0;
+    const wchar_t first = name[0];
+    if (first == L'm' || first == L'M') {
+        if (name.size() == 1) return 1;
+        return name.size() == 2 && name[1] >= L'1' && name[1] <= L'5'
+            ? name[1] - L'0' + 1 : 0;
+    }
+    if ((first != L'h' && first != L'H') || name.size() < 2) return 0;
+    int level = 0;
+    for (size_t i = 1; i < name.size(); ++i) {
+        if (name[i] < L'0' || name[i] > L'9') return 0;
+        // Legacy h names clamp at tier six without overflowing on long input.
+        level = std::min(6, level * 10 + static_cast<int>(name[i] - L'0'));
+    }
+    return level;
+}
 
 // Recover a token only at a parser-accepted style boundary. These helpers
 // do not decide whether arbitrary angle-bracket text is valid markup.

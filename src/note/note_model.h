@@ -73,6 +73,7 @@ struct NoteMetadata {
     std::wstring title;
     // Parsing preference only; never rewrites canonical text or storage.
     bool clro_ascii_only = false;
+    bool quote_lazy_continuation = false;
 };
 
 struct NoteTextModel {
@@ -113,6 +114,7 @@ enum class InlineKind {
     Strike,
     Link,
     Image,
+    Underline,
 };
 
 enum class TableCellAlign {

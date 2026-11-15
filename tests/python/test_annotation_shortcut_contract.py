@@ -53,7 +53,7 @@ class AnnotationShortcutContractTests(unittest.TestCase):
         self.assertNotIn("loaded.push_back", sync)
         self.assertIn("return entries.empty() || !out.empty()", core)
         replace = core.split("bool ReplaceAnnotToolShortcutBindings(", 1)[1].split(
-            "const char* AnnotToolFamilyKey", 1)[0]
+            "static double ThemeContrastRatio", 1)[0]
         self.assertNotIn("if (normalized.empty())", replace)
         self.assertIn("ParseAnnotToolShortcutKeyForUser(binding.key, parsed)", replace)
         self.assertIn("IsReservedAnnotToolShortcut(binding)", replace)

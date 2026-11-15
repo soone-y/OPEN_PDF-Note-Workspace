@@ -392,14 +392,15 @@ $functions = @($ast.FindAll({ param($node)
 }, $true))
 if ($functions.Count -ne 1) { throw 'Missing textbox reedit gate' }
 Invoke-Expression $functions[0].Extent.Text
-$lines = @('pdf_textbox:presets_theme_ok cases=4', 'pdf_textbox:geometry_ok cases=192', 'pdf_textbox:reedit_hover_ok cases=432',
+$lines = @('pdf_textbox:vertical_toolbar_ok cases=2', 'pdf_textbox:vertical_edit_ok cases=4', 'pdf_textbox:presets_theme_ok cases=4', 'pdf_textbox:geometry_ok cases=192', 'pdf_textbox:reedit_hover_ok cases=432',
     'pdf_textbox:reedit_font_ok cases=6 cycles=48') +
     @(1..6 | ForEach-Object { 'pdf_textbox:reedit_font_case_ok' }) +
-    @(1..48 | ForEach-Object { 'pdf_textbox:reedit_font_observation scale=2 adaptive=1 valid=1' })
+    @(1..48 | ForEach-Object { 'pdf_textbox:reedit_font_observation scale=2 adaptive=1 valid=1' }) +
+    @(0..3 | ForEach-Object { "pdf_textbox:vertical_case_ok turn=$_" })
 if (@(Assert-PdfTextboxReeditFontTrace ($lines -join "`n")).Count -ne 0) {
     throw 'Successful gate returned unexpected output'
 }
-foreach ($index in @(0, 1, 2, 3, 4, 10)) {
+foreach ($index in @(0, 1, 2, 3, 4, 5, 6, 12, ($lines.Count - 1))) {
     $partial = @(for ($j = 0; $j -lt $lines.Count; ++$j) { if ($j -ne $index) { $lines[$j] } })
     $rejected = $false
     try { Assert-PdfTextboxReeditFontTrace ($partial -join "`n") } catch { $rejected = $true }
@@ -411,12 +412,27 @@ foreach ($count in @(431, 433)) {
     try { Assert-PdfTextboxReeditFontTrace $partial } catch { $rejected = $true }
     if (-not $rejected) { throw "Incorrect hover case count accepted: $count" }
 }
+foreach ($count in @(0, 1, 3)) {
+    $partial = ($lines -join "`n").Replace('vertical_toolbar_ok cases=2', "vertical_toolbar_ok cases=$count")
+    $rejected = $false
+    try { Assert-PdfTextboxReeditFontTrace $partial } catch { $rejected = $true }
+    if (-not $rejected) { throw "Incorrect vertical toolbar case count accepted: $count" }
+}
 foreach ($count in @(3, 5)) {
+    $partial = ($lines -join "`n").Replace('vertical_edit_ok cases=4', "vertical_edit_ok cases=$count")
+    $rejected = $false
+    try { Assert-PdfTextboxReeditFontTrace $partial } catch { $rejected = $true }
+    if (-not $rejected) { throw "Incorrect vertical case count accepted: $count" }
     $partial = ($lines -join "`n").Replace('presets_theme_ok cases=4', "presets_theme_ok cases=$count")
     $rejected = $false
     try { Assert-PdfTextboxReeditFontTrace $partial } catch { $rejected = $true }
     if (-not $rejected) { throw "Incorrect preset/theme case count accepted: $count" }
 }
+$rejected = $false
+try {
+    Assert-PdfTextboxReeditFontTrace (($lines -join "`n").Replace('vertical_case_ok turn=3', 'vertical_case_ok turn=2'))
+} catch { $rejected = $true }
+if (-not $rejected) { throw 'Duplicated vertical orientation evidence accepted' }
 '''
         env = dict(os.environ, PDF_NOTE_REEDIT_GATE_REPO=str(REPO_ROOT))
         result = subprocess.run([powershell, "-NoProfile", "-Command", command],
@@ -482,6 +498,113 @@ foreach ($index in 0..($lines.Count - 1)) {
                                         capture_output=True, text=True, timeout=30, cwd=REPO_ROOT)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("-ImeGeometryOnly requires -MathRenderOnly", result.stderr)
+
+    @unittest.skipUnless(shutil.which("powershell.exe") or shutil.which("powershell"), "requires PowerShell")
+    def test_dialog_owner_gate_rejects_missing_pre_destroy_observations(self):
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+        command = r'''
+$ErrorActionPreference = 'Stop'
+$tokens = $null; $errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    (Join-Path $env:PDF_NOTE_DIALOG_OWNER_GATE_REPO 'tests/scripts/run_ui_automation_fault_tests.ps1'),
+    [ref]$tokens, [ref]$errors)
+if ($errors.Count) { throw 'Runner parse failure' }
+$functions = @($ast.FindAll({param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -eq 'Assert-DialogOwnerVisibilityTrace'
+}, $true))
+$calls = @($ast.FindAll({param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+    $node.GetCommandName() -eq 'Assert-DialogOwnerVisibilityTrace'
+}, $true))
+if ($functions.Count -ne 1 -or $calls.Count -ne 1) { throw 'Missing dialog-owner gate or runner call' }
+Invoke-Expression $functions[0].Extent.Text
+$lines = @('automation:dialog_owner_late_restore_rejected', 'automation:dialog_owner_visibility_ok') +
+    @(1..14 | ForEach-Object { 'automation:dialog_owner_before_destroy_ok' })
+if (@(Assert-DialogOwnerVisibilityTrace -TraceText ($lines -join "`n")).Count) {
+    throw 'Successful gate returned unexpected output'
+}
+foreach ($index in 0..($lines.Count - 1)) {
+    $partial = @(for ($j = 0; $j -lt $lines.Count; ++$j) { if ($j -ne $index) { $lines[$j] } })
+    $rejected = $false
+    try { Assert-DialogOwnerVisibilityTrace -TraceText ($partial -join "`n") }
+    catch { $rejected = $true }
+    if (-not $rejected) { throw "Incomplete dialog-owner evidence accepted at $index" }
+}
+$rejected = $false
+try { Assert-DialogOwnerVisibilityTrace -TraceText 'automation:dialog_owner_visibility_ok' }
+catch { $rejected = $true }
+if (-not $rejected) { throw 'Legacy post-close evidence accepted as pre-destroy observation' }
+'''
+        env = dict(os.environ, PDF_NOTE_DIALOG_OWNER_GATE_REPO=str(REPO_ROOT))
+        result = subprocess.run([powershell, "-NoProfile", "-Command", command],
+                                capture_output=True, text=True, timeout=30, env=env, cwd=REPO_ROOT)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(shutil.which("powershell.exe") or shutil.which("powershell"), "requires PowerShell")
+    def test_auxiliary_close_step_requires_all_cases_and_propagates_child_failure(self):
+        command = r'''
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$tokens = $null; $errors = $null
+$path = Join-Path $env:PDF_NOTE_CONTRACT_REPO_ROOT 'tests/scripts/run_repo_checks.ps1'
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
+if ($errors.Count) { throw 'Runner parse failure' }
+$blocks = @($ast.FindAll({param($n)
+    $n -is [System.Management.Automation.Language.IfStatementAst] -and
+    $n.Clauses[0].Item1.Extent.Text -eq '-not $SkipUiAutomation' -and
+    $n.Extent.Text.Contains('Invoke-Step -Name "Search Auxiliary Window Close Tests"')
+}, $true))
+if ($blocks.Count -ne 1) { throw 'Missing default auxiliary-close step' }
+function Invoke-Step {
+    param($Name, $Action)
+    if ($Name -eq 'Search Auxiliary Window Close Tests') {
+        $script:steps++; & $Action
+    }
+}
+function Invoke-LoggedCommand {
+    param($FilePath, $Arguments)
+    $script:calls++
+    $expected = @('-B', (Join-Path $repoRoot 'tools/dev/isolated_app_test.py'),
+        '--timeout', '90', '--label', 'Search auxiliary window close tests', '--',
+        $pythonExe, '-B', (Join-Path $repoRoot 'tests/python/search_cancel_app_smoke.py'),
+        '--locale', 'ja', '--exe', (Join-Path $binaryOutputDir 'pdf_note_workspace.exe'), '--scope-close-only')
+    if ($FilePath -ne $pythonExe -or ($Arguments -join '|') -ne ($expected -join '|')) {
+        throw 'Wrong isolated close-test invocation'
+    }
+    if ($script:case -eq 'child_failure') { throw 'injected child failure' }
+    $trace = switch ($script:case) {
+        'missing' { 'legacy success without case evidence' }
+        'partial' { 'Search auxiliary close contract PASS: windows=3 routes=4 cases=13' }
+        'failed' { 'Search auxiliary close contract FAIL: windows=3 routes=4 cases=14' }
+        default { 'Search auxiliary close contract PASS: windows=3 routes=4 cases=14' }
+    }
+    [IO.File]::WriteAllText($script:CurrentStepLogPath, $trace + "`r`n")
+}
+$repoRoot = $env:PDF_NOTE_CONTRACT_REPO_ROOT
+$binaryOutputDir = Join-Path $repoRoot 'out/bin'; $pythonExe = 'python'
+$script:CurrentStepLogPath = $env:PDF_NOTE_CLOSE_CONTRACT_LOG
+foreach ($script:case in @('default', 'skip_ui', 'missing', 'partial', 'failed', 'child_failure')) {
+    $SkipUiAutomation = $script:case -eq 'skip_ui'
+    $script:calls = 0; $script:steps = 0; $failed = $false
+    try { Invoke-Expression $blocks[0].Extent.Text }
+    catch { $failed = $true }
+    $expectedCalls = if ($SkipUiAutomation) { 0 } else { 1 }
+    $expectedFailure = $script:case -in @('missing', 'partial', 'failed', 'child_failure')
+    if ($script:calls -ne $expectedCalls -or $script:steps -ne $expectedCalls -or $failed -ne $expectedFailure) {
+        throw "Wrong auxiliary-close result: $script:case"
+    }
+}
+'''
+        temp_root = REPO_ROOT / "out/tests"
+        temp_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="close_contract_", dir=temp_root) as temporary:
+            env = dict(os.environ, PDF_NOTE_CONTRACT_REPO_ROOT=str(REPO_ROOT),
+                       PDF_NOTE_CLOSE_CONTRACT_LOG=str(Path(temporary) / "child.log"))
+            result = subprocess.run([shutil.which("powershell.exe") or shutil.which("powershell"),
+                                     "-NoProfile", "-Command", command],
+                                    capture_output=True, text=True, timeout=30, env=env, cwd=REPO_ROOT)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def run_quietly(self, function, arguments):
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
@@ -800,6 +923,139 @@ Write-Output ('RESULT:' + ($results | ConvertTo-Json -Compress))
                 "src/recovery/stage_recovery_window.cpp", "tools/recovery_demo/demo_ui.cpp",
                 "tests/python/test_site_validation.py")})
 
+    @unittest.skipUnless((shutil.which("powershell.exe") or shutil.which("powershell")) and shutil.which("rg"),
+                         "requires PowerShell and ripgrep")
+    def test_safety_scan_rejects_unreviewed_application_api_families(self):
+        with tempfile.TemporaryDirectory(prefix="pdf_note_risky_api_scan_") as temporary:
+            script = Path(temporary) / "risky_api_scan_contract.ps1"
+            script.write_text(r'''
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$tokens = $null; $errors = $null
+$sourcePath = Join-Path $env:PDF_NOTE_CONTRACT_REPO_ROOT 'tests/scripts/run_repo_checks.ps1'
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($sourcePath, [ref]$tokens, [ref]$errors)
+if ($errors.Count -ne 0) { throw 'Unable to parse repository checks.' }
+foreach ($fn in $ast.FindAll({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst]}, $true)) {
+    if ($fn.Name -in @('Invoke-RipgrepScan', 'Invoke-SafetyScans')) { Invoke-Expression $fn.Extent.Text }
+}
+function Append-StepLog { param([string]$Line) }
+function Assert-FileOutputSystemDialogPolicy { }
+$safetyScanIgnoreFile = Join-Path $env:PDF_NOTE_CONTRACT_REPO_ROOT 'tests/config/safety_scan_ignore_globs.txt'
+$results = @{}
+$cases = [ordered]@{
+    safe_reviewed_apis = @{ path = 'core/app_core.cpp'; text = (@('void safe() {', '    s_uxtheme = LoadLibraryExW(L"uxtheme.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);', '    CreateProcessW(app, args, nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi);', '    RegOpenKeyExW(root, key, 0, KEY_READ, &handle);', '}') -join [Environment]::NewLine) }
+    process_shortcut = @{ path = 'process.cpp'; text = 'void unsafe() { system("command"); }' }
+    multiline_shortcut = @{ path = 'process_lines.cpp'; text = ('system' + [Environment]::NewLine + '("command");') }
+    privileged_process_launch = @{ path = 'process_privileged.cpp'; text = 'CreateProcessWithLogonW(user, domain, password, flags, app, command, options, environment, cwd, &startup, &info);' }
+    unsafe_dll_search = @{ path = 'dll.cppinc'; text = 'auto module = LoadLibraryW(name);' }
+    unsafe_dll_search_flags = @{ path = 'dll_flags.cpp'; text = 'auto module = LoadLibraryExW(name, nullptr, 0);' }
+    unsafe_dll_mixed_line = @{ path = 'core/app_core.cpp'; text = 'LoadLibraryW(name); s_uxtheme = LoadLibraryExW(L"uxtheme.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);' }
+    unsafe_dll_variable_path = @{ path = 'core/app_core.cpp'; text = 's_uxtheme = LoadLibraryExW(userPath, nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);' }
+    unsafe_dll_combined_flags = @{ path = 'core/app_core.cpp'; text = 's_uxtheme = LoadLibraryExW(L"uxtheme.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_SEARCH_APPLICATION_DIR);' }
+    unsafe_default_dll_directories = @{ path = 'dll_defaults.cpp'; text = 'SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_USER_DIRS);' }
+    autostart_persistence = @{ path = 'startup.cpp'; text = 'RegSetValueExW(key, L"Run", 0, REG_SZ, value, size);' }
+    autostart_registry_path = @{ path = 'startup_path.cpp'; text = 'auto key = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run";' }
+    credential_access = @{ path = 'credentials.cpp'; text = 'CredReadW(target, type, 0, &credential);' }
+    implicit_temp_path = @{ path = 'temp.cpp'; text = 'GetTempPathW(size, path);' }
+    appdata_known_folder = @{ path = 'profile_folder.cpp'; text = 'SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &path);' }
+    appdata_fallback = @{ path = 'profile.cpp'; text = 'GetEnvironmentVariableW(L"APPDATA", value, size);' }
+    standard_environment_read = @{ path = 'env.cpp'; text = 'std::getenv("APPDATA");' }
+    profile_comparison = @{ path = 'profile_comparison.cpp'; text = 'return overrides[L"APPDATA"] == expected;' }
+    child_profile_mapping = @{ path = 'office/child_environment.cpp'; text = 'overrides[L"APPDATA"] = hostProfile;' }
+    child_profile_emplace = @{ path = 'office/child_environment.cpp'; text = 'values.emplace(L"APPDATA", hostProfile);' }
+    ambient_temp_override = @{ path = 'override.cpp'; text = 'SetEnvironmentVariableW(L"TEMP", value);' }
+}
+$baseScanRoot = Join-Path $PSScriptRoot 'scan_root'
+foreach ($name in $cases.Keys) {
+    $scanRoot = Join-Path $baseScanRoot $name
+    $sourceDir = Join-Path $scanRoot 'src'
+    New-Item -ItemType Directory -Force -Path $sourceDir | Out-Null
+    $profileDialog = Join-Path $scanRoot 'src/ui/dialogs/dialogs.cpp'
+    $faultInjection = Join-Path $scanRoot 'src/core/fault_injection.h'
+    $automation = Join-Path $scanRoot 'src/features/automation/main_ui_automation.cppinc'
+    $workPaths = Join-Path $scanRoot 'src/office/work_paths.h'
+    $recoveryProcess = Join-Path $scanRoot 'src/recovery/stage_recovery_process.cpp'
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $profileDialog), (Split-Path -Parent $faultInjection), (Split-Path -Parent $automation), (Split-Path -Parent $workPaths), (Split-Path -Parent $recoveryProcess) | Out-Null
+    [IO.File]::WriteAllText($profileDialog, @'
+const DWORD chars = GetEnvironmentVariableW(L"USERPROFILE", nullptr, 0);
+const DWORD copied = GetEnvironmentVariableW(L"USERPROFILE", value.data(), chars);
+'@)
+    [IO.File]::WriteAllText($faultInjection, @'
+DWORD len = GetEnvironmentVariableW(name, nullptr, 0);
+DWORD got = GetEnvironmentVariableW(name, out->data(), len);
+'@)
+    [IO.File]::WriteAllText($automation, @'
+if (GetEnvironmentVariableW(L"PDF_NOTE_SMALL_UIA_CARET_PROBE", enableUia, 2) != 1 || enableUia[0] != L'1') {
+if (!SetEnvironmentVariableW(L"PDF_NOTE_SMALL_ENABLE_FAULT_INJECTION", L"1")) return false;
+return SetEnvironmentVariableW(L"PDF_NOTE_SMALL_THROW_POINT", point ? point : L"");
+SetEnvironmentVariableW(L"PDF_NOTE_SMALL_ENABLE_FAULT_INJECTION", nullptr);
+SetEnvironmentVariableW(L"PDF_NOTE_SMALL_THROW_POINT", nullptr);
+'@)
+    [IO.File]::WriteAllText($workPaths, @'
+LPWCH raw = GetEnvironmentStringsW();
+values[L"USERPROFILE"] = local.wstring();
+values[L"HOME"] = local.wstring();
+values[L"APPDATA"] = (local / L"appdata").wstring();
+values[L"LOCALAPPDATA"] = (local / L"localappdata").wstring();
+values[L"TEMP"] = (local / L"temp").wstring();
+values[L"TMP"] = (local / L"temp").wstring();
+'@)
+    [IO.File]::WriteAllText($recoveryProcess, @'
+LPWCH block = GetEnvironmentStringsW();
+       {L"TEMP", L"TMP", L"APPDATA", L"LOCALAPPDATA", L"USERPROFILE", L"HOME"})
+'@)
+    Push-Location -LiteralPath $scanRoot
+    try {
+        $path = Join-Path $sourceDir $cases[$name].path
+        [IO.File]::WriteAllText($path, $cases[$name].text)
+        $failure = ''
+        try { Invoke-SafetyScans } catch { $failure = $_.Exception.Message }
+        $results[$name] = $failure
+    } finally {
+        Pop-Location
+        Remove-Item -LiteralPath $scanRoot -Recurse -Force
+    }
+}
+Write-Output ('RESULT:' + ($results | ConvertTo-Json -Compress))
+''', encoding="utf-8")
+            environment = os.environ.copy()
+            environment["PDF_NOTE_CONTRACT_REPO_ROOT"] = str(REPO_ROOT)
+            result = subprocess.run([
+                shutil.which("powershell.exe") or shutil.which("powershell"), "-NoProfile",
+                "-ExecutionPolicy", "Bypass", "-File", str(script),
+            ], capture_output=True, text=True, encoding="utf-8", env=environment, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            data = json.loads(next(line[len("RESULT:"):] for line in result.stdout.splitlines()
+                                   if line.startswith("RESULT:")))
+            expected = {
+                "safe_reviewed_apis": "",
+                "process_shortcut": "Safety scan failed: Unsafe process-launch shortcut scan",
+                "multiline_shortcut": "Safety scan failed: Unsafe process-launch shortcut scan",
+                "privileged_process_launch": "Safety scan failed: Unsafe process-launch shortcut scan",
+                "unsafe_dll_search": "Safety scan failed: Unsafe DLL search-path scan",
+                "unsafe_dll_search_flags": "Safety scan failed: Unsafe DLL search-path scan",
+                "unsafe_dll_mixed_line": "Safety scan failed: Unsafe DLL search-path scan",
+                "unsafe_dll_variable_path": "Safety scan failed: Unsafe DLL search-path scan",
+                "unsafe_dll_combined_flags": "Safety scan failed: Unsafe DLL search-path scan",
+                "unsafe_default_dll_directories": "Safety scan failed: Unsafe DLL search-path scan",
+                "autostart_persistence": "Safety scan failed: Autostart and service persistence scan",
+                "autostart_registry_path": "Safety scan failed: Autostart and service persistence scan",
+                "credential_access": "Safety scan failed: Credential access API scan",
+                "implicit_temp_path": "Safety scan failed: Implicit OS temp/profile path scan",
+                "appdata_known_folder": "Safety scan failed: Implicit OS temp/profile path scan",
+                "appdata_fallback": "Safety scan failed: Ambient environment API scan",
+                "standard_environment_read": "Safety scan failed: Ambient environment API scan",
+                "profile_comparison": "",
+                "child_profile_mapping": "Safety scan failed: Explicit child temp/profile environment mapping scan",
+                "child_profile_emplace": "Safety scan failed: Explicit child temp/profile environment mapping scan",
+                "ambient_temp_override": "Safety scan failed: Ambient environment API scan",
+            }
+            self.assertEqual(set(data), set(expected))
+            for name, failure in expected.items():
+                with self.subTest(name=name):
+                    self.assertEqual(data[name], failure, result.stdout[-4000:])
+
     @unittest.skipUnless(shutil.which("powershell.exe") or shutil.which("powershell"), "requires PowerShell")
     def test_repo_step_selection_rejects_unknown_and_skipped_steps(self):
         runner = REPO_ROOT / "tests/scripts/run_repo_checks.ps1"
@@ -1023,6 +1279,28 @@ Write-Output ('RESULT:' + ($results | ConvertTo-Json -Depth 4 -Compress))
                                         capture_output=True, text=True, timeout=30, cwd=REPO_ROOT)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("Office reduction acceptance", result.stderr)
+
+
+    def test_text_raster_gate_tracks_shared_main_reader_baseline(self):
+        validator = load_module("shared_annotation_validator", "tests/python/validate_codebase.py")
+        self.assertEqual(validator.find_annotation_text_quality_regressions(), [])
+        read_text = Path.read_text
+        cases = (
+            ("src/ui/annotation_text_raster.h", "kRasterDpi = 576.0", "kRasterDpi = 96.0"),
+            ("src/ui/annotation_text_raster.h", "description.lfHeight=-fontPx;", "description.lfHeight=-fontPx/2;"),
+            ("src/pdf_view/pdf_view.cpp", "key.fontPx, key.fontName, key.renderText, key.rotation", "key.fontPx/2, key.fontName, key.renderText, key.rotation"),
+            ("src/pdf_view/pdf_view.cpp", "annotation_text::BlendMask(hdc, r, scratchDc,", "annotation_text::BlendMask(pageDC, r, scratchDc,"),
+            ("src/readonly_viewer/annotation_text.cpp", "annotation_text::BuildMask(dc,", "BuildPrivateRaster(dc,"),
+            ("src/readonly_viewer/annotation_text.cpp", "annotation_text::BlendMask(dc,bounds,", "BlendPrivateRaster(dc,bounds,"),
+            ("src/readonly_viewer/annotation_text.cpp", "key.saved=!item.lines.empty() && !key.vertical;", "key.saved=false;"),
+        )
+        for relative, before, after in cases:
+            target = REPO_ROOT / relative
+            def changed(path, *args, **kwargs):
+                text = read_text(path, *args, **kwargs)
+                return text.replace(before, after) if path == target else text
+            with self.subTest(source=relative, mutation=after), mock.patch.object(Path, "read_text", changed):
+                self.assertTrue(validator.find_annotation_text_quality_regressions())
 
 
 if __name__ == "__main__":

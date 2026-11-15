@@ -18,9 +18,12 @@ const int toolbarRows[] = {0, 80, 220};
 int toolbarContent = 260, toolbarPage = 100, toolbarKey = 7;
 void LayoutTestToolbar(HWND host) {
     const int offset = ui::toolbar_scroll::Offset(host, toolbarContent, toolbarPage, toolbarKey);
-    for (int index = 0; index < 3; ++index)
-        SetWindowPos(toolbarControls[index], nullptr, 4, toolbarRows[index] - offset, 0, 0,
-            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    for (int index = 0; index < 3; ++index) {
+        HWND control = toolbarControls[index];
+        const int dropDownHeight = ui::toolbar_scroll::DropDownHeight(control);
+        SetWindowPos(control, nullptr, 4, toolbarRows[index] - offset, 120, dropDownHeight > 0 ? dropDownHeight : 24,
+            SWP_NOZORDER | SWP_NOACTIVATE);
+    }
 }
 RECT ToolbarControlBounds(HWND control, HWND host) {
     RECT bounds{};
@@ -47,6 +50,11 @@ void CheckNativeToolbar() {
     ui::GuardComboAgainstAccidentalChange(toolbarControls[1], parent);
     for (HWND control : toolbarControls)
         Expect(ui::toolbar_scroll::InstallChild(control, host), "toolbar option installs scroll/focus routing");
+    const auto comboHeight = ui::toolbar_scroll::DropDownHeight(toolbarControls[1]);
+    const auto comboBounds = ToolbarControlBounds(toolbarControls[1], host);
+    const auto itemHeight = SendMessageW(toolbarControls[1], CB_GETITEMHEIGHT, 0, 0);
+    Expect(itemHeight > 0 && comboHeight >= comboBounds.bottom - comboBounds.top + 2 * itemHeight,
+        "toolbar combo starts with room for both choices");
     ui::toolbar_scroll::SetRange(host, toolbarContent, toolbarPage, toolbarKey);
     LayoutTestToolbar(host);
     Expect((GetWindowLongPtrW(host, GWL_STYLE) & WS_VSCROLL) != 0,
@@ -64,6 +72,10 @@ void CheckNativeToolbar() {
         "keyboard focus reveals an offscreen option without taking real focus");
     SendMessageW(toolbarControls[0], WM_SETFOCUS, 0, 0);
     Expect(GetScrollPos(host, SB_VERT) == 0, "keyboard focus can return to the first toolbar row");
+    const auto movedComboBounds = ToolbarControlBounds(toolbarControls[1], host);
+    Expect(movedComboBounds.bottom - movedComboBounds.top == comboBounds.bottom - comboBounds.top &&
+        ui::toolbar_scroll::DropDownHeight(toolbarControls[1]) == comboHeight,
+        "toolbar relayout retains the closed field and enough height for the dropdown");
     SendMessageW(host, WM_VSCROLL, SB_BOTTOM, 0);
     SendMessageW(toolbarControls[1], WM_MOUSEWHEEL, MAKEWPARAM(0, 120), 0);
     const int grouped = GetScrollPos(host, SB_VERT);
@@ -120,8 +132,8 @@ void CheckNativeLists() {
     for (int packet = 0; packet < 120; ++packet) {
         for (const auto list : lists) {
             SendMessageW(list, WM_MOUSEWHEEL, MAKEWPARAM(0, static_cast<WORD>(-1)), 0);
-            Expect(SendMessageW(list, LB_GETTOPINDEX, 0, 0) == 100 + (packet + 1) * rows / 120,
-                "native panes retain only their own fractional movement");
+            Expect(SendMessageW(list, LB_GETTOPINDEX, 0, 0) == 100 + ((packet + 1) * rows + 60) / 120,
+                "native panes advance at half a row using only their own input");
             Expect(SendMessageW(list, LB_GETCURSEL, 0, 0) == 10, "wheel leaves native selection unchanged");
         }
     }
@@ -133,6 +145,15 @@ void CheckNativeLists() {
         SendMessageW(list, WM_MOUSEWHEEL, MAKEWPARAM(0, static_cast<WORD>(1)), 0);
         SendMessageW(list, WM_MOUSEWHEEL, MAKEWPARAM(0, static_cast<WORD>(-120)), 0);
         Expect(SendMessageW(list, LB_GETTOPINDEX, 0, 0) == rows, "top edge cannot buffer motion against a reversal");
+        if (rows > 0 && rows < 60) {
+            SendMessageW(list, LB_SETTOPINDEX, 1, 0);
+            const auto justOverHalfRow = static_cast<WORD>((60 + rows) / rows);
+            SendMessageW(list, WM_MOUSEWHEEL, MAKEWPARAM(0, justOverHalfRow), 0);
+            Expect(SendMessageW(list, LB_GETTOPINDEX, 0, 0) == 0, "fine input can round onto the top edge");
+            SendMessageW(list, WM_MOUSEWHEEL, MAKEWPARAM(0, static_cast<WORD>(-1)), 0);
+            Expect(SendMessageW(list, LB_GETTOPINDEX, 0, 0) == 0,
+                "arriving at the edge leaves no fractional credit for the reversal");
+        }
         SendMessageW(list, LB_RESETCONTENT, 0, 0);
         SendMessageW(list, WM_MOUSEWHEEL, MAKEWPARAM(0, static_cast<WORD>(-120)), 0);
         Expect(SendMessageW(list, LB_GETCOUNT, 0, 0) == 0, "empty native list consumes wheel safely");
@@ -206,17 +227,19 @@ int main() {
             "list movement preserves exact distance for unit and grouped packets");
     }
     scroll_input::ListWheelInput listA, listB;
-    Expect(listA.Take(-15, 4) == 0 && listB.Take(-15, 4) == 0,
+    Expect(listA.Take(-14, 4) == 0 && listB.Take(-14, 4) == 0,
         "lists do not share native fractional rows");
-    Expect(listA.Take(-15, 4) == 1 && listB.Take(-15, 4) == 1,
-        "each list releases only its own accumulated row");
-    Expect(listA.Take(-15, 4) == 0 && listA.Take(-15, 4) == 1,
-        "slow input keeps its fractional distance without a timing threshold");
-    Expect(listA.Take(15, 4) == 0 && listA.Take(15, 4) == -1,
-        "reversal preserves signed distance");
-    Expect(listA.Take(-15, 4) == 0 && listA.Take(-15, 0) == 0,
+    Expect(listA.Take(-1, 4) == 1 && listB.Take(-1, 4) == 1,
+        "each list begins moving at its own half-row threshold");
+    Expect(listA.Take(-120, 4) == 4 && listA.Take(120, 4) == -4,
+        "whole notches retain their configured distance at the half-row boundary");
+    Expect(listA.Take(1, 4) == -1 && listA.Take(29, 4) == 0 && listA.Take(1, 4) == -1,
+        "reversal retraces the nearest rows across both sides of zero");
+    Expect(listA.Take(-1, 0) == 0 && listA.Take(-120, 0) == 0,
         "system zero-line preference prevents list scrolling");
-    Expect(listA.Take(-15, 8) == 1, "setting change starts with clean fractional state");
+    Expect(listB.Take(-7, 8) == 0 && listB.Take(-1, 8) == 1,
+        "setting change starts with clean fractional state");
+    Expect(listA.Take(-15, 8) == 1, "scrolling resumes after enabling it again");
     listA.Reset();
     Expect(listA.Take(-15, 8) == 1 && listA.Take(-15, 8) == 1,
         "consecutive grouped list inputs preserve distance");

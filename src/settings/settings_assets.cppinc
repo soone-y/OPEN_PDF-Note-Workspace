@@ -646,7 +646,8 @@ static void LayoutSettingsAssets(HWND hWnd, SettingsAssetsCtx* ctx) {
     const int pad = ScaleY(hWnd, 12), gap = ScaleY(hWnd, 8);
     const int width = std::max(1, static_cast<int>(rc.right) - pad * 2);
     const int buttonH = std::max(ScaleY(hWnd, 30), FontLineHeightPx(hWnd, g_hUIFont) + ScaleY(hWnd, 10));
-    const int buttonW = std::max(1, (width - gap * 5) / 6);
+    const int previewExtra = ScaleY(hWnd, 30);
+    const int buttonW = std::max(1, (width - gap * 5 - previewExtra) / 6);
     const int footerY = static_cast<int>(rc.bottom) - pad - buttonH;
     const int previewH = ctx->previewVisible ? std::max(ScaleY(hWnd, 140), static_cast<int>(rc.bottom) / 3) : 0;
     const int labelH = FontLineHeightPx(hWnd, g_hUIFont) + gap;
@@ -656,9 +657,11 @@ static void LayoutSettingsAssets(HWND hWnd, SettingsAssetsCtx* ctx) {
     MoveWindow(ctx->header, pad, pad, width, headerH, TRUE);
     MoveWindow(ctx->list, pad, listY, width, listH, TRUE);
     const std::array<HWND, 6> buttons = {ctx->btnDetails, ctx->btnRefresh, ctx->btnUsage, ctx->btnCopyPath, ctx->btnPreview, ctx->btnClose};
-    for (size_t i = 0; i < buttons.size(); ++i) {
-        const int x = pad + static_cast<int>(i) * (buttonW + gap);
-        MoveWindow(buttons[i], x, footerY, buttonW, buttonH, TRUE);
+    int buttonX = pad;
+    for (HWND button : buttons) {
+        const int currentWidth = buttonW + (button == ctx->btnPreview ? previewExtra : 0);
+        MoveWindow(button, buttonX, footerY, currentWidth, buttonH, TRUE);
+        buttonX += currentWidth + gap;
     }
     MoveWindow(ctx->previewLabel, pad, listY + listH + gap, width, labelH, TRUE);
     MoveWindow(ctx->preview, pad, listY + listH + gap + labelH, width, previewH, TRUE);

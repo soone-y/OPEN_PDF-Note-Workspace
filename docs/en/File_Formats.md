@@ -12,6 +12,8 @@
 
 Register [Temporary Paths](Help_Reference.md#use-an-external-folder-through-temporary-paths) to work with external files without copying them. Saving, renaming and moving affect the actual registered files. Removing a registration leaves originals intact. Ordinary use does not require startup JSON editing. Field names and manual editing are in the [technical reference (Japanese)](https://soone-y.github.io/OPEN_PDF-Note-Workspace/introduction/core/data_schemas.html#3-%E8%B5%B7%E5%8B%95%E8%A8%AD%E5%AE%9A%E3%83%AF%E3%83%BC%E3%82%AF%E3%82%B9%E3%83%9A%E3%83%BC%E3%82%B9%E8%A8%AD%E5%AE%9A).
 
+For searching external folders, use [search folders and groups](Help_Reference.md#search). Selecting a search folder grants no write access and does not register Temporary Paths. Saved groups are application-managed data in `__pdf_note_workspace__/__settings__/search_groups.bin` inside the workspace. Manage this file through Search rather than editing it as a note or annotation file.
+
 ## Format examples
 
 `.clro` is UTF-8 text that people write. For example, a file named `research-notes.clro` can contain the following Markdown text:

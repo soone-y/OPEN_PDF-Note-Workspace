@@ -334,19 +334,38 @@ static void UpdateDialogScroll(HWND hWnd, int contentH, int clientH, int* scroll
     SetScrollInfo(hWnd, SB_VERT, &si, TRUE);
 }
 
+static void PrepareSettingsScroll(HWND owner, HWND panel) {
+    // Preparation is optional. Allocation/timer failures leave native painting
+    // available. Each page owns its labels, buffers and low-priority timer.
+    (void)settings_scroll_prepaint::Attach(owner, panel, [] {
+        return settings_scroll_prepaint::Colors{g_theme.panelBg, g_theme.panelText};
+    });
+}
+
+static void ScrollSettingsContents(HWND panel, int delta) {
+    if (!panel || delta == 0) return;
+    // A null scroll rectangle moves every child, including fully offscreen
+    // controls that ScrollWindowEx(SW_SCROLLCHILDREN) leaves in place.
+    ScrollWindow(panel, 0, delta, nullptr, nullptr);
+    // WM_PAINT can remain queued while wheel/scrollbar input keeps arriving.
+    // Finish only the damaged regions, including child controls, before the
+    // next input moves their pixels again. Do not invalidate the whole dialog.
+    RedrawWindow(panel, nullptr, nullptr, RDW_UPDATENOW | RDW_ALLCHILDREN);
+    settings_scroll_prepaint::Wake(panel);
+}
+
 static void ScrollDialogTo(HWND hWnd, int newPos, int* scrollPos, int scrollMax) {
     if (!scrollPos) return;
     int clamped = std::clamp(newPos, 0, scrollMax);
     if (clamped == *scrollPos) return;
     int delta = *scrollPos - clamped;
     *scrollPos = clamped;
-    ScrollWindowEx(hWnd, 0, delta, nullptr, nullptr, nullptr, nullptr,
-                   SW_INVALIDATE | SW_ERASE | SW_SCROLLCHILDREN);
     SCROLLINFO si{};
     si.cbSize = sizeof(si);
     si.fMask = SIF_POS;
     si.nPos = clamped;
     SetScrollInfo(hWnd, SB_VERT, &si, TRUE);
+    ScrollSettingsContents(hWnd, delta);
 }
 
 static int SettingsWheelDeltaToPixels(int wheelDelta, int stepPx, int* remainder) {
@@ -492,12 +511,7 @@ static bool ShouldSkipImeMessageInModalLoop(const MSG& msg) {
 }
 
 static void RestoreOwnerAfterModal(HWND owner) {
-    if (!owner) return;
-    if (!IsWindow(owner)) return;
-    EnableWindow(owner, TRUE);
-    SetForegroundWindow(owner);
-    SetActiveWindow(owner);
-    BringWindowToTop(owner);
+    RestoreModalOwnerBeforeClose(owner);
 }
 
 } // namespace

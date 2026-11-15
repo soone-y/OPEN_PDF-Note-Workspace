@@ -1,5 +1,52 @@
 // file: main/main_directory_list_context.cppinc
 
+static void PopulateDirectoryHierarchyList(DirectoryHierarchyPopupData& data) {
+    const ui::ListBoxUpdate update(data.hList);
+    SendMessageW(data.hList, LB_RESETCONTENT, 0, 0);
+    for (const auto& item : data.items) {
+        SendMessageW(data.hList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item.text.c_str()));
+    }
+    SetListWide(data.hList);
+}
+
+// Read only the chosen folder. A failed navigation leaves the current page
+// and selection in place, and the parent row never leads outside the root.
+static bool BrowseDirectoryHierarchyFolder(HWND popup, DirectoryHierarchyPopupData& data,
+                                           const std::filesystem::path& directory) {
+    const auto root = identity_path_scope::LocalPath(data.root.wstring());
+    const auto target = identity_path_scope::LocalPath(directory.wstring());
+    std::vector<DirectoryHierarchyItem> items;
+    std::vector<bool> ancestors;
+    if (!root || !target || (*target != *root && !identity_path_scope::Below(*target, *root)) ||
+        !identity_path_scope::NoReparseAncestors(*target) ||
+        !AppendDirectoryHierarchyChildren(directory, 1, ancestors, items, false)) {
+        ShowSoftNotice(popup, localization::Text(L"ui.directory_list.folder_read_failed"), SoftNoticeKind::Warning);
+        return false;
+    }
+    if (items.empty()) {
+        AddDirectoryHierarchyInfo(items, ancestors, localization::Text(L"main.ui.508876dcd97e"));
+    }
+    if (*target != *root) {
+        items.insert(items.begin(), {localization::Text(L"ui.directory_list.parent_folder"),
+                                    directory.parent_path().wstring(), DirectoryHierarchyItemKind::ParentFolder});
+    }
+    const auto previous = data.directory.wstring();
+    data.directory = directory;
+    data.items = std::move(items);
+    const auto title = localization::Text(L"ui.directory_list.314dd7223127") +
+        DirectoryHierarchyDisplayName(directory);
+    data.title = title;
+    SetWindowTextW(popup, data.title.c_str());
+    SetWindowTextW(data.hTitle, data.title.c_str());
+    PopulateDirectoryHierarchyList(data);
+    auto previousRow = std::find_if(data.items.begin(), data.items.end(), [&](const auto& item) {
+        return item.kind == DirectoryHierarchyItemKind::Folder && item.path == previous;
+    });
+    const auto selected = previousRow == data.items.end() ? 0 : std::distance(data.items.begin(), previousRow);
+    SendMessageW(data.hList, LB_SETCURSEL, static_cast<WPARAM>(selected), 0);
+    return true;
+}
+
 static bool ShowDirectoryHierarchyItemContextMenu(HWND list, LPARAM lParam) {
     if (!list) return false;
     HWND popup = GetAncestor(list, GA_ROOT);
@@ -36,7 +83,8 @@ static bool ShowDirectoryHierarchyItemContextMenu(HWND list, LPARAM lParam) {
         : item.kind == DirectoryHierarchyItemKind::Clrop ? L"ui.directory_list.open_readonly.clrop"
                                                         : L"ui.directory_list.open_readonly.default");
     ui::context_menu::AppendPathContextMenuItems(menu.get(), {
-        {kCmdOpenInApp, localization::Text(L"ui.directory_list.de691a7bc023").c_str(), appOpenable},
+        {kCmdOpenInApp, localization::Text(item.kind == DirectoryHierarchyItemKind::Folder
+            ? L"ui.directory_list.browse_folder" : L"ui.directory_list.de691a7bc023").c_str(), appOpenable},
         {kCmdOpenReadOnly,
          readOnlyLabel.c_str(),
          readOnlyOpenable},
@@ -54,7 +102,7 @@ static bool ShowDirectoryHierarchyItemContextMenu(HWND list, LPARAM lParam) {
     menu.Close();
     if (cmd == kCmdOpenInApp) {
         bool ok = OpenDirectoryHierarchySelection(list);
-        if (ok && IsWindow(popup)) DestroyWindow(popup);
+        if (ok && item.kind != DirectoryHierarchyItemKind::Folder && IsWindow(popup)) DestroyWindow(popup);
         return ok;
     }
     if (cmd == kCmdOpenReadOnly) {
@@ -153,11 +201,8 @@ static LRESULT CALLBACK DirectoryHierarchyPopupProc(HWND hWnd, UINT msg, WPARAM 
         SetWindowSubclass(data->hList, DirectoryHierarchyListProc, 9, 0);
         if (!ui::InstallListBoxScroll(data->hList))
             preview_trace::Append(L"ListBoxScroll", L"hierarchy subclass installation failed");
-        for (const auto& item : data->items) {
-            SendMessageW(data->hList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item.text.c_str()));
-        }
+        PopulateDirectoryHierarchyList(*data);
         SendMessageW(data->hList, LB_SETCURSEL, static_cast<WPARAM>(-1), 0);
-        SetListWide(data->hList);
         LayoutDirectoryHierarchyPopup(hWnd);
         return 0;
     }
@@ -205,6 +250,7 @@ static LRESULT CALLBACK DirectoryHierarchyPopupProc(HWND hWnd, UINT msg, WPARAM 
             text = g_theme.selectionText;
         } else {
             switch (item.kind) {
+            case DirectoryHierarchyItemKind::ParentFolder:
             case DirectoryHierarchyItemKind::Folder: text = RGB(190, 120, 0); break;
             case DirectoryHierarchyItemKind::Pdf: text = RGB(35, 105, 185); break;
             case DirectoryHierarchyItemKind::Image: text = RGB(140, 70, 170); break;
@@ -289,7 +335,11 @@ static bool ShowDirectoryHierarchyPopup(HWND owner,
 
     auto* data = new DirectoryHierarchyPopupData();
     data->title = (localization::Text(L"ui.directory_list.314dd7223127").c_str()) + label;
-    data->items = BuildDirectoryHierarchyItems(root);
+    auto rootText = root.wstring();
+    std::replace(rootText.begin(), rootText.end(), L'/', L'\\');
+    data->root = std::filesystem::path(rootText);
+    data->directory = data->root;
+    data->items = BuildDirectoryHierarchyItems(data->root);
 
     const int itemH = std::max(18, CalcListItemHeight());
     const int rows = std::clamp(static_cast<int>(data->items.size()), 6, 24);
@@ -399,50 +449,51 @@ static bool ShowDirectoryListContextMenu(HWND list, LPARAM lParam) {
                 localization::Text(L"ui.directory_list.de691a7bc023").c_str());
     AppendMenuW(menu.get(), MF_STRING, kCmdOpenReadOnly,
                 localization::Text(L"ui.directory_list.154ade32c630").c_str());
-    if (isLectureList) {
-        AppendMenuW(menu.get(), MF_STRING, kCmdPriority, localization::Text(L"lecture_order.context_edit").c_str());
+    if (canCloseLecture || canCloseSession) {
+        AppendMenuW(menu.get(), MF_STRING,
+                    isLectureList ? kCmdCloseLecture : kCmdCloseSession,
+                    localization::Text(isLectureList ? L"ui.directory_list.8bd547f6bad9"
+                                                     : L"ui.directory_list.8b37e122658e").c_str());
+    }
+
+    if ((isLectureList && canCreateSession) || canCreateNote || canRename || !kIsLiteEdition) {
+        AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
     }
     if (isLectureList && canCreateSession) {
         AppendMenuW(menu.get(), MF_STRING, kCmdNewSession,
                     localization::Text(L"ui.directory_list.5e4fd1449672").c_str());
     }
-    if (!isLectureList && canCreateNote) {
+    if (canCreateNote) {
         AppendMenuW(menu.get(), MF_STRING, kCmdNewNoteClro,
                     localization::Text(L"ui.directory_list.5d611a60297c").c_str());
+    }
+    if (canRename) {
+        AppendMenuW(menu.get(), MF_STRING, kCmdRename,
+                    localization::Text(L"ui.directory_list.b351979601ed").c_str());
     }
     if (!kIsLiteEdition) {
         AppendMenuW(menu.get(), MF_STRING, kCmdConvertOffice,
                     localization::Text(L"ui.directory_list.f1b464c0e53e").c_str());
     }
     AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu.get(), MF_STRING, kCmdCopyName,
-                localization::Text(L"workspace.context.copy_name").c_str());
-    AppendMenuW(menu.get(), MF_STRING, kCmdReload,
-                localization::Text(L"workspace.context.reload_list").c_str());
-    HMENU fileMenu = CreatePopupMenu();
-    if (fileMenu) {
-        ui::context_menu::AppendPathContextMenuItems(fileMenu, {
-            {kCmdOpenExplorer, localization::Text(L"ui.directory_list.9208055ca154").c_str()},
-            {kCmdShowHierarchy, localization::Text(L"ui.directory_list.752b401aff9a").c_str()},
+    AppendMenuW(menu.get(), MF_STRING, kCmdShowHierarchy,
+                localization::Text(L"ui.directory_list.752b401aff9a").c_str());
+    AppendMenuW(menu.get(), MF_STRING, kCmdOpenExplorer,
+                localization::Text(L"ui.directory_list.9208055ca154").c_str());
+    if (ui::context_menu::PopupMenu locationMenu; locationMenu) {
+        ui::context_menu::AppendPathContextMenuItems(locationMenu.get(), {
             {kCmdShowPath, localization::Text(L"ui.directory_list.14a4b0c697e4").c_str()},
             {kCmdCopyPath, localization::Text(L"ui.directory_list.9806c16958b1").c_str()},
+            {kCmdCopyName, localization::Text(L"workspace.context.copy_name").c_str()},
         });
-        AppendMenuW(menu.get(), MF_POPUP, reinterpret_cast<UINT_PTR>(fileMenu),
-                    localization::Text(L"menu.context.file").c_str());
+        if (!menu.AppendSubmenu(locationMenu, localization::Text(L"menu.context.location").c_str())) return false;
     }
-    if (canRename || (isLectureList ? canCloseLecture : canCloseSession)) {
-        AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
+    if (isLectureList) {
+        AppendMenuW(menu.get(), MF_STRING, kCmdPriority, localization::Text(L"lecture_order.context_edit").c_str());
     }
-    if (canRename) {
-        AppendMenuW(menu.get(), MF_STRING, kCmdRename,
-                    localization::Text(L"ui.directory_list.b351979601ed").c_str());
-    }
-    if (isLectureList ? canCloseLecture : canCloseSession) {
-        AppendMenuW(menu.get(), MF_STRING,
-                    isLectureList ? kCmdCloseLecture : kCmdCloseSession,
-                    localization::Text(isLectureList ? L"ui.directory_list.8bd547f6bad9"
-                                                     : L"ui.directory_list.8b37e122658e").c_str());
-    }
+    AppendMenuW(menu.get(), MF_STRING, kCmdReload,
+                localization::Text(L"workspace.context.reload_list").c_str());
     if (canDelete) {
         AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu.get(), MF_STRING, kCmdDelete, deleteLabel.c_str());

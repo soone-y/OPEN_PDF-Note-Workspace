@@ -1,6 +1,7 @@
 #include "note/note_md4c_adapter.h"
 
 #include "note/note_markdown_escape.h"
+#include "note/note_clro_markdown.h"
 
 #include "core/app_core.h"
 
@@ -439,6 +440,7 @@ bool IsSupportedSpan(MD_SPANTYPE type) {
     switch (type) {
     case MD_SPAN_EM:
     case MD_SPAN_STRONG:
+    case MD_SPAN_U:
     case MD_SPAN_A:
     case MD_SPAN_IMG:
     case MD_SPAN_CODE:
@@ -658,6 +660,9 @@ int LeaveSpan(MD_SPANTYPE, void*, void* userdata) {
     case MD_SPAN_STRONG:
         PushInlineOverlay(ctx->out, InlineKind::Strong, frame.parent_block, span);
         break;
+    case MD_SPAN_U:
+        PushInlineOverlay(ctx->out, InlineKind::Underline, frame.parent_block, span);
+        break;
     case MD_SPAN_A:
         PushInlineOverlay(ctx->out, InlineKind::Link, frame.parent_block, span, std::move(frame.target));
         break;
@@ -779,6 +784,8 @@ NoteDocument ParseNoteDocumentWithMd4c(const NoteTextModel& model, bool permissi
                    MD_FLAG_STRIKETHROUGH |
                    MD_FLAG_TABLES |
                    MD_FLAG_TASKLISTS;
+    if (IsClroMarkdownFile(model.meta.file_name)) parser.flags |= MD_FLAG_DOUBLEUNDERSCOREUNDERLINE;
+    if (!model.meta.quote_lazy_continuation) parser.flags |= MD_FLAG_NOQUOTE_LAZY_CONTINUATION;
     if (permissiveHeadings) parser.flags |= MD_FLAG_PERMISSIVEATXHEADERS;
     parser.enter_block = EnterBlock;
     parser.leave_block = LeaveBlock;

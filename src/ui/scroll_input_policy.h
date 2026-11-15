@@ -86,14 +86,27 @@ private:
 // No timer, inertia, acceleration or deferred movement is introduced here.
 class ListWheelInput {
 public:
+    enum class Rounding { Nearest, TowardZero };
     void Reset() noexcept { *this = {}; }
 
-    [[nodiscard]] int Take(int delta, uint32_t rowsPerNotch) noexcept {
+    [[nodiscard]] int Take(int delta, uint32_t rowsPerNotch, Rounding rounding = Rounding::Nearest) noexcept {
         if (rowsPerNotch != rows_) Reset();
         rows_ = rowsPerNotch;
         const int64_t total = remainder_ - static_cast<int64_t>(delta) * rowsPerNotch;
-        const int64_t whole = total / 120;
+        // Show the nearest row so a fine gesture needs about half a row to
+        // start moving. Keep the signed error so whole notches and split
+        // packets preserve distance. Exact ties go toward the larger index.
+        int64_t whole = total / 120;
         remainder_ = total % 120;
+        if (rounding == Rounding::Nearest) {
+            if (remainder_ >= 60) {
+                ++whole;
+                remainder_ -= 120;
+            } else if (remainder_ < -60) {
+                --whole;
+                remainder_ += 120;
+            }
+        }
         if (whole > std::numeric_limits<int>::max()) { Reset(); return std::numeric_limits<int>::max(); }
         if (whole < std::numeric_limits<int>::min()) { Reset(); return std::numeric_limits<int>::min(); }
         return static_cast<int>(whole);

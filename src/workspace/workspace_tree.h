@@ -2,6 +2,8 @@
 // Public API for the workspace tree (lecture / session / file lists).
 #pragma once
 
+#include "workspace/session_order.h"
+
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -18,7 +20,6 @@
 // ---------------------------------------------------------------------------
 
 enum class LectureSortMode { Recent, Name, Manual };
-enum class SessionSortMode { NumericAsc, NumericDesc, Name };
 
 // ---------------------------------------------------------------------------
 // Public API: called from workspace_config_io.cpp, main.cpp, etc.
@@ -29,9 +30,9 @@ void LoadLectures();
 // Refresh registered external rows from memory; no filesystem rescan or file selection.
 void RefreshRegisteredExternalLectures(const std::vector<std::wstring>& previousPaths);
 
-// Reload session list for lecturePath, then select and optionally open desiredName.
+// Reload session list for lecturePath, then select and optionally open desiredPath.
 void ReloadSessionsAndSelect(const std::wstring& lecturePath,
-                             const std::wstring& desiredName,
+                             const std::wstring& desiredPath,
                              bool reopenFiles);
 
 // Refresh the file lists for the currently open session.
@@ -74,8 +75,7 @@ bool RecoverPendingFileOperationTransactionsForSession(
 [[nodiscard]] std::vector<std::wstring> LectureDisplayLabelsForPaths(const std::vector<std::wstring>& paths);
 [[nodiscard]] std::vector<std::wstring> SessionDisplayLabelsForEntries(const std::vector<struct SessionEntry>& sessions,
                                                        const std::wstring& lecturePath);
-[[nodiscard]] std::vector<std::wstring> FileDisplayLabelsForPaths(const std::vector<struct FileEntry>& files,
-                                                  const std::filesystem::path& root);
+[[nodiscard]] std::vector<std::wstring> FileDisplayLabelsForPaths(const std::vector<struct FileEntry>& files);
 std::wstring DirectFilesSessionLabel();
 std::wstring LectureDisplayLabelForPath(const std::wstring& lecturePath,
                                         const std::vector<std::wstring>& allPaths);
@@ -85,8 +85,6 @@ std::wstring SessionDisplayLabelForEntry(const struct SessionEntry& session,
 
 // Sort / rank
 LectureSortMode ParseLectureSortMode(const std::wstring& mode);
-SessionSortMode ParseSessionSortMode(const std::wstring& mode);
-void SortSessionsForDisplay(std::vector<struct SessionEntry>& sessions, SessionSortMode mode);
 
 // Lecture last-open tracking
 std::filesystem::path LectureLastOpenFilePath();
@@ -99,8 +97,7 @@ std::optional<std::filesystem::file_time_type> TryLastWriteTime(
 
 // File display labels (also used by main.cpp / workspace_actions)
 std::wstring FileDisplayLabelForPath(const std::wstring& filePath,
-                                     const std::vector<struct FileEntry>& files,
-                                     const std::filesystem::path& root);
+                                     const std::vector<struct FileEntry>& files);
 
 // Globals accessed by workspace_tree.cpp (defined in main.cpp)
 extern const wchar_t kLectureSettingsDirName[];

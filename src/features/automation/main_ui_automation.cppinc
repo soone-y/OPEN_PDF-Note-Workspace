@@ -2818,7 +2818,11 @@ static bool RunUiAutomationPdfTextboxReeditFontScenario(HWND owner, std::wstring
     const auto output = std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__" / L"__tmp__" / L"rotation_probe";
     const bool rotationValid = RunPdfPageRotationProbe(owner, output.wstring(), &trace, outError);
     AppendUiAutomationTrace(trace);
-    return rotationValid;
+    if (!rotationValid) return false;
+    trace.clear();
+    const bool pageTargetValid = RunAnnotationPageTargetProbe(owner, output.wstring(), &trace, outError);
+    AppendUiAutomationTrace(trace);
+    return pageTargetValid;
 }
 
 static bool RunUiAutomationPdfTextboxUndoRedoScenario(HWND owner, std::wstring* outError) {
@@ -6830,6 +6834,9 @@ struct MainWindowPresenceAutomationState {
 
 struct OwnedDialogCloseAutomationState {
     HWND owner = nullptr;
+    HWND observedDialog = nullptr;
+    bool destroyObserved = false;
+    bool ownerEnabledAtDestroy = false;
     UINT_PTR closeTimerId = 0;
     const wchar_t* expectedClass = nullptr;
     bool dialogWasOpened = false;
@@ -6850,6 +6857,18 @@ static OwnedDialogCloseAutomationState g_ownedDialogCloseAutomation;
 static constexpr int kUiAutomationHelpSearchControlId = 1006;
 static constexpr int kUiAutomationHelpFindControlId = 1007;
 static constexpr int kUiAutomationHelpSubtitleControlId = 1002;
+
+static LRESULT CALLBACK ObserveDialogOwnerAtDestroy(HWND window, UINT message, WPARAM wp, LPARAM lp,
+                                                   UINT_PTR subclassId, DWORD_PTR) {
+    // Observe before the dialog's WM_DESTROY handler can repair a late restore.
+    if (message == WM_DESTROY) {
+        g_ownedDialogCloseAutomation.destroyObserved = true;
+        g_ownedDialogCloseAutomation.ownerEnabledAtDestroy =
+            IsWindowEnabled(g_ownedDialogCloseAutomation.owner) != FALSE;
+    }
+    if (message == WM_NCDESTROY) RemoveWindowSubclass(window, ObserveDialogOwnerAtDestroy, subclassId);
+    return DefSubclassProc(window, message, wp, lp);
+}
 
 static void CALLBACK RecordMainWindowPresenceEvent(HWINEVENTHOOK, DWORD event, HWND hwnd,
                                                     LONG objectId, LONG childId, DWORD, DWORD) {
@@ -6930,6 +6949,10 @@ static void CALLBACK CloseOwnedDialogForPresenceAutomation(HWND, UINT, UINT_PTR 
         return;
     }
     g_ownedDialogCloseAutomation.dialogWasOpened = true;
+    if (!g_ownedDialogCloseAutomation.observedDialog &&
+        SetWindowSubclass(dialog, ObserveDialogOwnerAtDestroy, 1, 0)) {
+        g_ownedDialogCloseAutomation.observedDialog = dialog;
+    }
     if (g_ownedDialogCloseAutomation.verifyColorChoices) {
         wchar_t execute[64]{};
         wchar_t exit[64]{};
@@ -7065,6 +7088,9 @@ static bool EndOwnedDialogPresenceAutomation(HWND owner, const wchar_t* scenario
         KillTimer(nullptr, g_ownedDialogCloseAutomation.closeTimerId);
     }
     const OwnedDialogCloseAutomationState dialogResult = g_ownedDialogCloseAutomation;
+    if (dialogResult.observedDialog && IsWindow(dialogResult.observedDialog)) {
+        RemoveWindowSubclass(dialogResult.observedDialog, ObserveDialogOwnerAtDestroy, 1);
+    }
     g_ownedDialogCloseAutomation = {};
     StopMainWindowPresenceMonitor();
     const MainWindowPresenceAutomationState monitorResult = g_mainWindowPresenceAutomation;
@@ -7085,6 +7111,11 @@ static bool EndOwnedDialogPresenceAutomation(HWND owner, const wchar_t* scenario
     if ((requireDialog && !dialogResult.dialogWasOpened) ||
         (dialogResult.dialogWasOpened && !dialogResult.closeWasPosted)) {
         if (outError) *outError = std::wstring(L"Dialog visibility automation did not open and close ") + scenario + L".";
+        return false;
+    }
+    if (dialogResult.dialogWasOpened &&
+        (!dialogResult.observedDialog || !dialogResult.destroyObserved || !dialogResult.ownerEnabledAtDestroy)) {
+        if (outError) *outError = std::wstring(L"Owner was not observed enabled before destroying the dialog while ") + scenario + L".";
         return false;
     }
     if (dialogResult.expectedClass && wcscmp(dialogResult.expectedClass, L"HelpDialogClass") == 0) {
@@ -7108,6 +7139,7 @@ static bool EndOwnedDialogPresenceAutomation(HWND owner, const wchar_t* scenario
         if (outError) *outError = std::wstring(L"Main window was not visible, restored, and enabled after ") + scenario + L".";
         return false;
     }
+    if (dialogResult.dialogWasOpened) AppendUiAutomationTrace(L"automation:dialog_owner_before_destroy_ok");
     return true;
 }
 
@@ -7118,6 +7150,28 @@ static bool RunUiAutomationHelpVisibilityScenario(HWND owner, std::wstring* outE
 }
 
 static bool RunUiAutomationDialogOwnerVisibilityScenario(HWND owner, std::wstring* outError) {
+    // Negative control: a hidden, disposable popup deliberately uses the old
+    // order. The observer must catch the disabled owner before cleanup fixes it.
+    HWND probe = CreateWindowExW(0, L"STATIC", L"", WS_POPUP, 0, 0, 1, 1,
+                                  owner, nullptr, g_hInst, nullptr);
+    if (!probe || !SetWindowSubclass(probe, ObserveDialogOwnerAtDestroy, 1, 0)) {
+        if (probe) DestroyWindow(probe);
+        if (outError) *outError = L"Could not create the dialog-owner negative control.";
+        return false;
+    }
+    g_ownedDialogCloseAutomation = {};
+    g_ownedDialogCloseAutomation.owner = owner;
+    EnableWindow(owner, FALSE);
+    DestroyWindow(probe);
+    const bool detectedLateRestore = g_ownedDialogCloseAutomation.destroyObserved &&
+        !g_ownedDialogCloseAutomation.ownerEnabledAtDestroy;
+    RestoreModalOwnerBeforeClose(owner);
+    g_ownedDialogCloseAutomation = {};
+    if (!detectedLateRestore) {
+        if (outError) *outError = L"The dialog-owner observer missed a deliberately late restore.";
+        return false;
+    }
+    AppendUiAutomationTrace(L"automation:dialog_owner_late_restore_rejected");
     if (!BeginOwnedDialogPresenceAutomation(owner, L"SilentDialogClass", outError)) return false;
     SilentDialogOptions options;
     options.title = L"UI automation dialog-owner visibility";
@@ -7175,6 +7229,17 @@ static bool RunUiAutomationDialogOwnerVisibilityScenario(HWND owner, std::wstrin
         }
     }
     AppendUiAutomationTrace(L"automation:color_choices_accept_cancel_ok");
+    for (int finishCommand : {IDCANCEL, 0}) {
+        if (!BeginOwnedDialogPresenceAutomation(owner, L"UnifiedExportDialog", outError)) return false;
+        g_ownedDialogCloseAutomation.silentFinishCommand = finishCommand;
+        std::vector<ExportDialogResult> exports;
+        const bool accepted = ShowUnifiedExportDialog(owner, ExportDialogKind::PdfAll, exports);
+        if (!EndOwnedDialogPresenceAutomation(owner, L"closing export", outError)) return false;
+        if (accepted || !exports.empty()) {
+            if (outError) *outError = L"Closing export unexpectedly committed output.";
+            return false;
+        }
+    }
     return true;
 }
 

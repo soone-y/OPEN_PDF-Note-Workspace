@@ -125,7 +125,7 @@ function Assert-ArtifactFresh([string]$ArtifactPath, [string[]]$InputPaths) {
             continue
         }
         if ($item.LastWriteTimeUtc -gt $artifactTime) {
-            throw ("Build artifact is stale. Re-run build.ps1 before packaging. Newer input: {0}" -f $item.FullName)
+            throw ("Build artifact is stale. Re-run build.ps1 before packaging. Artifact: {0}; newer input: {1}" -f $ArtifactPath, $item.FullName)
         }
     }
 }
@@ -459,29 +459,12 @@ function Copy-LibreOfficeRuntimeLicenseArtifacts([string]$ReleaseRoot, [string]$
 }
 
 function Copy-ReleaseSampleWorkspace([string]$SampleDest, [string]$Locale, [switch]$Lite) {
-    $sampleSource = Join-Path $repoRoot ("release_assets\sample_workspace\" + $Locale)
-    if (-not (Test-Path -LiteralPath $sampleSource)) {
-        throw "Release sample workspace template not found: $sampleSource"
-    }
-
-    # Keep the course container in the package. Flattening its sessions into
-    # sample_workspace hid the course -> session structure from users.
-    $conversionSession = if ($Locale -eq "ja") {
-        Join-Path $sampleSource "01_講義サンプル\第04回_Office変換"
-    }
-    else {
-        Join-Path $sampleSource "01_Lecture_Samples\Session_04_Office_Conversion"
-    }
-
+    . (Join-Path $repoRoot 'scripts/build/sample_workspace.ps1')
+    $files = @(Get-SampleWorkspaceFiles -RepositoryRoot $repoRoot -Locale $Locale -Lite:$Lite)
+    if (-not $files.Count) { throw "Empty release sample workspace template: $Locale" }
     Ensure-Directory $SampleDest
-    Get-ChildItem -LiteralPath $sampleSource -Recurse -File -Force | ForEach-Object {
-        $sourceFile = $_.FullName
-        if ($Lite -and ($sourceFile.Equals($conversionSession, [System.StringComparison]::OrdinalIgnoreCase) -or
-                $sourceFile.StartsWith($conversionSession.TrimEnd('\') + '\', [System.StringComparison]::OrdinalIgnoreCase))) {
-            return
-        }
-        $relativePath = $sourceFile.Substring($sampleSource.TrimEnd('\').Length).TrimStart('\')
-        Copy-File -Source $sourceFile -Dest (Join-Path $SampleDest $relativePath)
+    foreach ($file in $files) {
+        Copy-File -Source $file.Source -Dest (Join-Path $SampleDest $file.RelativePath)
     }
 }
 

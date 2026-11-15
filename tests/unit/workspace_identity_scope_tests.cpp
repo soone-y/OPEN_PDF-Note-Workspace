@@ -2,6 +2,8 @@
 #include "note/note_identity_store.h"
 #include "core/identity_path_scope.h"
 #include "core/sha256.h"
+#include "clrop/hash.h"
+#include "fpdfview.h"
 #include <fstream>
 #include <iostream>
 #include <mutex>
@@ -62,6 +64,23 @@ int main(int argc, char** argv) {
             Check(note::FindRuntimeNoteIdentityPath(renamedNote.wstring(), &error) == note::NoteId{noteId}, "note ID survives new process");
             Check(Read(renamedPdf) == "pdf bytes" && Read(renamedNote) == "note bytes", "restart preserves member bytes");
             std::cout << "Identity scope restart: " << checks << " checks passed\n"; return 0;
+        }
+        {
+            // The hash API also fingerprints non-PDF local files. Exercise a
+            // closed-file edit that preserves metadata before a protected reopen.
+            const auto cacheFile = workspace / L"same-metadata.pdf";
+            Write(cacheFile, "first-content");
+            const auto modified = fs::last_write_time(cacheFile);
+            FPDF_InitLibrary();
+            const auto before = clrop::ComputePdfId(cacheFile.wstring());
+            Write(cacheFile, "other-content");
+            fs::last_write_time(cacheFile, modified);
+            clrop::InvalidatePdfIdCache(cacheFile.wstring());
+            const auto after = clrop::ComputePdfId(cacheFile.wstring());
+            FPDF_DestroyLibrary();
+            Check(!before.sha256.empty() && !after.sha256.empty() &&
+                before.sha256 != after.sha256 && before.size == after.size,
+                "new open does not reuse a hash across same-size same-mtime external changes");
         }
         const auto internal = workspace / L"session" / L"inside.pdf";
         Write(internal, "pdf bytes"); Write(pdf, "pdf bytes"); Write(note, "note bytes");

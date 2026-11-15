@@ -920,6 +920,9 @@ void BindTableCell(const TableCellBinding& cell, NoteRenderSourceRun* run) {
         case InlineKind::Strong:
             AppendStyle(styles, StyleKind::Bold);
             break;
+        case InlineKind::Underline:
+            AppendStyle(styles, StyleKind::Underline);
+            break;
         case InlineKind::Strike:
             AppendStyle(styles, StyleKind::Strike);
             break;

@@ -266,15 +266,6 @@ std::vector<Span> CollectTeXSourceCommentSpans(std::wstring_view raw) {
     return spans;
 }
 
-bool IsInsideAnySpan(const std::vector<Span>& spans, Span span) {
-    for (const auto& candidate : spans) {
-        if (span.start < candidate.end && span.end > candidate.start) {
-            return true;
-        }
-    }
-    return false;
-}
-
 bool ContainsLineBreak(std::wstring_view text, size_t start, size_t end) {
     end = std::min(end, text.size());
     for (size_t i = start; i < end; ++i) {
@@ -486,17 +477,7 @@ bool SkipLiteralSpanAt(const std::vector<Span>& literalSpans, size_t* literalInd
 }
 
 int ParseHeadingLevelToken(std::wstring_view token) {
-    if (token.size() < 2) return 0;
-    if (token[0] != L'h' && token[0] != L'H') return 0;
-
-    int level = 0;
-    for (size_t i = 1; i < token.size(); ++i) {
-        const wchar_t ch = token[i];
-        if (ch < L'0' || ch > L'9') return 0;
-        level = level * 10 + static_cast<int>(ch - L'0');
-    }
-    if (level <= 0) return 0;
-    return std::clamp(level, 1, 6);
+    return ParseNoteHeadingTagLevel(token);
 }
 
 int ParseHashHeadingCloseSelector(std::wstring_view selector) {
@@ -766,11 +747,10 @@ void ApplyLegacyMarkupStyleSpans(const NoteTextModel& model, NoteDocument* doc) 
     std::vector<HeadingInfo> headings;
     for (const auto& block : doc->blocks) {
         if (block.kind == BlockKind::Heading) {
-            size_t c_start = block.span.start.value;
-            while (c_start < model.raw.size() && model.raw[c_start] != '\n') {
-                c_start++;
-            }
-            if (c_start < model.raw.size()) c_start++;
+            const size_t last = block.span.end > block.span.start
+                ? block.span.end.value - 1 : block.span.start.value;
+            const auto next = std::upper_bound(model.line_starts.begin(), model.line_starts.end(), last);
+            const size_t c_start = next == model.line_starts.end() ? model.raw.size() : *next;
             headings.push_back({block.span.start.value, c_start, block.level});
         }
     }
@@ -798,7 +778,10 @@ void ApplyLegacyMarkupStyleSpans(const NoteTextModel& model, NoteDocument* doc) 
             StyleFrame implicitIndent;
             implicitIndent.content_start = headings[headingIndex].content_start;
             implicitIndent.heading_level = hLevel;
-            implicitIndent.specs.push_back(StyleSpec{StyleKind::Indent, std::to_wstring(hLevel)});
+            // The first heading tier uses the editor's existing left padding.
+            // Keep a zero-valued frame so heading closes and explicit <d=...>
+            // overrides retain their scope; only the visual baseline changes.
+            implicitIndent.specs.push_back(StyleSpec{StyleKind::Indent, std::to_wstring(hLevel - 1)});
             implicitIndent.close_aliases.push_back(L"__implicit_heading_indent__");
             stack.push_back(std::move(implicitIndent));
             
@@ -829,6 +812,14 @@ void ApplyLegacyMarkupStyleSpans(const NoteTextModel& model, NoteDocument* doc) 
         }
         if (model.meta.clro_ascii_only && IsClroMarkdownFile(model.meta.file_name) &&
             !IsAsciiClroTagSyntax(std::wstring_view(model.raw).substr(pos, tagEnd - pos))) {
+            pos = tagEnd;
+            continue;
+        }
+
+        // A standalone heading opener already belongs to a heading block.
+        // In particular, <m> here must not also open legacy line-height style.
+        if (headingIndex > 0 && headings[headingIndex - 1].start == pos &&
+            ParseHeadingLevelToken(content) > 0) {
             pos = tagEnd;
             continue;
         }
@@ -909,6 +900,16 @@ struct HeadingPromotion {
     int level = 0;
 };
 
+[[nodiscard]] size_t HeadingTitleEnd(std::wstring_view raw, size_t start, size_t end, std::wstring_view name) {
+    end = TrimLineEnd(raw, start, end);
+    if (end - start >= 3 && raw.substr(end - 3, 3) == L"</>") return end - 3;
+    const size_t close = end > start ? raw.rfind(L'<', end - 1) : std::wstring_view::npos;
+    if (close != std::wstring_view::npos && close >= start && end - close == name.size() + 3 &&
+        raw[close + 1] == L'/' && raw[end - 1] == L'>' &&
+        EqualsAsciiNoCase(raw.substr(close + 2, name.size()), name)) return close;
+    return end;
+}
+
 bool TryParseLegacyHeadingOpen(std::wstring_view raw,
                                size_t lineStart,
                                size_t lineEnd,
@@ -918,7 +919,7 @@ bool TryParseLegacyHeadingOpen(std::wstring_view raw,
     const size_t trimmedStart = TrimLineStart(raw, lineStart, lineEnd);
     const size_t trimmedEnd = TrimLineEnd(raw, trimmedStart, lineEnd);
     if (trimmedStart >= trimmedEnd) return false;
-    if (trimmedEnd - trimmedStart < 4) return false;
+    if (trimmedEnd - trimmedStart < 3) return false;
     if (raw[trimmedStart] != L'<') return false;
 
     size_t tagCursor = trimmedStart + 1;
@@ -931,26 +932,8 @@ bool TryParseLegacyHeadingOpen(std::wstring_view raw,
     if (level <= 0) return false;
 
     const size_t contentStart = tagCursor + 1;
-    size_t closeStart = trimmedEnd;
-
-    if (trimmedEnd >= contentStart + 3 &&
-        raw[trimmedEnd - 3] == L'<' &&
-        raw[trimmedEnd - 2] == L'/' &&
-        raw[trimmedEnd - 1] == L'>') {
-        closeStart = trimmedEnd - 3;
-    } else {
-        size_t namedCloseStart = trimmedEnd;
-        while (namedCloseStart > contentStart && raw[namedCloseStart - 1] != L'<') {
-            --namedCloseStart;
-        }
-        if (namedCloseStart > contentStart && namedCloseStart < trimmedEnd) {
-            const std::wstring_view closing = raw.substr(namedCloseStart, trimmedEnd - namedCloseStart);
-            std::wstring expected = L"</h" + std::to_wstring(level) + L">";
-            if (EqualsAsciiNoCase(closing, expected)) {
-                closeStart = namedCloseStart;
-            }
-        }
-    }
+    const size_t closeStart = HeadingTitleEnd(raw, contentStart, trimmedEnd,
+        raw.substr(trimmedStart + 1, tagCursor - trimmedStart - 1));
 
     outPromotion->block_span = Span{trimmedStart, trimmedEnd};
     outPromotion->content_span = Span{contentStart, closeStart};
@@ -1265,79 +1248,10 @@ void ExtractTexMathSpans(const NoteTextModel& model,
     }
 }
 
-void ApplyHeadingTagPromotion(const NoteTextModel& model, NoteDocument* doc) {
-    if (!doc) return;
-    const std::vector<Span> literalSpans = CollectLiteralSpans(model, *doc);
-    for (size_t lineIndex = 0; lineIndex < model.line_starts.size(); ++lineIndex) {
-        const size_t lineStart = model.line_starts[lineIndex];
-        size_t lineEnd = (lineIndex + 1 < model.line_starts.size())
-                             ? model.line_starts[lineIndex + 1]
-                             : model.raw.size();
-        if (lineEnd > lineStart && model.raw[lineEnd - 1] == L'\n') {
-            --lineEnd;
-        }
-        if (lineEnd > lineStart && model.raw[lineEnd - 1] == L'\r') {
-            --lineEnd;
-        }
-
-        HeadingPromotion promotion;
-        if (!TryParseLegacyHeadingOpen(model.raw, lineStart, lineEnd, &promotion)) {
-            continue;
-        }
-        if (model.meta.clro_ascii_only && IsClroMarkdownFile(model.meta.file_name)) {
-            const size_t opener = model.raw.find(L'<', lineStart);
-            if (opener == std::wstring::npos || !IsAsciiClroTagSyntax(
-                    std::wstring_view(model.raw).substr(opener, promotion.content_span.start.value - opener))) continue;
-            const size_t closer = model.raw.find(L'<', promotion.content_span.end.value);
-            if (closer < lineEnd) {
-                const size_t closerEnd = model.raw.find(L'>', closer);
-                if (closerEnd < lineEnd && !IsAsciiClroTagSyntax(
-                        std::wstring_view(model.raw).substr(closer, closerEnd + 1 - closer))) continue;
-            }
-        }
-        if (IsInsideAnySpan(literalSpans, promotion.block_span)) {
-            continue;
-        }
-
-        size_t trimmedContentStart = TrimLineStart(model.raw, promotion.content_span.start.value, promotion.content_span.end.value);
-        if (trimmedContentStart >= promotion.content_span.end.value && lineIndex + 1 < model.line_starts.size()) {
-            ++lineIndex;
-            size_t nextLineStart = model.line_starts[lineIndex];
-            size_t nextLineEnd = (lineIndex + 1 < model.line_starts.size())
-                                     ? model.line_starts[lineIndex + 1]
-                                     : model.raw.size();
-            if (nextLineEnd > nextLineStart && model.raw[nextLineEnd - 1] == L'\n') --nextLineEnd;
-            if (nextLineEnd > nextLineStart && model.raw[nextLineEnd - 1] == L'\r') --nextLineEnd;
-            
-            promotion.content_span = Span{{nextLineStart}, {nextLineEnd}};
-            promotion.block_span.end = {nextLineEnd};
-        }
-
-        BlockNode block;
-        block.kind = BlockKind::Heading;
-        block.origin = BlockOrigin::LegacyHeadingTag;
-        block.span = promotion.block_span;
-        block.loc = ResolveLineColumn(model, promotion.block_span.start.value);
-        block.level = promotion.level;
-        block.first_inline = doc->inlines.size();
-        block.inline_count = 1;
-        block.parent = kInvalidIndex;
-
-        InlineNode inlineNode;
-        inlineNode.kind = InlineKind::Text;
-        inlineNode.span = promotion.content_span;
-        inlineNode.parent_block = doc->blocks.size();
-
-        doc->blocks.push_back(std::move(block));
-        doc->inlines.push_back(std::move(inlineNode));
-    }
-}
-
 void PostProcessNoteDocument(const NoteTextModel& model, NoteDocument* doc,
                              const NoteTextModel* mathSource = nullptr) {
     if (!doc) return;
     ExtractTexMathSpans(mathSource ? *mathSource : model, doc);
-    ApplyHeadingTagPromotion(model, doc);
     ApplyLegacyMarkupStyleSpans(model, doc);
     if (model.meta.clro_ascii_only && IsClroMarkdownFile(model.meta.file_name)) {
         doc->style_spans.erase(std::remove_if(doc->style_spans.begin(), doc->style_spans.end(),
@@ -1348,13 +1262,13 @@ void PostProcessNoteDocument(const NoteTextModel& model, NoteDocument* doc,
     }
 }
 
-// The parser owns container boundaries; placement never rediscovers them.
-// Parse disjoint body regions so paragraphs/lazy list continuations cannot
-// cross an opening or closing fence. Source and recovery data stay unchanged;
+// The parser owns tagged-heading and container boundaries. Parse disjoint
+// regions so paragraphs/lazy lists cannot cross those block boundaries.
+// Source and recovery data stay unchanged;
 // every local parser offset is translated back to canonical UTF-16 offsets.
 void AppendMarkdownRegion(const NoteTextModel& source, Span region,
                           size_t owner, NoteDocument* out, bool permissiveHeadings) {
-    if (region.end <= region.start) return;
+    if (!out || region.end <= region.start || NoteDocumentHasFatalParseFailure(*out)) return;
     const NoteTextModel local = MakeNoteTextModel(
         source.meta, source.raw.substr(region.start.value, region.end - region.start), source.revision);
     NoteDocument parsed = ParseNoteDocumentWithMd4c(local, permissiveHeadings);
@@ -1384,7 +1298,52 @@ void AppendMarkdownRegion(const NoteTextModel& source, Span region,
     }
 }
 
-[[nodiscard]] NoteDocument ParseMarkdownContainers(const NoteTextModel& model, bool permissiveHeadings) {
+// Parse the title once, as its own region, instead of appending overlapping
+// text leaves to an existing paragraph. Placement, hit testing and export all
+// consume this same heading owner. Source offsets never change.
+void AppendTaggedHeading(const NoteTextModel& model, const HeadingPromotion& heading,
+                         size_t owner, NoteDocument* out, bool permissiveHeadings) {
+    if (!out || NoteDocumentHasFatalParseFailure(*out)) return;
+    const size_t blockBase = out->blocks.size();
+    const size_t inlineBase = out->inlines.size();
+    AppendMarkdownRegion(model, heading.content_span, owner, out, permissiveHeadings);
+    if (NoteDocumentHasFatalParseFailure(*out)) return;
+    if (out->blocks.size() != blockBase + 1 ||
+        (out->blocks.back().kind != BlockKind::Paragraph && out->blocks.back().kind != BlockKind::Heading)) {
+        // Block markers in a title are literal, not nested lists/code/quotes.
+        out->blocks.resize(blockBase);
+        out->inlines.resize(inlineBase);
+        BlockNode block;
+        block.parent = owner;
+        block.first_inline = inlineBase;
+        block.inline_count = 1;
+        InlineNode text;
+        text.kind = InlineKind::Text;
+        text.span = heading.content_span;
+        text.parent_block = blockBase;
+        out->blocks.push_back(std::move(block));
+        out->inlines.push_back(std::move(text));
+    }
+    BlockNode& block = out->blocks[blockBase];
+    block.kind = BlockKind::Heading;
+    block.origin = BlockOrigin::LegacyHeadingTag;
+    block.level = heading.level;
+    block.span = heading.block_span;
+    block.loc = ResolveLineColumn(model, block.span.start.value);
+}
+
+[[nodiscard]] bool HasStandaloneHeadingTags(const NoteTextModel& model) {
+    if (model.raw.find(L'<') == std::wstring::npos) return false;
+    for (size_t i = 0; i < model.line_starts.size(); ++i) {
+        size_t end = i + 1 < model.line_starts.size() ? model.line_starts[i + 1] : model.raw.size();
+        while (end > model.line_starts[i] && (model.raw[end - 1] == L'\r' || model.raw[end - 1] == L'\n')) --end;
+        HeadingPromotion heading;
+        if (TryParseLegacyHeadingOpen(model.raw, model.line_starts[i], end, &heading)) return true;
+    }
+    return false;
+}
+
+[[nodiscard]] NoteDocument ParseMarkdownRegions(const NoteTextModel& model, bool permissiveHeadings) {
     NoteDocument out;
     out.meta = model.meta;
     SetNoteDocumentSourceRevision(&out, model.revision);
@@ -1423,6 +1382,35 @@ void AppendMarkdownRegion(const NoteTextModel& source, Span region,
         // not a reason to discard the parser-proven container boundary.
         if (protectedIndex < protectedSpans.size() &&
             protectedSpans[protectedIndex].start.value <= start) continue;
+        HeadingPromotion heading;
+        if (TryParseLegacyHeadingOpen(model.raw, start, end, &heading)) {
+            size_t afterHeading = next;
+            if (TrimLineStart(model.raw, heading.content_span.start.value, heading.content_span.end.value) >=
+                    heading.content_span.end.value && line + 1 < model.line_starts.size()) {
+                const size_t titleStart = next;
+                size_t titleEnd = line + 2 < model.line_starts.size() ? model.line_starts[line + 2] : model.raw.size();
+                afterHeading = titleEnd;
+                while (titleEnd > titleStart && (model.raw[titleEnd - 1] == L'\r' || model.raw[titleEnd - 1] == L'\n')) --titleEnd;
+                size_t protection = protectedIndex;
+                while (protection < protectedSpans.size() && protectedSpans[protection].end.value <= titleStart) ++protection;
+                NoteContainerFenceRun titleFence;
+                if (TrimLineStart(model.raw, titleStart, titleEnd) < titleEnd &&
+                    !(protection < protectedSpans.size() && protectedSpans[protection].start.value <= titleStart) &&
+                    !TryParseNoteContainerFenceRun(std::wstring_view(model.raw).substr(titleStart, titleEnd - titleStart), &titleFence)) {
+                    const size_t nameStart = heading.block_span.start.value + 1;
+                    const auto name = std::wstring_view(model.raw).substr(nameStart,
+                        heading.content_span.start.value - nameStart - 1);
+                    heading.content_span = {{titleStart}, {HeadingTitleEnd(model.raw, titleStart, titleEnd, name)}};
+                    heading.block_span.end = {titleEnd};
+                    ++line;
+                } else afterHeading = next;
+            }
+            const size_t owner = stack.empty() ? static_cast<size_t>(-1) : stack.back();
+            AppendMarkdownRegion(model, {{regionStart}, {start}}, owner, &out, permissiveHeadings);
+            AppendTaggedHeading(model, heading, owner, &out, permissiveHeadings);
+            regionStart = afterHeading;
+            continue;
+        }
         NoteContainerFenceRun fence;
         const std::wstring_view text(model.raw.data() + start, end - start);
         if (!TryParseNoteContainerFenceRun(text, &fence)) continue;
@@ -1463,8 +1451,8 @@ void AppendMarkdownRegion(const NoteTextModel& source, Span region,
 
 static NoteDocument ParseNoteDocumentCore(const NoteTextModel& model, bool permissiveHeadings = false,
                                            const NoteTextModel* mathSource = nullptr) {
-    NoteDocument doc = model.raw.find(L":::") == std::wstring::npos
-        ? ParseNoteDocumentWithMd4c(model, permissiveHeadings) : ParseMarkdownContainers(model, permissiveHeadings);
+    NoteDocument doc = model.raw.find(L":::") == std::wstring::npos && !HasStandaloneHeadingTags(model)
+        ? ParseNoteDocumentWithMd4c(model, permissiveHeadings) : ParseMarkdownRegions(model, permissiveHeadings);
     if (NoteDocumentHasFatalParseFailure(doc)) {
         // Container parsing can have completed earlier regions. Retain the
         // diagnostic and original source identity, but publish no partial AST.
@@ -1475,29 +1463,6 @@ static NoteDocument ParseNoteDocumentCore(const NoteTextModel& model, bool permi
         return doc;
     }
     PostProcessNoteDocument(model, &doc, mathSource);
-    // Legacy standalone heading promotion appends new roots after parsing.
-    // Attach those roots to the narrowest parsed enclosing container too.
-    std::vector<size_t> containers;
-    for (size_t index = 0; index < doc.blocks.size(); ++index) {
-        if (doc.blocks[index].kind == BlockKind::FencedContainer) containers.push_back(index);
-    }
-    if (containers.empty()) return doc;
-    for (BlockNode& block : doc.blocks) {
-        if (block.parent != static_cast<size_t>(-1) ||
-            block.origin != BlockOrigin::LegacyHeadingTag) continue;
-        const auto next = std::upper_bound(containers.begin(), containers.end(), block.span.start,
-            [&](Utf16CodeUnitOffset position, size_t index) {
-                return position < doc.blocks[index].span.start;
-            });
-        if (next == containers.begin()) continue;
-        for (size_t index = *std::prev(next); index != kInvalidIndex; index = doc.blocks[index].parent) {
-            const BlockNode& owner = doc.blocks[index];
-            if (owner.span.start < block.span.start && owner.span.end >= block.span.end) {
-                block.parent = index;
-                break;
-            }
-        }
-    }
     return doc;
 }
 
@@ -1517,7 +1482,7 @@ static void ProjectClroMarkupTags(std::wstring_view raw, const std::vector<Span>
         // folding just its enclosing quote pair. Unknown/math tags are
         // restored below, so this never rewrites ordinary text or TeX.
         for (size_t i = 1; i + 1 < tag.size(); ++i) {
-            tag[i] = FoldClroMarkupNameLetter(tag[i]);
+            tag[i] = FoldClroMarkupNameCharacter(tag[i]);
             if (tag[i] != L'=') continue;
             ++i;
             while (i + 1 < tag.size() && iswspace(tag[i])) ++i;
@@ -1533,7 +1498,8 @@ static void ProjectClroMarkupTags(std::wstring_view raw, const std::vector<Span>
         StyleFrame frame;
         const size_t keyEnd = content.find_first_of(L" \t=,");
         const bool math = ToLowerAscii(content.substr(0, keyEnd)) == L"math";
-        const bool accepted = !math && (content.empty() || ParseHashHeadingCloseSelector(content) > 0 ||
+        const bool accepted = !math && (content.empty() || ParseHeadingLevelToken(content) > 0 ||
+            ParseHashHeadingCloseSelector(content) > 0 ||
             ParseStyleOpenTag(content, &frame) || ParseStyleOpenTag(content + L"=1", &frame));
         RestoreClroSourceRange(raw, {{start}, {end + 1}}, syntax);
         if (accepted) syntax->replace(start, tag.size(), tag);

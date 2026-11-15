@@ -5,6 +5,7 @@
 #include "core/ui_prompts.h"
 #include "core/identity_path_scope.h"
 #include "note/note_file_policy.h"
+#include "note/note_auto_bullet.h"
 #include "note/note_bottom_space.h"
 #include "diagnostics/normal_operations.h"
 #include "diagnostics/open_work_counters.h"

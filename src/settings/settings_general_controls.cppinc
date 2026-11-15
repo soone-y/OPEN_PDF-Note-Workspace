@@ -472,6 +472,7 @@ static bool ApplyGeneralSettings(GeneralSettingsCtx* ctx) {
         g_config.quickPdfStandardTextAnnots = SendMessageW(ctx->chkQuickPdfStandardText, BM_GETCHECK, 0, 0) == BST_CHECKED;
         g_config.quickPdfMatchPdfPaneTextLayout = SendMessageW(ctx->chkQuickPdfMatchLayout, BM_GETCHECK, 0, 0) == BST_CHECKED;
         g_config.quickPdfKeepPageRotation = SendMessageW(ctx->chkQuickPdfKeepRotation, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        g_config.quickPdfEmbedEditableData = SendMessageW(ctx->chkQuickPdfEmbedEditableData, BM_GETCHECK, 0, 0) == BST_CHECKED;
         g_config.quickPdfTextColorMode = std::clamp(static_cast<int>(SendMessageW(ctx->cbQuickPdfColorMode, CB_GETCURSEL, 0, 0)), 0, 3);
         g_config.quickPdfTextColorBackground = input.quickBackground;
     }
@@ -730,6 +731,9 @@ static bool ApplyGeneralSettings(GeneralSettingsCtx* ctx) {
         g_noteWrapEnabled = (SendMessageW(ctx->chkNoteWrapEnabled, BM_GETCHECK, 0, 0) == BST_CHECKED);
         g_config.noteWrapEnabled = g_noteWrapEnabled;
     }
+    if (ctx->chkNoteQuoteLazyContinuation) {
+        g_config.noteQuoteLazyContinuation = SendMessageW(ctx->chkNoteQuoteLazyContinuation, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    }
     if (ctx->chkClroAsciiOnly) {
         g_config.clroAsciiOnly = SendMessageW(ctx->chkClroAsciiOnly, BM_GETCHECK, 0, 0) == BST_CHECKED;
     }
@@ -787,6 +791,10 @@ static bool ApplyGeneralSettings(GeneralSettingsCtx* ctx) {
             static_cast<int>(SelectedComboItemData(
                 ctx->cbNoteFullReparseDelay, g_config.noteFullReparseDelayMs)),
             250, 5000);
+    }
+    if (ctx->btnNoteFgCustom) {
+        g_config.noteFgColor = ctx->noteFgCustomColor;
+        g_noteFgColor = g_config.noteFgColor;
     }
     if (ctx->cbNoteBgMode) {
         size_t bgIndex = static_cast<size_t>(SelectedComboItemData(ctx->cbNoteBgMode, 0));
@@ -927,7 +935,8 @@ static bool ApplyGeneralSettings(GeneralSettingsCtx* ctx) {
         const bool refreshed = RefreshCurrentSessionFiles();
         (void)refreshed; // No selected session requires no enumeration.
     }
-    if (g_config.noteInlineMathVerticalAlignment != previousInlineMathVerticalAlignment) {
+    if (g_config.noteInlineMathVerticalAlignment != previousInlineMathVerticalAlignment ||
+        g_config.noteFgColor != previousConfig.noteFgColor) {
         RefreshNoteRenderForPreferenceChange();
     }
 

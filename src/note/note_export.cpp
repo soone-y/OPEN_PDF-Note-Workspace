@@ -500,6 +500,7 @@ std::string RenderHtmlInlineRange(const ExportSource& source,
         const InlineNode& node = doc.inlines[inlineIndex];
         if (node.kind == InlineKind::Emphasis ||
             node.kind == InlineKind::Strong ||
+            node.kind == InlineKind::Underline ||
             node.kind == InlineKind::Strike ||
             node.kind == InlineKind::Link ||
             node.kind == InlineKind::Image) {
@@ -576,6 +577,9 @@ std::string RenderHtmlInlineRange(const ExportSource& source,
                 break;
             case InlineKind::Strong:
                 inner = "<strong>" + inner + "</strong>";
+                break;
+            case InlineKind::Underline:
+                inner = "<u>" + inner + "</u>";
                 break;
             case InlineKind::Strike:
                 inner = "<del>" + inner + "</del>";

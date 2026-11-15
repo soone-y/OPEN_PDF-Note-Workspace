@@ -17,10 +17,10 @@
 | `pdfium/` | PDF の読み込み、描画、テキスト抽出、PDF 書き出し | SDK ヘッダ、import lib、`pdfium.dll`、ライセンス文書 | `pdfium.dll` と PDFium 関連ライセンスを同梱 |
 | `md4c/` | ノート本文の Markdown 解析 | `md4c.c`, `md4c.h` を含む vendor ソースとライセンス文書 | バイナリには静的に組み込まれ、ライセンス文書を同梱 |
 | `libreoffice/` | docx/pptx など Office 文書から PDF へのローカル変換、同梱フォントのアプリ内 private font 利用 | 比較・フォント参照用 image、通信機能を除いた custom runtime、再現用入力、ライセンス文書 | 通常版は検証済み runtime を `lo/` へ配置。Lite 版は変換 runtime を含めない。選択 private font は両 edition に同梱 |
-| `zlib/` | DOCX staging ZIP の展開・検証 | 1.3.2 のヘッダ、import library、DLL、版・ライセンス証跡 | 固定した `zlib1.dll` とライセンスを同梱 |
+| `zlib/` | DOCX staging ZIP の展開・検証 | 1.4 のヘッダ、import library、DLL、版・ライセンス証跡 | 固定した `zlib1.dll` とライセンスを同梱 |
 | `mingw_runtime_licenses/` | MinGW-w64 runtime DLL のライセンス証跡 | `libstdc++`, `libgcc`, `winpthread` 向けライセンス文書 | runtime DLL と対応ライセンスを同梱 |
 
-2026-10-26時点の採用版は、PDFium `158.0.8111.0`、アプリ側MD4C `0.6.0` + 固定commit・日本語patch、zlib `1.3.2`、LibreOffice custom runtime `26.2.6.3`。固定版・hashの正本は各依存の `VERSION` とmanifest、[ライセンス一覧](../LICENSES_INDEX.md)、[第三者notice](../THIRD_PARTY_NOTICES.md)で確認する。LibreOffice内蔵MD4Cは別のUTF-8 `0.5.3`で、custom patch `0050`により必要なallocation失敗処理をbackport済み。アプリ側の更新だけで内蔵コピーも更新済みと扱わない。
+2026-11-13時点の採用版は、PDFium `159.0.8152.0`、アプリ側MD4C `0.6.0` + 固定commit・日本語patch、zlib `1.4`、LibreOffice custom runtime `26.2.6.3`。固定版・hashの正本は各依存の `VERSION` とmanifest、[ライセンス一覧](../LICENSES_INDEX.md)、[第三者notice](../THIRD_PARTY_NOTICES.md)で確認する。LibreOffice内蔵MD4Cは別のUTF-8 `0.5.3`で、custom patch `0050`により必要なallocation失敗処理をbackport済み。アプリ側の更新だけで内蔵コピーも更新済みと扱わない。
 
 ## 共通ルール
 
@@ -110,7 +110,7 @@ MD4C はノート本文の Markdown 解析依存です。本アプリでは Mark
 - `README.md`, `CHANGELOG.md`
   - 取得元・仕様・履歴確認用の補助文書
 - `VERSION`, `patches/`
-  - 固定 upstream commit と、日本語向け局所変更の再現情報
+  - 固定 upstream commit と、日本語向け局所変更・引用の省略継続を制御する局所変更の再現情報
 
 ### ビルド/実行
 

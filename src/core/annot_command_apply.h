@@ -20,6 +20,7 @@ inline bool AnnotationEquals(const Annotation& a, const Annotation& b) {
     if (a.pageIndex != b.pageIndex) return false;
     if (a.x1 != b.x1 || a.y1 != b.y1 || a.x2 != b.x2 || a.y2 != b.y2) return false;
     if (a.width != b.width || a.alpha != b.alpha || a.fontPt != b.fontPt) return false;
+    if (a.writingMode != b.writingMode) return false;
     if (a.color != b.color) return false;
     if (a.text != b.text || a.fontName != b.fontName) return false;
     if (a.linkId != b.linkId || a.linkNotePath != b.linkNotePath) return false;

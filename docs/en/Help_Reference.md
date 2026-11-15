@@ -25,6 +25,8 @@ The Full edition can convert Office files to PDF locally with bundled features. 
 
 `readonly_viewer.exe` is a small viewer for multiple PDFs, notes, and bundled documents, without a browser engine. It displays saved annotations from a same-named `.clrop` file in the PDF's folder. See [Read-only Viewer](Read_Only_Viewer.md) for an introduction and usage. Use `pdf_note_workspace.exe` to edit.
 
+In the main app, choose **Tools > Read-Only Viewer > Open File...** to select a document to view.
+
 Use the file list and outline on the left, tabs at the top, and the document pane on the right to compare documents. Press `Ctrl+F` to search, `Ctrl+B` for focus mode, and `Ctrl+1` / `2` / `3` / `4` for Reading, Raw, Hex, and Diagram views. Drag tabs to reorder, move to another window, or detach. Supported Markdown tables and Mermaid diagrams render locally; unsupported diagrams retain their source text. The **Licenses** menu opens the bundled guide and lets you browse the original notices.
 
 ## Files and locations
@@ -51,7 +53,11 @@ Use `.clro` or `.md` for formatted notes, `.txt` or `.csv` for plain text. CSV h
 
 ### Rename, move, organize, or inspect files
 
-Right-click an item in the lecture, session, PDF or note list and choose **Copy name** to copy its actual folder or file name. File names include the extension; display decorations such as **External:** are omitted.
+Right-click an item in the lecture, session, PDF or note list to show it directly in File Explorer. **Location and paths** lets you inspect the working path and copy the path or name. Copied file names include the extension and omit display labels such as **External:**. To manage a temporary file entry in the PDF or note list, open **Temporary Paths** from its context menu.
+
+When items in a list share a name, the app omits the folders they share at the start of their paths and shows the remaining parent path after the name. For example, `Materials\Spring\Math` and `Materials\Fall\Math` appear as `Math [Spring]` and `Math [Fall]`. `[.]` marks an item directly inside the shared folder.
+
+The session list also shows nested folders using paths relative to the lecture, such as `Spring\Session 1`. The PDF and note lists show files directly in the selected folder and its `pdf` and `note` folders. Choose **Direct files** for materials stored at the lecture level. To browse the tree, right-click a lecture or session and choose **Show directory hierarchy**.
 
 **Reload list** rescans the directory shown in that list to reflect items added or removed outside the app. It is also available from the list's blank area. In the PDF and note lists, it refreshes both file lists for the current session. Open PDFs, notes and unsaved edits are retained.
 
@@ -69,6 +75,8 @@ Use **Edit > Move file** for the selected PDF or note and choose a destination. 
 
 Choose **File > Temporary Paths > Add external folder** to register a folder without copying it into the workspace. Registration follows an access check and remains available after restart. Its sessions can be used for editing, saving, renaming, moving and organizing; these operations affect the actual external files. “Temporary” does not mean the Windows temporary directory. Remove the entry through the Temporary Paths menu to remove the registration, leaving its folder and documents intact. Failed registrations can be retried through [Retry unsaved settings](Save_and_Recovery.md#retry-unsaved-settings).
 
+Renaming or moving an open note updates the file selection and the editor's save destination. If the app cannot reload the resulting file, it keeps the previous text in the editor and reports both the completed file change and the reload failure.
+
 Do not edit `.clrop` in a text editor. Keep it beside its same-named PDF when copying or sharing. See [File Formats](File_Formats.md) for format choices and [annotation data](CLROP_Annotation_Format.md) for safe handling.
 
 
@@ -82,7 +90,7 @@ Conversion uses bundled LibreOffice locally, without Microsoft Office or an onli
 
 ### Convert an image
 
-Import a PNG/JPG/JPEG, select it in the PDF list and use its context menu's image-to-PDF command, or the corresponding **Tools** command. It creates a one-page PDF based on the image dimensions and resolution. Dropping alone does not convert, and the original image is unchanged.
+Choose **Tools > Convert Image to PDF...**, then select a PNG, JPG, or JPEG and a destination. If an image is open, the file picker starts with that image selected. For an imported image, you can also use the PDF list's image-to-PDF context menu. The command creates a one-page PDF based on the image dimensions and resolution. Dropping an image imports it. The original image stays intact.
 
 ### Create a blank PDF
 
@@ -101,7 +109,11 @@ Under **View > Scroll**, choose top-to-bottom, bottom-to-top, right-to-left or l
 
 ### PDF page rotation
 
-Use **View → Rotate** to turn either the current page or all pages clockwise or counterclockwise by 90 degrees, or restore their original orientations. Use the all-pages commands for a PDF distributed sideways. They add the same turn to each page, preserving differences from individual page adjustments. Page rotations are saved in the PDF's last-view record. On reopening, rotation is restored before zoom and position; fit-width and fit-page use the rotated dimensions too. The source PDF orientation is unchanged. New text, math and shapes are upright on the current screen, then remain attached to the paper as it rotates. Their positions and content orientations are saved in `.clrop`.
+Use **View → Rotate** to temporarily turn the current page, the current page through the last page, or all pages clockwise or counterclockwise by 90 degrees. Clearing temporary rotation returns the affected pages to their saved orientations. Closing the PDF or exiting the app discards temporary rotation.
+
+**Edit → Rotate** offers the same page ranges. It turns pages by 90 degrees from their displayed orientations and saves the result in the PDF's last-view record. For example, rotating right once in View and again in Edit saves a 180-degree rotation. The reset commands in Edit save the PDF's original orientation. The batch commands add the same turn to each page in the selected range. On reopening, the app restores saved rotations before applying zoom and position. Fit-width and fit-page use the rotated dimensions.
+
+New text, math and shapes are upright on the current screen and stay attached to the paper as it rotates. Their positions and content orientations are saved in `.clrop`.
 
 Rotations use four clockwise quarter-turn states, stored in the workspace's `__pdf_note_workspace__/__tmp__/pdf_view_positions.txt`. Older records without rotations use zero additional rotation. Rotation data with a different page count is not applied. Read or write failures preserve the existing record and failed saves are reported.
 
@@ -111,7 +123,7 @@ The PDF export dialog's **Keep page rotation** checkbox starts ON. It captures e
 
 Touchpad scrolling preserves fine input deltas. **Touchpad scroll stabilization** in Basic settings defaults to ON. In PDF and rendered note views it reduces small reversals during continuous scrolling. Sustained movement in the opposite direction takes effect. Turn it OFF to bypass this suppression. High-resolution wheels that send fine input deltas may also receive stabilization. The note's raw text editor uses standard Windows scrolling.
 
-The annotation, lecture, session, PDF and note lists, and the application's file picker, accumulate fine scroll input separately for each list and move by whole rows, following the Windows wheel setting. Ordinary annotation-list updates retain your browsing position; an action that reveals a newly added annotation brings that item into view.
+The annotation, lecture, session, PDF and note lists, and the application's file picker, accumulate fine scroll input separately for each list and move to the nearest row. Movement starts after about half a row of input and follows the Windows wheel setting. Ordinary annotation-list updates retain your browsing position; an action that reveals a newly added annotation brings that item into view.
 
 For PDF scrolling, arrow keys move by a fixed amount. With the PDF focused, hold `W` for up, `A` for left, `S` for down, or `D` for right to scroll smoothly. Hold two keys to move diagonally; releasing the keys stops movement. These PDF controls work with Vim controls on or off. While editing PDF text, the keys enter text.
 
@@ -125,9 +137,11 @@ Annotations are stored in the PDF's same-named `.clrop`, leaving the PDF origina
 
 **Select** drags a text selection in PDF text; Ctrl+C copies it. This creates no annotation. A scanned page needs a free marker for its image-only lettering. Use the annotation list when selecting a saved annotation.
 
-**Pan** drags the displayed page without moving its annotations. **Ctrl+drag on an annotation** moves that annotation instead. **Magnifier** enlarges the area you click, with circle, square or horizontal shape, size and zoom settings. It is a viewing aid and is not included in saved annotations or output.
+**Pan** drags the displayed page without moving its annotations. **Ctrl+drag on an annotation** moves that annotation instead. **Magnifier** enlarges the area you click, with circle, square or horizontal shape, size and zoom settings. PDF content is rendered again from the source at the lens zoom so text and lines show finer detail. Detail in scanned images depends on the source resolution. It is a viewing aid and is not included in saved annotations or output.
 
 ### Text boxes
+
+Use **Vertical** in the annotation toolbar to write downward, with columns progressing from right to left. It also applies to a selected or edited box, preserving the editing position and supporting Undo/Redo. An explicit toggle saves the default for new boxes. Selecting a box temporarily shows its direction while retaining that creation default. The annotation list's **Edit** dialog also offers writing direction. Reediting and saving retain the direction. Latin letters and digits remain upright in individual cells. This basic layout does not implement horizontal groups within vertical text, ruby or Japanese line-breaking rules. PDF output preserves the appearance as an image annotation, without character-level editing in other PDF applications.
 
 Choose Text and click on the page, then type. Enter adds a line. Ctrl+Enter or clicking outside the box confirms editing. Esc also confirms and ends editing; use Undo to reverse a change. Finish IME composition before commands. Click an existing box with Text to reedit it. Near its top and bottom edges, an excluded strip prevents reediting; an insertion caret indicates an eligible position. The top strip is 10% of box height, capped at 31% of a line in its font. The bottom uses the same limit, with the editable area extended downward by up to one screen pixel within the box.
 
@@ -240,13 +254,21 @@ Choose **Link** (PDF link) in the input palette to start, click a position in th
 
 ### Search
 
-Open Search from its menu or Ctrl+F. Enter a query, choose one range (current lecture, current session or whole workspace) and one or more targets (Notes, PDF, Annotations), then choose Search. Include registered external lectures when needed.
+Open Search from its menu or Ctrl+F. Enter a query, choose one range (current lecture, current session, whole workspace or added folders only) and one or more targets (Notes, PDF, Annotations), then choose Search. Whole workspace includes unopened lectures. Include registered external lectures when needed.
+
+Choose **Edit search folders and groups**, then **Add folder** to select a local folder or a folder on an external drive. Selected rows include all descendants, regardless of depth; click a row to toggle its inclusion. Added folders can accompany the selected lecture/session/workspace range. **Added folders only** searches just the selected added folders; adding the first folder selects this range. This grants no write access and does not register Temporary Paths. Network locations and traversal through filesystem links are excluded.
+
+Choose **Save with a name** to keep a search group. Groups retain folders and their selection, the base range, target types and normalization/case options. They do not contain the query or results. Use **Load group** to restore one and **Delete group** to remove it. Close this small window using **Close**, its title-bar ×, or Esc. Draft changes affect a saved group only when explicitly saved. Closing the small window retains unsaved candidates until the search window closes; saved groups survive application restarts.
 
 Space-separated terms use AND; `OR` or `|` uses OR; `"..."` requests a phrase. For example, `heart valve` looks for both words and `heart OR lung` for either. Options control normalization of full/half-width forms, kana and separators, and case-insensitive matching.
 
-Select a result and press Enter or double-click to open its document and location. Visited results are colored. The context menu can open a result in the read-only viewer. Delete lowers a result in the list; it does not delete the source file. Open memo opens the same memo used elsewhere.
+Select a result and press Enter or double-click to open its document and location. Results outside the workspace and registered Temporary Paths open in the read-only viewer: external notes open as files, while external PDFs open at the matched page. Visited results are colored. The context menu can open a result in the read-only viewer. Delete lowers a result in the list; it does not delete the source file. Open memo opens the same memo used elsewhere.
 
-Results are added in batches, and you can work in other windows while searching. Loading a complex document can still briefly delay a response to input.
+Search runs in the background with limited resource use and adds results in batches. You can work in the main window while the scope is checked. Large entry counts, candidate sizes, deep nesting or a long duration pause the search and display the observed scale. Choose **Continue search** to resume or **Stop (Ctrl+C)** to cancel. Status and Continue remain visible when options are folded. After stopping, revise the scope and search again.
+
+Scale figures describe the portion checked so far; they do not guarantee the final count or remaining time. Each search uses the conditions captured at its start. Unreadable items are counted and the window states that results cover the searchable portion. Press Enter or double-click an **Unsearched item** row to inspect its details. Files requiring an online download are not read. Reaching the result display memory limit stops the search, retains displayed results and asks you to narrow the scope or query. Splitting a large collection into several groups can make searches easier to manage.
+
+Groups are stored in `__pdf_note_workspace__/__settings__/search_groups.bin` inside the workspace. Previous saved contents are protected in `__pdf_note_workspace__/__escape__/search_groups_*.bin`. Storage failures and conflicting changes preserve existing groups and show an error. Search creates no index or management files in external source folders.
 
 Choose **Hide options** to fold the search conditions and guidance away and enlarge the results area. Conditions stay selected; **Show options** restores them. The folded window can be made shorter. **Keep above main window** keeps search in front of this app's main window while leaving keyboard focus where you are working. These presentation choices last until the search window closes.
 
@@ -287,9 +309,9 @@ Hover over the destination folder field to see the complete path, or select the 
 
 Use **Move up** and **Move down** to change the queue order. Both separate output and merging run from top to bottom. **Merge queued PDFs** is available only with at least two reservations, all of them PDF outputs. Choose one destination; the merged PDF preserves each reservation's page order, crop, scale, and annotation options. Individual reservation destinations are not written, and the results dialog lists only the merged file. Success clears the completed queue while keeping the dialog open. Destination or overwrite cancellation and output failure retain the queue. PNG or note reservations prevent merging.
 
-After output, **Open with OS** in the results dialog reveals the selected output in Explorer. PDFs can open in the read-only viewer; other formats open with their associated application.
+After output, **Show in Explorer** in the results dialog reveals the selected output. PDF and Markdown files open in the read-only viewer, and other formats open with their default app.
 
-**Browse** opens the app's file picker, where you can navigate to a destination folder and enter a file name together. Selecting a listed file copies its name into the input. Choosing a destination does not export or overwrite anything. Quick PDF, Quick Note and other output-path prompts use the same picker. **OS Standard Dialog** switches to the Windows save dialog and retains the folder and entered name. When **Use Windows standard file/folder selection** is enabled in General settings, output destination selection opens the Windows save dialog directly. Canceling leaves the destination unchanged. The folder hierarchy display remains a separate browsing and operation feature.
+**Browse** opens the app's file picker, where you can navigate to a destination folder and enter a file name together. Selecting a listed file copies its name into the input. Choosing a destination does not export or overwrite anything. Quick PDF, Quick Note and other output-path prompts use the same picker. **Windows Dialog** switches to the Windows save dialog and retains the folder and entered name. When **Use Windows standard file/folder selection** is enabled in General settings, output destination selection opens the Windows save dialog directly. Canceling leaves the destination unchanged. The folder hierarchy display remains a separate browsing and operation feature.
 
 The app's file and folder picker shows folders whose names include terms such as **course** or **lecture** in an upper **Suggestions** pane. When choosing a workspace, the current workspace is also suggested if it appears in the listing. Below a divider, **All entries (name order)** lists every folder followed by every file, including the suggestions. Either pane leads to the same location; selecting the same location in both panes for a multiple selection returns it once. Temporary path registration, opening files and choosing output destinations share this display. Locations without suggestions and the drive list use only the normal listing.
 
@@ -309,11 +331,15 @@ PNG accepts one page number. Choose Standard (144 DPI), High detail (288 DPI), S
 
 ### Note export choices
 
-TXT is useful for literal text; markup removal is initially OFF. Choose whether to retain comments and how math is represented. Quick Note always uses TXT with its saved defaults. Markdown retains markup; CLRO-to-Markdown normalization of full-width syntax is initially ON. This converts recognized syntax names and symbols, retaining body text, code, math, link targets and attribute values. The option does not apply to TXT or HTML. HTML provides a separate formatted result. Review comments before sharing, and inspect the actual target format rather than assuming all other tools render it identically.
+TXT is useful for literal text; markup removal is initially OFF. Choose whether to retain comments and how math is represented. Quick Note always uses TXT with its saved defaults. Markdown retains markup; CLRO-to-Markdown normalization of full-width syntax is initially ON. This converts recognized syntax names and symbols, retaining body text, code, math, link targets and attribute values. The option does not apply to TXT or HTML. Math handling, full-width syntax conversion, and heading shifting appear muted when the current note has nothing for the respective option to process. You can still change those options and use the available controls to save defaults. HTML provides a separate formatted result. Review comments before sharing, and inspect the actual target format rather than assuming all other tools render it identically.
 
 ### PDF annotation output
 
 The main application's combined PDF export puts the PDF and its separate-file annotations into one new PDF. Writing is saved as standard PDF annotations, so it remains accessible as annotations after export.
+
+**Embed annotation recovery data** is on by default when exporting an annotated PDF. With it off, newly added annotations are still visible in the PDF. Detachment can convert supported annotations from their standard PDF fields. Annotations and data already present in the source PDF are carried over. Each queued export keeps its own choice, and Quick PDF Export uses its own setting.
+
+Use **Tools > Detach PDF Annotations to a Copy** and choose the source PDF and a destination folder. The app creates a new folder there with the detached PDF and a matching `.clrop` file. The source PDF stays intact. Embedded editing data restores the original annotation. For annotations without that data, the app converts supported highlights, underlines, strikeouts, squiggles, lines, polylines, ink, rectangles, ellipses and free text. Line styles, fonts and other visual details may differ. Stamps made only of supported straight strokes can be converted into pen strokes. Stamps with fills, text or images, and annotations with comments stay in the PDF copy. Annotations beneath a retained annotation on the same page also stay in the PDF to preserve stacking order. The result reports how many annotations were kept because conversion is unsupported and how many were kept to preserve stacking order. A copy is created only when at least one annotation can be detached.
 
 Flattening makes the writing part of the page content rather than separate annotations. The main application does not flatten its exported writing. Compatible PDF applications can list, move or remove these annotations. Editing their text and geometry depends on the application and annotation type.
 
@@ -353,9 +379,9 @@ Turning off **Resume previous work at startup** opens only the workspace next ti
 
 ### Center guide before opening a document
 
-While no PDF or note is open, the PDF pane shows numbered usage steps and common actions and shortcuts in the center. Opening a PDF or note hides the guide.
+At startup, the PDF pane shows numbered usage steps and common actions and shortcuts until you select a lecture or session or open a PDF or note. Once work begins, the guide stays hidden for the rest of that application run, including session switches and closing all documents. Restoring previous work at startup also hides the guide.
 
-In **Environment → Window and Shared Controls**, choose **Usage and shortcuts**, **Shortcuts only**, or **Hidden**. Both sections appear by default. Use the wheel, scrollbar, or Page Up / Page Down to read a long guide.
+In **Environment → Window and Shared Controls**, choose **Usage and shortcuts**, **Shortcuts only**, or **Hidden** for the startup guide. Both sections appear by default. Use the wheel, scrollbar, or Page Up / Page Down to read a long guide. After work begins, open the shortcut reference under **Annotation → Controls and shortcuts** to review the list.
 
 The text at the bottom explains that you can choose **Shortcuts only** or **Hidden** and shows where to find the setting. This explanation stays at the bottom while you scroll the guide.
 
@@ -363,7 +389,7 @@ Individual annotation keys come from the current bindings. Saving a change under
 
 ### Appearance, note input and markup choices
 
-Under **Note > Text and display**, choose a font and size and inspect the preview. Font customization can assign separate faces for Latin/symbols, Japanese and digits. A note's explicit `<font=...>` ranges remain separate from this display default. Background and grid spacing change the editing surface rather than inserting colored or ruled content. Use formatting tags to color a particular passage.
+Under **Note > Text and display**, choose a font and size and inspect the preview. Font customization can assign separate faces for Latin/symbols, Japanese and digits. A note's explicit `<font=...>` ranges remain separate from this display default. Background, default text color and grid spacing change the editing surface rather than inserting colored or ruled content. Default text color can also be changed from the Note Assist pane and is saved in settings. Explicit text colors in the note take priority. Use formatting tags to color a particular passage.
 
 **Note bottom space** offers fixed pixels, a font-size ratio or a pane-height ratio. The default is 32px at 100%; zero removes it. It leaves space below the caret without adding blank lines to the saved note. See [Note writing guide](Note_Writing_Guide.md#space-below-the-last-line) for rendered/source differences.
 
@@ -427,8 +453,8 @@ Ctrl+Alt+arrows cycle tool categories and subtypes; Ctrl+Up/Down cycles palette 
 | `Ctrl+Shift+Q` | Close the focused PDF or note; prefer the PDF when neither area has focus |
 | `Ctrl+Alt+Shift+Q` | Close both PDF and note |
 | `Ctrl+Shift+A` | Show/hide annotations |
-| `Ctrl+Shift+Left` / `Ctrl+Shift+Right` | Rotate the current page left/right 90 degrees |
-| `Ctrl+Shift+0` | Reset the current page's view rotation |
+| `Ctrl+Shift+Left` / `Ctrl+Shift+Right` | Temporarily rotate the current page left/right 90 degrees |
+| `Ctrl+Shift+0` | Clear the current page's temporary rotation |
 | `Ctrl+Alt+M` | Open memo |
 | `Ctrl+Alt+E` | Open the output dialog |
 | `Ctrl+Alt+P` | Quick PDF output |
@@ -484,7 +510,7 @@ Operation and write checks report unreadable records separately from unsaved res
 
 Normal startup-setting reads, workspace listings and PDF opens also update results automatically. First results and changes are recorded immediately. Repeated identical reads update the display while record writes are grouped at ten-second intervals. Pending saves are shown and also saved with the next record write, workspace switch or exit. Page rendering does not repeatedly record results or start extra checks, and normal reads do not count toward the manual check limit.
 
-Open **Help > Checks > Asset presence check** for a separate window with the same description, report list and action-button arrangement as the operation and write checks. Rows show item, presence, type and target name. Use **Details** or double-click a row to inspect its location; **Copy path** copies the complete path. Outside cooldown, presence is checked when a new window opens and when you choose **Refresh presence**, without changing settings or documents. Bringing an already open window to the front does not recheck presence, and there is no automatic monitoring. File content viewing remains available; **Open with OS** shows a selected folder in Explorer. Save or load presets through **Settings > Presets**.
+Open **Help > Checks > Asset presence check** for a separate window with the same description, report list and action-button arrangement as the operation and write checks. Rows show item, presence, type and target name. Use **Details** or double-click a row to inspect its location; **Copy path** copies the complete path. Outside cooldown, presence is checked when a new window opens and when you choose **Refresh presence**, without changing settings or documents. Bringing an already open window to the front does not recheck presence, and there is no automatic monitoring. File content viewing remains available; **Open in Explorer** opens the selected folder. Save or load presets through **Settings > Presets**.
 
 Use **Check sizes** to inspect the management directory and its logs, temporary work, recovery data and backups in the background. Sizes, observed file counts and size changes are separate from presence checks. Original documents outside the management directory are excluded; no files are created, changed or deleted. Parent rows include child rows. Cancellation and inspection errors show partial results. See [Inspect log and generated-file sizes](Troubleshooting.md#inspect-log-and-generated-file-sizes) for scope and limits.
 

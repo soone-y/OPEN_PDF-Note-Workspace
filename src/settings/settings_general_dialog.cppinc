@@ -505,6 +505,8 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             beginSection(1, localization::Text(L"settings.general.4c8d20a2540f").c_str());
             addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.b87fc8e786dc").c_str(), defaultRenderModeLabel));
             ctx->cbNoteRenderMode = addCombo(IDC_NOTE_RENDER_MODE, false, controlW);
+            ctx->chkNoteQuoteLazyContinuation = addCheck(IDC_NOTE_QUOTE_LAZY_CONTINUATION,
+                localization::Text(L"settings.note.quote_lazy_continuation").c_str(), checkW);
             ctx->chkClroAsciiOnly = addCheck(IDC_CLRO_ASCII_ONLY,
                 localization::Text(L"settings.general.clro_ascii_only").c_str(), checkW);
 
@@ -540,6 +542,11 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             ctx->btnNoteBgCustom = addButton(IDC_NOTE_BG_CUSTOM,
                                              localization::Text(L"settings.general.b2fd77c3e2b0").c_str(),
                                              wideW, rowH);
+
+            addLabel(SettingLabelWithDefault(localization::Text(L"settings.note.text_color").c_str(),
+                                             GenHexColorW(defaults.noteFgColor)));
+            ctx->btnNoteFgCustom = addButton(IDC_NOTE_FG_CUSTOM,
+                localization::Text(L"settings.note.text_color").c_str(), wideW, rowH);
 
             const auto gridGroup = beginSubgroup(L"settings.subgroup.note_grid");
             addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.6eadaeb59789").c_str(), defaultGridLabel));
@@ -781,6 +788,7 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             ctx->chkQuickPdfStandardText = addCheck(IDC_QUICK_PDF_STANDARD_TEXT, localization::Text(L"export.standard_text_annotation").c_str(), contentW);
             ctx->chkQuickPdfMatchLayout = addCheck(IDC_QUICK_PDF_MATCH_LAYOUT, localization::Text(L"export.match_pdf_text_layout").c_str(), contentW);
             ctx->chkQuickPdfKeepRotation = addCheck(IDC_QUICK_PDF_KEEP_ROTATION, localization::Text(L"export.rotation.preserve").c_str(), contentW);
+            ctx->chkQuickPdfEmbedEditableData = addCheck(IDC_QUICK_PDF_EMBED_EDITABLE_DATA, localization::Text(L"export.embed_editable_annotation_data").c_str(), contentW);
             const auto colorGroup = beginSubgroup(L"export.text_color_label");
             ctx->cbQuickPdfColorMode = addCombo(IDC_QUICK_PDF_COLOR_MODE, false, controlW);
             addLabel(localization::Text(L"settings.navigation.quick_background"), ScaleY(hWnd, 12));
@@ -865,6 +873,7 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             {ctx->chkQuickPdfStandardText, g_config.quickPdfStandardTextAnnots},
             {ctx->chkQuickPdfMatchLayout, g_config.quickPdfMatchPdfPaneTextLayout},
             {ctx->chkQuickPdfKeepRotation, g_config.quickPdfKeepPageRotation},
+            {ctx->chkQuickPdfEmbedEditableData, g_config.quickPdfEmbedEditableData},
             {ctx->chkQuickNoteStripMarkup, g_config.quickNoteStripMarkup},
             {ctx->chkQuickNoteComments, g_config.quickNoteIncludeComments},
             {ctx->chkQuickNoteMathPlaceholder, g_config.quickNoteMathPlaceholder}
@@ -1174,6 +1183,10 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             SendMessageW(ctx->chkNoteWrapEnabled, BM_SETCHECK,
                          g_noteWrapEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
         }
+        if (ctx->chkNoteQuoteLazyContinuation) {
+            SendMessageW(ctx->chkNoteQuoteLazyContinuation, BM_SETCHECK,
+                         g_config.noteQuoteLazyContinuation ? BST_CHECKED : BST_UNCHECKED, 0);
+        }
         if (ctx->chkClroAsciiOnly) {
             SendMessageW(ctx->chkClroAsciiOnly, BM_SETCHECK,
                          g_config.clroAsciiOnly ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -1250,6 +1263,8 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
                        std::clamp(g_config.noteOverlayRefreshDelayMs, 100, 2000));
         fillDelayCombo(ctx->cbNoteFullReparseDelay, {250, 500, 700, 900, 1200, 1500, 2000},
                        std::clamp(g_config.noteFullReparseDelayMs, 250, 5000));
+        ctx->noteFgCustomColor = g_config.noteFgColor;
+        UpdateNoteTextColorButtonLabel(ctx);
         ctx->noteBgCustomColor = g_config.noteBgColor;
         if (ctx->cbNoteBgMode) {
             FillNoteBackgroundCombo(ctx);
@@ -1365,6 +1380,7 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
         const auto face = g_noteFontName.empty() ? GetDefaultFontFaceName() : g_noteFontName;
         UpdateNotePreviewFont(ctx, face, g_noteFontPt);
         ApplyThemeToDialog(hWnd);
+        PrepareSettingsScroll(hWnd, ctx->scrollPanel);
         return 0;
     }
     case WM_SHOWWINDOW:
@@ -1529,6 +1545,7 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
                 return 0;
             }
             ctx->nextDialog = category;
+            RestoreOwnerAfterModal(ctx->owner);
             DestroyWindow(hWnd);
             return 0;
         }
@@ -1624,6 +1641,14 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             UpdateGeneralNoteControlStates(ctx);
             return 0;
         }
+        if (id == IDC_NOTE_FG_CUSTOM) {
+            COLORREF picked = ctx->noteFgCustomColor;
+            if (PickColorDialog(hWnd, picked, &picked)) {
+                ctx->noteFgCustomColor = picked;
+                UpdateNoteTextColorButtonLabel(ctx);
+            }
+            return 0;
+        }
         if (id == IDC_NOTE_BG_CUSTOM) {
             COLORREF picked = ctx->noteBgCustomColor;
             if (PickColorDialog(hWnd, picked, &picked)) {
@@ -1694,6 +1719,7 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
         if (id == IDCANCEL || id == 0) {
             if (!ctx->embedded) {
                 ctx->notifyCancelDiscard = true;
+                RestoreOwnerAfterModal(ctx->owner);
                 DestroyWindow(hWnd);
             }
             return 0;
@@ -1702,6 +1728,7 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
     }
     case WM_CLOSE:
         if (ctx && ctx->embedded) return 0;
+        if (ctx && !ctx->embedded) RestoreOwnerAfterModal(ctx->owner);
         DestroyWindow(hWnd);
         return 0;
     case WM_DESTROY:

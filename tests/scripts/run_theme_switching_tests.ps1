@@ -63,6 +63,8 @@ Require-Text $buttonTheme "message == WM_GETDLGCODE" "themed buttons must retain
 Require-Text $buttonTheme "message == BM_SETSTYLE" "dialog focus changes must retain themed drawing"
 Require-Text $buttonTheme "ReleaseParent(state->parent);" "button restoration/destruction must release parent routing"
 Forbid-Text $buttonTheme "GetWindowSubclass(" "the shared component must not add the unavailable legacy comctl32 entry point"
+$settingsPrepaint = Get-SourceText "src/settings/settings_scroll_prepaint.h"
+Forbid-Text $settingsPrepaint "GetWindowSubclass(" "settings prepaint must use APIs supported by the application manifest"
 Require-Text $core "ui::themed_push_buttons::Apply(root, g_config.ownerDrawUi, DrawThemeButton)" "application theme state and renderer must reach the shared component"
 $dialogTheme = $core.Substring($core.IndexOf("void ApplyThemeToDialog(HWND hWnd)"))
 $dialogTheme = $dialogTheme.Substring(0, $dialogTheme.IndexOf("namespace {"))

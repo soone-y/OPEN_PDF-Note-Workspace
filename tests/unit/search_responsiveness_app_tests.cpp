@@ -2,13 +2,90 @@
 // native result list without starting or changing the user's application.
 #include "search/search.cpp"
 #include "fpdf_edit.h"
+#include "fpdf_save.h"
+#include <winioctl.h>
 #include <cassert>
 #include <iostream>
+#include <fstream>
 
 static int checks = 0;
-static void Require(bool value) { assert(value); ++checks; }
+static void RequireAt(bool value, const char* expression, int line) {
+    if (!value) std::cerr << "Search check failed at line " << line << ": " << expression << "\n";
+    assert(value); ++checks;
+}
+#define Require(value) RequireAt((value), #value, __LINE__)
+static void MakeTestDirectory(const std::filesystem::path& path) {
+    std::error_code error;
+    std::filesystem::create_directories(path, error);
+    Require(!error);
+}
+static std::filesystem::path fixtureRoot;
+struct TestPdfWriter : FPDF_FILEWRITE {
+    std::ofstream output;
+    explicit TestPdfWriter(const std::filesystem::path& path) : output(path, std::ios::binary) {
+        version = 1;
+        WriteBlock = [](FPDF_FILEWRITE* self, const void* data, unsigned long size) {
+            auto& out = static_cast<TestPdfWriter*>(self)->output;
+            out.write(static_cast<const char*>(data), size); return out.good() ? 1 : 0;
+        };
+    }
+};
+
+static search::Writer SearchRequest(const std::filesystem::path& workspace,
+                                   const std::vector<std::filesystem::path>& folders,
+                                   int range = 3, const std::wstring& current = L"",
+                                   const std::wstring& currentText = L"") {
+    search::Writer request;
+    request.Put<uint32_t>(1); request.Text(workspace.wstring()); request.Text(L"."); request.Text(L"__pdf_note_workspace__");
+    request.Put<int32_t>(range); request.Text(L""); request.Put<uint8_t>(0); request.Put<uint32_t>(0);
+    request.Put<uint32_t>(static_cast<uint32_t>(folders.size()));
+    for (const auto& path : folders) { request.Text(path.wstring()); request.Put<uint8_t>(1); }
+    request.Put<uint32_t>(7); request.Text(L"needle"); request.Put<uint8_t>(1); request.Put<uint8_t>(1);
+    request.Put<uint8_t>(0); request.Put<uint8_t>(0); request.Put<uint32_t>(0);
+    request.Text(current); request.Text(currentText);
+    return request;
+}
+struct ProcessObservation {
+    std::vector<SearchResultItem> results;
+    size_t warnings = 0, messages = 0;
+    bool done = false;
+    SearchCtx progress;
+};
+static void Observe(search::Process& process, ProcessObservation& observation, bool continueWarnings = true) {
+    const auto deadline = SearchClock::now() + std::chrono::seconds(20);
+    while (!observation.done && SearchClock::now() < deadline) {
+        std::string message;
+        const auto state = process.Poll(message);
+        if (state == search::Process::PollResult::Pending) { Sleep(1); continue; }
+        Require(state == search::Process::PollResult::Message);
+        ++observation.messages;
+        search::Reader reader(message);
+        const auto type = reader.Get<uint8_t>();
+        if (type == 'R') observation.results.push_back(ReadSearchItem(reader));
+        else {
+            Require(type == 'P' || type == 'W' || type == 'D');
+            ReadSearchProgress(reader, observation.progress);
+            if (type == 'W') {
+                ++observation.warnings;
+                if (!continueWarnings) return;
+                Require(process.Continue());
+            }
+            if (type == 'D') observation.done = true;
+        }
+        reader.End();
+    }
+    Require(observation.done);
+}
 
 int wmain() {
+    int workerCode = 0;
+    if (search::TryRunProcess(&workerCode)) return workerCode;
+    std::cout << std::unitbuf;
+    std::error_code fixtureError;
+    fixtureRoot = std::filesystem::current_path(fixtureError) / L"scope_fixture";
+    Require(!fixtureError);
+    MakeTestDirectory(fixtureRoot / L"external" / L"nested");
+    MakeTestDirectory(fixtureRoot / L"workspace" / L"unopened" / L"session");
     FPDF_InitLibrary();
     const HWND window = CreateWindowW(L"STATIC", L"owned search test", 0,
         0, 0, 500, 300, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
@@ -72,6 +149,10 @@ int wmain() {
         FPDFPage_InsertObject(page, text);
         Require(FPDFPage_GenerateContent(page) != FALSE);
         FPDF_ClosePage(page);
+        {
+            TestPdfWriter writer(fixtureRoot / L"external" / L"document.pdf");
+            Require(FPDF_SaveAsCopy(doc, &writer, 0) != FALSE);
+        }
         PdfScanState scan;
         scan.doc = doc; scan.pageCount = 1; scan.ownsDoc = true;
         ctx.job.pdf = scan;
@@ -207,6 +288,180 @@ int wmain() {
         ProcessSearchTick(window, &ctx);
         Require(ctx.job.pendingResults.size() == before && ctx.job.pdfIndex == scanned);
         Require(!PeekMessageW(&message, window, WM_TIMER, WM_TIMER, PM_REMOVE));
+    }
+    {
+        const auto workspace = fixtureRoot / L"workspace";
+        const auto external = fixtureRoot / L"external";
+        const auto first = external / L"first.txt", nested = external / L"nested" / L"second.txt";
+        const auto unopened = workspace / L"unopened" / L"session" / L"note.txt";
+        std::ofstream(first, std::ios::binary) << "needle outside\n";
+        std::ofstream(nested, std::ios::binary) << "needle nested\n";
+        std::ofstream(unopened, std::ios::binary) << "needle unopened\n";
+        std::ofstream(external / L"broken.pdf") << "invalid PDF";
+        search::Process process;
+        auto request = SearchRequest(workspace, {external, external / L"nested"});
+        Require(process.Start(request.bytes));
+        const HANDLE child = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, process.processId());
+        Require(child != nullptr);
+        Require(GetPriorityClass(child) == IDLE_PRIORITY_CLASS);
+        ProcessObservation observation;
+        Observe(process, observation);
+        Require(observation.results.size() == 4 && observation.progress.job.skipped == 1);
+        size_t notes = 0, pdfs = 0, unreadable = 0;
+        for (const auto& item : observation.results) {
+            if (item.kind == SearchResultKind::Info) {
+                ++unreadable; Require(item.path == external / L"broken.pdf"); continue;
+            }
+            Require(item.externalReadOnly && item.processSnapshot);
+            if (item.kind == SearchResultKind::NoteLine) {
+                ++notes; Require(item.noteSnapshotIdentity.content_fingerprint != 0 && item.lineNumber == 1);
+            }
+            if (item.kind == SearchResultKind::PdfPage) { ++pdfs; Require(item.pageIndex == 0); }
+        }
+        Require(notes == 2 && pdfs == 1 && unreadable == 1);
+        process.Stop();
+        Require(WaitForSingleObject(child, 5000) == WAIT_OBJECT_0); CloseHandle(child);
+        std::string unchanged;
+        Require(ReadFileBytesWin32(first, unchanged) && unchanged == "needle outside\n");
+        size_t externalFiles = 0;
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(external))
+            if (entry.is_regular_file()) ++externalFiles;
+        Require(externalFiles == 4);
+
+        request = SearchRequest(workspace, {}, 2);
+        Require(process.Start(request.bytes));
+        ProcessObservation whole;
+        Observe(process, whole);
+        Require(whole.results.size() == 1 && whole.results[0].path == unopened && !whole.results[0].externalReadOnly);
+        process.Stop();
+
+        request = SearchRequest(workspace, {external / L"nested"}, 3, nested.wstring(), L"current needle captured\n");
+        Require(process.Start(request.bytes));
+        ProcessObservation current;
+        Observe(process, current);
+        Require(current.results.size() == 1 && current.results[0].preview.find(L"current") != std::wstring::npos);
+        Require(current.results[0].noteSnapshotIdentity.content_fingerprint == note::FingerprintSnapshotBytes("current needle captured\n"));
+        process.Stop();
+        std::cout << "Search process scope PASS: real child, low priority, unopened lecture, overlapping external roots, PDF, current edit, original unchanged.\n";
+
+        request = SearchRequest(workspace, {fixtureRoot / L"missing_enabled", L"\\\\invalid\\share"});
+        Require(process.Start(request.bytes));
+        ProcessObservation unavailable; Observe(process, unavailable);
+        Require(unavailable.results.size() == 2 && unavailable.progress.job.skipped == 2);
+        for (const auto& item : unavailable.results) Require(item.kind == SearchResultKind::Info);
+        process.Stop();
+
+        SearchCtx limited;
+        limited.results = list; limited.job.active = true;
+        limited.resultBytes = 64 * 1024 * 1024;
+        limited.process = std::make_unique<search::Process>();
+        request = SearchRequest(workspace, {external / L"nested"});
+        Require(limited.process->Start(request.bytes));
+        const auto limitDeadline = SearchClock::now() + std::chrono::seconds(10);
+        while (limited.job.active && SearchClock::now() < limitDeadline) {
+            ProcessRemoteSearchTick(window, limited); Sleep(1);
+        }
+        Require(!limited.job.active && limited.job.canceled && !limited.process);
+        Require(limited.idleStatusText == localization::Text(L"search.ui.result_limit"));
+        Require(limited.job.results.size() == 1 && limited.job.results[0].kind == SearchResultKind::Info);
+        SendMessageW(list, LB_RESETCONTENT, 0, 0);
+
+        auto deep = fixtureRoot / L"deep";
+        const auto deepRoot = deep;
+        for (int i = 0; i < 18; ++i) deep /= L"level";
+        MakeTestDirectory(deep);
+        std::ofstream(deep / L"deep.txt") << "needle deep\n";
+        request = SearchRequest(workspace, {deepRoot});
+        Require(process.Start(request.bytes));
+        ProcessObservation paused;
+        Observe(process, paused, false);
+        Require(paused.warnings == 1 && !paused.done && paused.results.empty() && paused.progress.job.maxDepth >= 16);
+        const HANDLE pausedChild = OpenProcess(SYNCHRONIZE, FALSE, process.processId());
+        Require(pausedChild != nullptr);
+        std::string message;
+        Require(process.Poll(message) == search::Process::PollResult::Pending);
+        Require(PostMessageW(window, WM_APP + 5, 0, 0) != FALSE);
+        MSG pending{}; Require(PeekMessageW(&pending, window, WM_APP + 5, WM_APP + 5, PM_REMOVE) != FALSE);
+        Require(process.Continue()); Observe(process, paused);
+        Require(paused.done && paused.results.size() == 1);
+        process.Stop(); Require(WaitForSingleObject(pausedChild, 5000) == WAIT_OBJECT_0); CloseHandle(pausedChild);
+        Require(process.Start(request.bytes));
+        ProcessObservation stopped; Observe(process, stopped, false);
+        const HANDLE stoppedChild = OpenProcess(SYNCHRONIZE, FALSE, process.processId());
+        Require(stoppedChild != nullptr);
+        const auto beforeStop = SearchClock::now(); process.Stop();
+        Require(SearchClock::now() - beforeStop < std::chrono::seconds(1));
+        Require(WaitForSingleObject(stoppedChild, 5000) == WAIT_OBJECT_0); CloseHandle(stoppedChild);
+        Require(process.Start("malformed"));
+        const auto failureDeadline = SearchClock::now() + std::chrono::seconds(5);
+        auto state = search::Process::PollResult::Pending;
+        while (state == search::Process::PollResult::Pending && SearchClock::now() < failureDeadline) {
+            state = process.Poll(message); Sleep(1);
+        }
+        Require(state == search::Process::PollResult::Failed);
+        process.Stop();
+        // Keep a real local file open behind an unacknowledged oplock break.
+        // The worker reaches an indivisible OS read, while its UI owner must
+        // still accept work and stop the child without waiting for that read.
+        const auto blockedRoot = fixtureRoot / L"blocked";
+        MakeTestDirectory(blockedRoot);
+        const auto blockedPath = blockedRoot / L"locked.txt";
+        std::ofstream(blockedPath, std::ios::binary) << "needle protected\n";
+        const HANDLE locked = CreateFileW(blockedPath.c_str(), GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED, nullptr);
+        Require(locked != INVALID_HANDLE_VALUE);
+        OVERLAPPED operation{};
+        operation.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        Require(operation.hEvent != nullptr);
+        DWORD returned = 0;
+        const BOOL requested = DeviceIoControl(locked, FSCTL_REQUEST_OPLOCK_LEVEL_1,
+            nullptr, 0, nullptr, 0, &returned, &operation);
+        Require(!requested && GetLastError() == ERROR_IO_PENDING);
+        request = SearchRequest(workspace, {blockedRoot});
+        Require(process.Start(request.bytes));
+        const HANDLE blockedChild = OpenProcess(SYNCHRONIZE, FALSE, process.processId());
+        Require(blockedChild != nullptr);
+        const auto blockedDeadline = SearchClock::now() + std::chrono::seconds(5);
+        while (WaitForSingleObject(operation.hEvent, 0) == WAIT_TIMEOUT && SearchClock::now() < blockedDeadline) {
+            const auto pendingState = process.Poll(message);
+            Require(pendingState == search::Process::PollResult::Pending || pendingState == search::Process::PollResult::Message);
+            Sleep(1);
+        }
+        Require(WaitForSingleObject(operation.hEvent, 0) == WAIT_OBJECT_0);
+        Require(WaitForSingleObject(blockedChild, 0) == WAIT_TIMEOUT);
+        Require(PostMessageW(window, WM_APP + 6, 0, 0) != FALSE);
+        Require(PeekMessageW(&pending, window, WM_APP + 6, WM_APP + 6, PM_REMOVE) != FALSE);
+        const auto blockedStop = SearchClock::now(); process.Stop();
+        Require(SearchClock::now() - blockedStop < std::chrono::seconds(1));
+        Require(WaitForSingleObject(blockedChild, 5000) == WAIT_OBJECT_0);
+        CloseHandle(blockedChild); CloseHandle(locked); CloseHandle(operation.hEvent);
+        Require(ReadFileBytesWin32(blockedPath, unchanged) && unchanged == "needle protected\n");
+        std::cout << "Search blocked-read cancellation PASS: real oplock break, UI work, nonblocking stop, child exit, source unchanged.\n";
+        std::cout << "Search process lifecycle PASS: deep scope pauses before content, explicit continue, UI work, cancel exits child, malformed request fails.\n";
+
+        search::Groups store;
+        Require(store.Load(workspace) && store.items().empty());
+        search::Group group;
+        group.name = L"external and missing";
+        group.folders = {{external.wstring(), true}, {(fixtureRoot / L"missing").wstring(), false}};
+        Require(store.Save({group}));
+        search::Groups reloaded;
+        Require(reloaded.Load(workspace) && reloaded.items().size() == 1);
+        Require(reloaded.items()[0].folders[1].path == group.folders[1].path && !reloaded.items()[0].folders[1].enabled);
+        auto updated = group; updated.name = L"updated";
+        Require(store.Save({updated}));
+        Require(!reloaded.Save({group}));
+        const auto path = workspace / L"__pdf_note_workspace__" / L"__settings__" / L"search_groups.bin";
+        std::string bytes; Require(ReadFileBytesWin32(path, bytes));
+        Require(search::DecodeGroups(bytes)[0].name == L"updated");
+        bool rejected = false;
+        try { (void)search::DecodeGroups(std::string_view(bytes).substr(0, bytes.size() - 1)); } catch (...) { rejected = true; }
+        Require(rejected);
+        std::ofstream(path, std::ios::binary) << "damaged";
+        search::Groups corrupt; Require(!corrupt.Load(workspace) && !corrupt.Save({group}));
+        Require(ReadFileBytesWin32(path, bytes) && bytes == "damaged");
+        std::cout << "Search groups PASS: explicit save/reload/update, missing folder retained, stale write rejected, corruption preserved.\n";
     }
     Require(DestroyWindow(window) != FALSE);
     FPDF_DestroyLibrary();

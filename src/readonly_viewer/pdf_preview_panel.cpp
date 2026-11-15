@@ -4,7 +4,11 @@
 #include "theme/built_in_theme.h"
 #include "clrop/json.h"
 #include "clrop/rotation.h"
+#include "clrop/pdf_identity.h"
+#include "core/file_sha256.h"
 #include "ui/quarter_turn_bitmap.h"
+#include "readonly_viewer/annotation_text.h"
+#include "ui/vertical_text_gdi.h"
 #include "ui/alpha_polygon.h"
 #include "core/atomic_write.h"
 #include "core/localization.h"
@@ -16,6 +20,7 @@
 #include "file_output/shape_outline_pdf.h"
 #include "resources/app_resource.h"
 #include "fpdfview.h"
+#include "pdf_view/magnifier_render.h"
 #include "fpdf_text.h"
 #include "fpdf_edit.h"
 #include "fpdf_ppo.h"
@@ -107,6 +112,8 @@ constexpr UINT kCmdThemeBase = 1200;
 
 struct LoadedPdf {
     std::wstring path;
+    document_source_protection::Source source;
+    clrop::PdfId identity;
     FPDF_DOCUMENT document = nullptr;
     int pageCount = 0;
 
@@ -141,6 +148,7 @@ struct RenderedPage {
     int height = 0;
     int stride = 0;
     std::vector<unsigned char> pixels;
+    RECT pixelRect{}; // Nonempty only for a cropped, display-only lens bitmap.
 
     void Clear() {
         pageIndex = -1;
@@ -208,6 +216,11 @@ struct ViewerState {
     std::wstring status = localization::Text(L"readonly.pdf.status.ready");
     std::unique_ptr<LoadedPdf> pdf;
     std::unique_ptr<LoadedClrop> clrop;
+    // Watch the candidate even after a mismatch, without retrying unchanged
+    // rejected files on every timer tick. Explicit CLROP paths remain explicit.
+    std::wstring clropCandidatePath;
+    std::wstring clropNotice;
+    bool pairPreview = false;
     RenderedPage rendered;
     std::vector<RenderedPage> renderedPages;
     int currentPage = 0;
@@ -260,7 +273,7 @@ struct ViewerState {
     int selectedItem = -1;
     bool selectingRect = false;
     bool hasRectSelection = false;
-    POINT selectionAnchor{};
+    page_rotation::Point selectionAnchorPt{};
     POINT selectionCurrent{};
     int selectionPage = -1;
     double selectionLeftPt = 0.0;
@@ -283,6 +296,7 @@ std::wstring CurrentExePath();
 std::optional<std::wstring> PromptNativeOpenPath(HWND owner);
 
 void ClearRenderCaches() {
+    readonly_viewer::ClearAnnotationTextCache();
     g_state.rendered.Clear();
     g_state.renderedPages.clear();
 }
@@ -1169,6 +1183,7 @@ void UpdateStatusFromPdf() {
                      L" / " +
                      std::to_wstring(g_state.pdf->pageCount) +
                      localization::Format(L"readonly.pdf.status_range", {{L"FIRST", std::to_wstring(FirstDisplayedPage() + 1)}, {L"LAST", std::to_wstring(LastDisplayedPage() + 1)}});
+    if (!g_state.clropNotice.empty()) g_state.status = g_state.clropNotice + L"  " + g_state.status;
 }
 
 struct PdfPasswordPromptState {
@@ -1584,6 +1599,12 @@ bool LoadPdfReadOnly(HWND owner, const std::wstring& path, std::unique_ptr<Loade
 
     auto pdf = std::make_unique<LoadedPdf>();
     pdf->path = path;
+    DWORD protectionError = 0;
+    const auto sourceKey = document_source_protection::Key(std::filesystem::path(path));
+    if (sourceKey.empty() || !pdf->source.Open(sourceKey, false, &protectionError)) {
+        status = localization::Text(L"readonly.pdf.source_protection_failed") + FileNameFromPath(path);
+        return false;
+    }
     const int utf8_size = WideCharToMultiByte(CP_UTF8, 0, path.c_str(), static_cast<int>(path.size()), nullptr, 0, nullptr, nullptr);
     if (utf8_size <= 0) {
         status = localization::Text(L"readonly.pdf.path.encode_failed_prefix") + FileNameFromPath(path);
@@ -1639,6 +1660,25 @@ bool LoadPdfReadOnly(HWND owner, const std::wstring& path, std::unique_ptr<Loade
         return false;
     }
 
+    // Read the identity from this already-open, write-protected document. Do
+    // not reopen encrypted PDFs without their password or use view rotation.
+    pdf->identity.path = path;
+    LARGE_INTEGER size{};
+    if (!GetFileSizeEx(pdf->source.handle, &size) || size.QuadPart <= 0) {
+        status = localization::Text(L"readonly.pdf.identity_failed");
+        return false;
+    }
+    pdf->identity.size = static_cast<std::uint64_t>(size.QuadPart);
+    pdf->identity.pageCount = pdf->pageCount;
+    for (int index = 0; index < pdf->pageCount; ++index) {
+        double width = 0.0, height = 0.0;
+        if (!FPDF_GetPageSizeByIndex(pdf->document, index, &width, &height)) {
+            status = localization::Text(L"readonly.pdf.identity_failed");
+            return false;
+        }
+        pdf->identity.pageSizesPt.push_back({width, height});
+    }
+
     status = FileNameFromPath(path) + L"  -  page 1 / " + std::to_wstring(pdf->pageCount);
     out = std::move(pdf);
     return true;
@@ -1682,18 +1722,37 @@ std::wstring ResolvePdfPathForClrop(const std::wstring& clropPath, const clrop::
     return {};
 }
 
+// A mismatch never publishes annotations or rewrites the sidecar. SHA-256 is
+// lazy and reused only for the lifetime of the protected PDF handle.
+[[nodiscard]] bool ClropMatchesLoadedPdf(const clrop::PdfId& expected, LoadedPdf& pdf) {
+    if (!clrop::PdfIdFastMatches(expected, pdf.identity)) return false;
+    if (expected.sha256.empty()) return true; // Legacy files: same fallback as editor read.
+    if (pdf.identity.sha256.empty()) {
+        if (!core_hash::FileSha256(std::filesystem::path(pdf.path), &pdf.identity.sha256)) return false;
+    }
+    return clrop::PdfIdStrongMatches(expected, pdf.identity);
+}
+
 void LoadAdjacentClropForPdf(HWND hwnd, const std::wstring& explicitClropPath = {}) {
     std::wstring clropPath = explicitClropPath;
     if (clropPath.empty() && g_state.pdf) {
         clropPath = ClropPathForPdf(g_state.pdf->path);
     }
 
+    g_state.clropCandidatePath = clropPath;
+    g_state.clropNotice.clear();
+    g_state.hasClropWatchedMetadata = ReadFileMetadataShared(clropPath, g_state.clropWatchedMetadata);
     std::unique_ptr<LoadedClrop> loaded;
     std::wstring err;
     if (LoadClropReadOnly(clropPath, loaded, err)) {
-        g_state.clrop = std::move(loaded);
-        g_state.hasClropWatchedMetadata =
-            ReadFileMetadataShared(g_state.clrop->path, g_state.clropWatchedMetadata);
+        const bool matches = g_state.pdf && ClropMatchesLoadedPdf(loaded->document.pdfId, *g_state.pdf);
+        if (matches || (g_state.pdf && g_state.pairPreview)) {
+            g_state.clrop = std::move(loaded);
+            if (g_state.pairPreview) g_state.clropNotice = localization::Text(matches ? L"pair_preview.temporary" : L"pair_preview.unverified");
+        } else {
+            g_state.clrop.reset();
+            g_state.clropNotice = localization::Text(L"readonly.pdf.clrop_identity_mismatch");
+        }
         g_state.clropReloadPending = false;
         g_state.selectedPage = -1;
         g_state.selectedItem = -1;
@@ -1704,13 +1763,13 @@ void LoadAdjacentClropForPdf(HWND hwnd, const std::wstring& explicitClropPath = 
     }
 
     g_state.clrop.reset();
-    g_state.hasClropWatchedMetadata = false;
     g_state.clropReloadPending = false;
     g_state.selectedPage = -1;
     g_state.selectedItem = -1;
     ClearTextSelection();
     if (!clropPath.empty() && FileExistsRegular(clropPath) && !err.empty()) {
-        g_state.status = localization::Text(L"readonly.pdf.clrop_read_failed");
+        g_state.clropNotice = localization::Text(L"readonly.pdf.clrop_read_failed");
+        UpdateStatusFromPdf();
     } else {
         UpdateStatusFromPdf();
     }
@@ -1883,7 +1942,7 @@ void ReplaceLoadedPdf(HWND hwnd, std::unique_ptr<LoadedPdf> next, const FileMeta
     ClearTextSelection();
     ClearRenderCaches();
     UpdateStatusFromPdf();
-    LoadAdjacentClropForPdf(hwnd);
+    LoadAdjacentClropForPdf(hwnd, g_state.clropCandidatePath);
     InvalidateRect(hwnd, nullptr, FALSE);
 }
 
@@ -1916,7 +1975,7 @@ void TryReloadChangedPdf(HWND hwnd) {
 }
 
 void TryReloadChangedClrop(HWND hwnd) {
-    if (!g_state.clrop || g_state.clrop->path.empty() || !g_state.clropReloadPending) return;
+    if (g_state.clropCandidatePath.empty() || !g_state.clropReloadPending) return;
 
     const ULONGLONG now = GetTickCount64();
     if (now - g_state.clropPendingSinceTick < kReloadDebounceMs) {
@@ -1924,7 +1983,7 @@ void TryReloadChangedClrop(HWND hwnd) {
     }
 
     FileMetadata latest{};
-    if (!ReadFileMetadataShared(g_state.clrop->path, latest)) {
+    if (!ReadFileMetadataShared(g_state.clropCandidatePath, latest)) {
         return;
     }
     if (!latest.Equals(g_state.clropPendingMetadata)) {
@@ -1935,13 +1994,22 @@ void TryReloadChangedClrop(HWND hwnd) {
 
     std::unique_ptr<LoadedClrop> next;
     std::wstring err;
-    if (LoadClropReadOnly(g_state.clrop->path, next, err)) {
-        g_state.clrop = std::move(next);
+    if (LoadClropReadOnly(g_state.clropCandidatePath, next, err)) {
+        g_state.clropNotice.clear();
+        const bool matches = g_state.pdf && ClropMatchesLoadedPdf(next->document.pdfId, *g_state.pdf);
+        if (matches || (g_state.pdf && g_state.pairPreview)) {
+            g_state.clrop = std::move(next);
+            if (g_state.pairPreview) g_state.clropNotice = localization::Text(matches ? L"pair_preview.temporary" : L"pair_preview.unverified");
+        } else {
+            g_state.clrop.reset();
+            g_state.clropNotice = localization::Text(L"readonly.pdf.clrop_identity_mismatch");
+        }
         g_state.clropWatchedMetadata = latest;
         g_state.hasClropWatchedMetadata = true;
         g_state.clropReloadPending = false;
         g_state.selectedPage = -1;
         g_state.selectedItem = -1;
+        UpdateStatusFromPdf();
         InvalidateRect(hwnd, nullptr, FALSE);
     } else {
         g_state.status = localization::Text(L"readonly.pdf.clrop_reload_failed_keep");
@@ -1973,12 +2041,12 @@ void CheckWatchedFiles(HWND hwnd) {
 
     TryReloadChangedPdf(hwnd);
 
-    if (g_state.clrop && !g_state.clrop->path.empty()) {
+    if (!g_state.clropCandidatePath.empty()) {
         FileMetadata clropLatest{};
-        if (ReadFileMetadataShared(g_state.clrop->path, clropLatest)) {
+        if (ReadFileMetadataShared(g_state.clropCandidatePath, clropLatest)) {
             if (!g_state.hasClropWatchedMetadata) {
-                g_state.clropWatchedMetadata = clropLatest;
-                g_state.hasClropWatchedMetadata = true;
+                const auto candidate = g_state.clropCandidatePath;
+                LoadAdjacentClropForPdf(hwnd, candidate);
             } else if (!clropLatest.Equals(g_state.clropWatchedMetadata)) {
                 if (!g_state.clropReloadPending || !clropLatest.Equals(g_state.clropPendingMetadata)) {
                     g_state.clropPendingMetadata = clropLatest;
@@ -1986,19 +2054,16 @@ void CheckWatchedFiles(HWND hwnd) {
                     g_state.clropReloadPending = true;
                 }
             }
-        } else {
+        } else if (g_state.hasClropWatchedMetadata || g_state.clrop ||
+                   g_state.clropReloadPending || !g_state.clropNotice.empty()) {
             g_state.clrop.reset();
             g_state.hasClropWatchedMetadata = false;
             g_state.clropReloadPending = false;
+            g_state.clropNotice.clear();
             g_state.selectedPage = -1;
             g_state.selectedItem = -1;
             UpdateStatusFromPdf();
             InvalidateRect(hwnd, nullptr, FALSE);
-        }
-    } else if (g_state.pdf) {
-        const std::wstring candidate = ClropPathForPdf(g_state.pdf->path);
-        if (FileExistsRegular(candidate)) {
-            LoadAdjacentClropForPdf(hwnd, candidate);
         }
     }
     TryReloadChangedClrop(hwnd);
@@ -2139,14 +2204,6 @@ void ClampContinuousScroll(HWND hwnd) {
     g_state.scrollY = std::clamp(g_state.scrollY, 0.0, maxY);
 }
 
-void AdjustActiveSelectionForScroll(double scrollDeltaY) {
-    if (!g_state.selectingRect || std::abs(scrollDeltaY) < 0.001) return;
-    // The anchor belongs to the document, while selectionCurrent follows the
-    // mouse cursor in the client area. Keep the anchor at the same document
-    // position when the view scrolls during a drag.
-    g_state.selectionAnchor.y -= static_cast<LONG>(std::lround(scrollDeltaY));
-}
-
 std::vector<PageLayout> BuildVisiblePageLayouts(HWND hwnd) {
     std::vector<PageLayout> layouts;
     if (!g_state.pdf || g_state.pdf->pageCount <= 0) return layouts;
@@ -2224,7 +2281,6 @@ void ScrollContinuousBy(HWND hwnd, double deltaY) {
     const double before = g_state.scrollY;
     g_state.scrollY += deltaY;
     ClampContinuousScroll(hwnd);
-    AdjustActiveSelectionForScroll(g_state.scrollY - before);
     SyncCurrentPageFromScroll(hwnd);
     if (std::abs(g_state.scrollY - before) > 0.001) {
         InvalidateRect(hwnd, nullptr, FALSE);
@@ -2236,7 +2292,6 @@ void ScrollContinuousTo(HWND hwnd, double scrollY) {
     const double before = g_state.scrollY;
     g_state.scrollY = scrollY;
     ClampContinuousScroll(hwnd);
-    AdjustActiveSelectionForScroll(g_state.scrollY - before);
     SyncCurrentPageFromScroll(hwnd);
     if (std::abs(g_state.scrollY - before) > 0.001) {
         InvalidateRect(hwnd, nullptr, FALSE);
@@ -3129,10 +3184,13 @@ void TintRenderedTextRect(HDC hdc, const RECT& rect, COLORREF color,
         rendered->stride <= 0 || rect.left >= rect.right || rect.top >= rect.bottom) {
         return;
     }
-    RECT clipped{};
-    if (!IntersectRect(&clipped, &rect, &pageRect)) return;
-    const int w = rect.right - rect.left;
-    const int h = rect.bottom - rect.top;
+    const RECT& sourceRect = IsRectEmpty(&rendered->pixelRect) ? pageRect : rendered->pixelRect;
+    RECT clipped{}, clip{}, area{};
+    if (GetClipBox(hdc, &clip) == ERROR || !IntersectRect(&area, &rect, &pageRect) ||
+        !IntersectRect(&clipped, &area, &clip) || !IntersectRect(&area, &clipped, &sourceRect)) return;
+    clipped = area;
+    const int w = clipped.right - clipped.left;
+    const int h = clipped.bottom - clipped.top;
     BITMAPINFO bmi{};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     bmi.bmiHeader.biWidth = w;
@@ -3141,17 +3199,17 @@ void TintRenderedTextRect(HDC hdc, const RECT& rect, COLORREF color,
     bmi.bmiHeader.biBitCount = 32;
     bmi.bmiHeader.biCompression = BI_RGB;
     std::vector<DWORD> overlay(static_cast<size_t>(w) * h, 0);
-    const double pageW = std::max(1L, pageRect.right - pageRect.left);
-    const double pageH = std::max(1L, pageRect.bottom - pageRect.top);
+    const double pageW = std::max(1L, sourceRect.right - sourceRect.left);
+    const double pageH = std::max(1L, sourceRect.bottom - sourceRect.top);
     for (int y = clipped.top; y < clipped.bottom; ++y) {
         const int srcY = std::clamp(
-            static_cast<int>((y - pageRect.top) * rendered->height / pageH), 0, rendered->height - 1);
+            static_cast<int>((y - sourceRect.top) * rendered->height / pageH), 0, rendered->height - 1);
         const unsigned char* src =
             rendered->pixels.data() + static_cast<size_t>(srcY) * rendered->stride;
-        DWORD* dst = overlay.data() + static_cast<size_t>(y - rect.top) * w;
+        DWORD* dst = overlay.data() + static_cast<size_t>(y - clipped.top) * w;
         for (int x = clipped.left; x < clipped.right; ++x) {
             const int srcX = std::clamp(
-                static_cast<int>((x - pageRect.left) * rendered->width / pageW), 0, rendered->width - 1);
+                static_cast<int>((x - sourceRect.left) * rendered->width / pageW), 0, rendered->width - 1);
             const size_t srcIndex = static_cast<size_t>(srcX) * 4;
             const BYTE b = src[srcIndex + 0];
             const BYTE g = src[srcIndex + 1];
@@ -3167,7 +3225,7 @@ void TintRenderedTextRect(HDC hdc, const RECT& rect, COLORREF color,
             const BYTE outR = static_cast<BYTE>(std::lround(GetRValue(color) * a));
             const BYTE outG = static_cast<BYTE>(std::lround(GetGValue(color) * a));
             const BYTE outB = static_cast<BYTE>(std::lround(GetBValue(color) * a));
-            dst[x - rect.left] = (static_cast<DWORD>(alpha) << 24) |
+            dst[x - clipped.left] = (static_cast<DWORD>(alpha) << 24) |
                 (static_cast<DWORD>(outR) << 16) |
                 (static_cast<DWORD>(outG) << 8) |
                 static_cast<DWORD>(outB);
@@ -3180,7 +3238,7 @@ void TintRenderedTextRect(HDC hdc, const RECT& rect, COLORREF color,
         memcpy(bits, overlay.data(), overlay.size() * sizeof(DWORD));
         HGDIOBJ old = SelectObject(mem, bitmap);
         BLENDFUNCTION blend{ AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
-        AlphaBlend(hdc, rect.left, rect.top, w, h, mem, 0, 0, w, h, blend);
+        AlphaBlend(hdc, clipped.left, clipped.top, w, h, mem, 0, 0, w, h, blend);
         SelectObject(mem, old);
         DeleteObject(bitmap);
     }
@@ -3198,18 +3256,6 @@ void DrawClropItem(HDC hdc,
     const RECT bounds = ItemBoundsClient(item, pageRect, pageWidthPt, pageHeightPt);
     if (bounds.left == bounds.right || bounds.top == bounds.bottom) return;
 
-    if ((item.kind == clrop::Item::Kind::Text || item.kind == clrop::Item::Kind::Math) && item.contentRotation) {
-        (void)ui::DrawQuarterTurnBox(hdc, bounds, item.contentRotation / 90, [&](HDC local, const RECT& rect) {
-            clrop::Item upright = item;
-            upright.contentRotation = 0;
-            const double scale = static_cast<double>(pageRect.right - pageRect.left) / pageWidthPt;
-            const double w = (rect.right - rect.left) / scale, h = (rect.bottom - rect.top) / scale;
-            upright.bbox = std::array<double,4>{0,h,w,h};
-            upright.bboxEndpoints.reset();
-            DrawClropItem(local, upright, rect, w, h, nullptr, selected);
-        });
-        return;
-    }
     switch (item.kind) {
     case clrop::Item::Kind::TextColor: {
         for (size_t qi = 0; qi + 7 < item.quads.size(); qi += 8) {
@@ -3295,26 +3341,12 @@ void DrawClropItem(HDC hdc,
     }
     case clrop::Item::Kind::Text:
     case clrop::Item::Kind::Math: {
-        int fontPx = std::max(8, static_cast<int>(std::lround((item.pt > 0 ? item.pt : 12.0) * (pageRect.right - pageRect.left) / pageWidthPt / 1.35)));
-        LOGFONTW lf{};
-        lf.lfHeight = -fontPx;
-        const std::wstring face = item.font.empty() ? L"Segoe UI" : item.font;
-        wcsncpy_s(lf.lfFaceName, face.c_str(), LF_FACESIZE - 1);
-        HFONT font = CreateFontIndirectW(&lf);
-        std::wstring text = item.content;
-        if (text.empty()) text = Utf8ToWideLocal(item.mathKind);
-        const bool drawn = ui::DrawQuarterTurnBox(hdc, bounds, item.contentRotation / 90,
-            [&](HDC local, const RECT& logical) {
-                SetBkMode(local, TRANSPARENT);
-                SetTextColor(local, color);
-                HGDIOBJ oldFont = font ? SelectObject(local, font) : nullptr;
-                RECT textRect = logical;
-                InflateRect(&textRect, -2, -2);
-                DrawTextW(local, text.c_str(), -1, &textRect, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
-                if (oldFont) SelectObject(local, oldFont);
-            });
-        (void)drawn;
-        if (font) DeleteObject(font);
+        if (item.backgroundAssistMode == "auto" || item.backgroundAssistMode == "inverted") {
+            bool light = (GetRValue(color)*299+GetGValue(color)*587+GetBValue(color)*114)/1000 < 128;
+            if (item.backgroundAssistMode == "inverted") light = !light;
+            FillRectAlpha(hdc,bounds,light ? RGB(255,255,255) : RGB(0,0,0),light ? 178 : 150);
+        }
+        (void)readonly_viewer::DrawAnnotationText(hdc,bounds,item);
         break;
     }
     case clrop::Item::Kind::Shape: {
@@ -3326,7 +3358,7 @@ void DrawClropItem(HDC hdc,
         if (!item.shapeBoundary.empty()) (void)ParseShapeBoundary(item.shapeBoundary,boundary);
         const auto strokeColor = boundary == ShapeBoundary::None ? color : ShapeBoundaryColor(boundary);
         const int penWidth = std::max(1, static_cast<int>(std::lround((item.width > 0 ? item.width : 2.0) * scale)));
-        if (!fill && (ShapeKindIsOpen(kind) || !item.dash.empty() || boundary != ShapeBoundary::None || item.shapeAngle != 0.0)) {
+        if (!fill && (ShapeKindIsOpen(kind) || !item.dash.empty() || boundary != ShapeBoundary::None || item.shapeAngle != 0.0 || item.alpha < 1.0)) {
             ui::DrawDashedShapeOutline(hdc, kind, bounds, item.shapeRotation.value_or(kDefaultRotatedEllipseAngleRad),
                 penWidth, strokeColor, ClropAlphaByte(item, 1.0), item.dash, scale, item.contentRotation / 90,item.shapeAngle,drawMode);
         } else {
@@ -3401,6 +3433,15 @@ void DrawClropAnnotations(HDC hdc,
     }
 }
 
+[[nodiscard]] bool ActiveSelectionClientRect(const PageLayout& layout, RECT& bounds) {
+    ScopedPdfPage page(layout.pageIndex);
+    const auto& anchor = g_state.selectionAnchorPt;
+    POINT anchorClient{};
+    if (!PdfNativePointToClient(page.page, layout, anchor.x, anchor.y, anchorClient)) return false;
+    bounds = NormalizeClientRect(anchorClient, g_state.selectionCurrent);
+    return true;
+}
+
 void DrawTextSelection(HDC hdc, const PageLayout& layout) {
     if (g_state.hasRectSelection && g_state.selectionPage == layout.pageIndex) {
         ScopedPdfPage page(layout.pageIndex);
@@ -3431,9 +3472,9 @@ void DrawTextSelection(HDC hdc, const PageLayout& layout) {
         }
     }
 
-    if (g_state.selectingRect) {
-        RECT r = NormalizeClientRect(g_state.selectionAnchor, g_state.selectionCurrent);
-        if (RectHasArea(r)) {
+    if (g_state.selectingRect && g_state.selectionPage == layout.pageIndex) {
+        RECT r{};
+        if (ActiveSelectionClientRect(layout, r) && RectHasArea(r)) {
             FillRectAlpha(hdc, r, g_state.theme.selectionBg, 55);
             HPEN pen = CreatePen(PS_DOT, 1, g_state.theme.accent);
             HGDIOBJ oldPen = SelectObject(hdc, pen);
@@ -3450,6 +3491,8 @@ bool BeginTextSelection(HWND hwnd, POINT pt) {
     if (g_state.tempTool != TempDrawTool::None) return false;
     PageLayout layout{};
     if (!PageLayoutAtPoint(hwnd, pt, layout)) return false;
+    page_rotation::Point anchor{};
+    if (!ClientPointToPdfPoint(layout, pt, anchor.x, anchor.y)) return false;
     g_state.selectingRect = true;
     g_state.hasRectSelection = false;
     g_state.regionText = {};
@@ -3457,7 +3500,7 @@ bool BeginTextSelection(HWND hwnd, POINT pt) {
     g_state.selectedPage = -1;
     g_state.selectedItem = -1;
     g_state.selectionPage = layout.pageIndex;
-    g_state.selectionAnchor = pt;
+    g_state.selectionAnchorPt = anchor;
     g_state.selectionCurrent = pt;
     SetCapture(hwnd);
     SetTimer(hwnd,
@@ -3552,17 +3595,17 @@ bool FinishTextSelection(HWND hwnd) {
     g_state.selectingRect = false;
     if (GetCapture() == hwnd) ReleaseCapture();
 
-    RECT clientRect = NormalizeClientRect(g_state.selectionAnchor, g_state.selectionCurrent);
-    if (!RectHasArea(clientRect, 4)) {
-        ClearTextSelection();
-        return false;
-    }
-
     PageLayout layout{};
-    if (!PageLayoutForIndex(hwnd, g_state.selectionPage, layout)) {
+    RECT clientRect{};
+    if (!PageLayoutForIndex(hwnd, g_state.selectionPage, layout) ||
+        !ActiveSelectionClientRect(layout, clientRect)) {
         ClearTextSelection();
         InvalidateRect(hwnd, nullptr, FALSE);
         return true;
+    }
+    if (!RectHasArea(clientRect, 4)) {
+        ClearTextSelection();
+        return false;
     }
     RECT clipped{};
     if (!IntersectRect(&clipped, &clientRect, &layout.rect) || !RectHasArea(clipped, 4)) {
@@ -3720,7 +3763,7 @@ void DrawPdfInfoOverlay(HDC hdc, const RECT& client) {
     DrawTextW(hdc, text.c_str(), -1, &textRc, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
 }
 
-void DrawMagnifierLens(HDC hdc, const RECT& client) {
+void DrawMagnifierLens(HDC hdc, const RECT& client, const std::vector<PageLayout>& layouts) {
     if (!g_state.showMagnifier) return;
     POINT center = g_state.lastMouse;
     if (center.x < client.left || center.x > client.right ||
@@ -3730,10 +3773,6 @@ void DrawMagnifierLens(HDC hdc, const RECT& client) {
 
     const int lensW = kMagnifierRadiusPx * 2;
     const int lensH = kMagnifierRadiusPx * 2;
-    const int srcW = std::max(1, static_cast<int>(std::lround(lensW / kMagnifierZoom)));
-    const int srcH = std::max(1, static_cast<int>(std::lround(lensH / kMagnifierZoom)));
-    const int srcX = center.x - srcW / 2;
-    const int srcY = center.y - srcH / 2;
     RECT lens{center.x - kMagnifierRadiusPx,
               center.y - kMagnifierRadiusPx,
               center.x + kMagnifierRadiusPx,
@@ -3741,20 +3780,60 @@ void DrawMagnifierLens(HDC hdc, const RECT& client) {
 
     HDC srcDC = CreateCompatibleDC(hdc);
     if (!srcDC) return;
-    HBITMAP srcBmp = CreateCompatibleBitmap(hdc, srcW, srcH);
+    HBITMAP srcBmp = CreateCompatibleBitmap(hdc, lensW, lensH);
     if (!srcBmp) {
         DeleteDC(srcDC);
         return;
     }
     HGDIOBJ oldBmp = SelectObject(srcDC, srcBmp);
-    BitBlt(srcDC, 0, 0, srcW, srcH, hdc, srcX, srcY, SRCCOPY);
+    if (!oldBmp || oldBmp == HGDI_ERROR) { DeleteObject(srcBmp); DeleteDC(srcDC); return; }
+    const RECT canvas{0, 0, lensW, lensH};
+    HBRUSH background = CreateSolidBrush(g_state.theme.pdfBg);
+    FillRect(srcDC, &canvas, background);
+    DeleteObject(background);
+    const pdf_magnifier::Transform paint{kMagnifierZoom,
+        center.x-lensW/(2.0*kMagnifierZoom), center.y-lensH/(2.0*kMagnifierZoom)};
+    for (const auto& layout : layouts) {
+        auto magnified = layout;
+        magnified.rect = paint.Page(layout.rect.left, layout.rect.top, layout.width, layout.height);
+        magnified.width = magnified.rect.right-magnified.rect.left;
+        magnified.height = magnified.rect.bottom-magnified.rect.top;
+        RECT visible{};
+        if (!IntersectRect(&visible, &magnified.rect, &canvas)) continue;
+        const auto cached = std::find_if(g_state.renderedPages.begin(), g_state.renderedPages.end(),
+            [&](const RenderedPage& page) { return page.pageIndex == layout.pageIndex; });
+        const RenderedPage* rendered = cached != g_state.renderedPages.end() ? &*cached : nullptr;
+        RenderedPage lensPage;
+        pdf_magnifier::Region region;
+        if (pdf_magnifier::Render(g_state.pdf->document, layout.pageIndex, magnified.rect,
+                canvas, g_state.viewRotation, region)) {
+            if (g_state.showGrayscale) ApplyReadonlyGrayscaleToBgra(region.pixels);
+            pdf_magnifier::Paint(srcDC, region);
+            if (rendered) {
+                lensPage.rawWidth = rendered->rawWidth; lensPage.rawHeight = rendered->rawHeight;
+                lensPage.originX = rendered->originX; lensPage.originY = rendered->originY;
+                lensPage.displayRotation = rendered->displayRotation;
+                lensPage.width = region.rect.right-region.rect.left;
+                lensPage.height = region.rect.bottom-region.rect.top;
+                lensPage.stride = lensPage.width*4;
+                lensPage.pixels = std::move(region.pixels);
+                lensPage.pixelRect = region.rect;
+                rendered = &lensPage;
+            }
+        } else if (rendered) DrawRenderedPage(srcDC, *rendered, magnified.rect);
+        DrawClropAnnotations(srcDC, layout.pageIndex, magnified.rect,
+            layout.pageWidthPt, layout.pageHeightPt, rendered);
+        DrawTemporaryStrokes(srcDC, magnified);
+        DrawTextSelection(srcDC, magnified);
+    }
 
     const int saved = SaveDC(hdc);
     HRGN clip = CreateEllipticRgn(lens.left, lens.top, lens.right, lens.bottom);
-    if (clip) SelectClipRgn(hdc, clip);
-    SetStretchBltMode(hdc, HALFTONE);
-    StretchBlt(hdc, lens.left, lens.top, lensW, lensH, srcDC, 0, 0, srcW, srcH, SRCCOPY);
-    RestoreDC(hdc, saved);
+    if (saved && clip) {
+        ExtSelectClipRgn(hdc, clip, RGN_AND);
+        BitBlt(hdc, lens.left, lens.top, lensW, lensH, srcDC, 0, 0, SRCCOPY);
+    }
+    if (saved) RestoreDC(hdc, saved);
 
     HPEN pen = CreatePen(PS_SOLID, 2, g_state.theme.accent);
     HGDIOBJ oldPen = SelectObject(hdc, pen);
@@ -3825,7 +3904,7 @@ void PaintViewer(HWND hwnd) {
             SelectObject(hdc, oldPen);
             DeleteObject(border);
         }
-        DrawMagnifierLens(hdc, rc);
+        DrawMagnifierLens(hdc, rc, layouts);
         PruneRenderedPageCache(layouts);
     } else {
         PaintPlaceholderPage(hdc, rc);
@@ -3869,7 +3948,7 @@ void SetWindowTitle(HWND hwnd) {
     SetWindowTextW(hwnd, title.c_str());
 }
 
-void OpenPdfInViewer(HWND hwnd, const std::wstring& path, const std::wstring& clropPath = {}) {
+void OpenPdfInViewer(HWND hwnd, const std::wstring& path, const std::wstring& clropPath = {}, bool pairPreview = false) {
     std::unique_ptr<LoadedPdf> next;
     std::wstring status;
     if (!LoadPdfReadOnly(hwnd, path, next, status)) {
@@ -3881,6 +3960,7 @@ void OpenPdfInViewer(HWND hwnd, const std::wstring& path, const std::wstring& cl
     FileMetadata metadata{};
     bool hasMetadata = ReadFileMetadataShared(path, metadata);
     g_state.pdf = std::move(next);
+    g_state.pairPreview = pairPreview;
     ClearPendingPdfResizeAnchor();
     g_state.currentPage = 0;
     g_state.viewRotation = 0;
@@ -4714,8 +4794,9 @@ LRESULT CALLBACK ViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
             if (PageLayoutForIndex(hwnd, g_state.selectionPage, page) &&
                 ClientPointToPdfPoint(page, g_state.lastMouse, x, y) && g_state.regionText.Contains(x, y)) return 0;
         }
-        if (FinishTextSelection(hwnd)) {
-            return 0;
+        if (g_state.selectingRect) {
+            UpdateTextSelection(hwnd, g_state.lastMouse);
+            if (FinishTextSelection(hwnd)) return 0;
         }
         {
             PageLayout layout{};
@@ -4898,6 +4979,10 @@ bool PdfPreviewPanel_AreAnnotationsVisible(HWND hwnd) {
     return hwnd && IsWindow(hwnd) && pdf_panel::g_state.showAnnotations;
 }
 
+void PdfPreviewPanel_PreviewPair(HWND hwnd, const std::wstring& pdfPath, const std::wstring& clropPath) {
+    pdf_panel::OpenPdfInViewer(hwnd, pdfPath, clropPath, true);
+}
+
 std::wstring PdfPreviewPanel_GetPdfPath(HWND hwnd) {
     if (pdf_panel::g_state.pdf) {
         return pdf_panel::g_state.pdf->path;
@@ -4909,6 +4994,11 @@ void PdfPreviewPanel_ClosePdf(HWND hwnd) {
     pdf_panel::g_state.pdf.reset();
     pdf_panel::ClearPendingPdfResizeAnchor();
     pdf_panel::g_state.clrop.reset();
+    pdf_panel::g_state.clropCandidatePath.clear();
+    pdf_panel::g_state.clropNotice.clear();
+    pdf_panel::g_state.pairPreview = false;
+    pdf_panel::g_state.hasClropWatchedMetadata = false;
+    pdf_panel::g_state.clropReloadPending = false;
     pdf_panel::g_state.renderedPages.clear();
     pdf_panel::g_state.status.clear();
     InvalidateRect(hwnd, nullptr, TRUE);

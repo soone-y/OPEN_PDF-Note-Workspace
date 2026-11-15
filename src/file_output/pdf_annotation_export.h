@@ -13,7 +13,7 @@ struct TextColorOptions {
 // Destination copy only. Reuse source glyph outlines/positions as a Stamp AP;
 // the page's text objects stay intact. Failure discards the entire output.
 [[nodiscard]] bool AddTextColorOverlay(FPDF_PAGE destination, const Annotation& scaled,
-                                      const TextColorOptions& options);
+                                      const TextColorOptions& options, bool embedEditableData = true);
 
 // Caller owns this new, empty output document and closes it with PDFium.
 // A controlled memory initializer supplies valid indirect default-font
@@ -24,8 +24,11 @@ struct TextColorOptions {
 // and an appearance-only scratch page in it; never pass the opened source page.
 // On failure the caller discards the whole destination before any disk write.
 // Successful object-based appearances are transferred from scratch to annotation.
+// editable optionally preserves the original semantic type (e.g. TextColor
+// rendered as Highlight); it must use the same scaled canonical page basis.
 [[nodiscard]] bool Add(FPDF_DOCUMENT output, FPDF_PAGE destination, FPDF_PAGE scratch,
-                       const Annotation& annotation, bool preferFreeText);
+                       const Annotation& annotation, bool preferFreeText,
+                       const Annotation* editable = nullptr, bool embedEditableData = true);
 // Until all native geometry/AP/resource types can be transformed losslessly,
 // reject non-unit scaling of annotated input PDFs. App-side annotations are
 // added AFTER page scaling and are not affected by this restriction.

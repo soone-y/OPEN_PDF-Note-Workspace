@@ -5,6 +5,7 @@
 #include <windows.h>
 #include "diagnostics/open_work_counters.h"
 #include "pdf_view/render_queue_policy.h"
+#include "pdf_view/scroll_travel.h"
 
 #include <algorithm>
 #include <array>
@@ -24,6 +25,9 @@
 #include "note/note_identity_store.h"
 #include "note/note_file_policy.h"
 #include "note_clro_fullwidth_regression.h"
+#include "note_m_heading_regression.h"
+#include "note_quote_continuation_regression.h"
+#include "note_underscore_underline_regression.h"
 #include "note/note_layout.h"
 #include "note/note_kernel.h"
 #include "note/note_line_sequence.h"
@@ -493,6 +497,8 @@ bool ApplyTextEditKeepsLineStartsInSync(std::wstring text, note::TextEdit edit) 
 
 int main() {
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+    Expect(note_underscore_test::Run(), "CLRO double underscores underline while Markdown keeps strong emphasis, with matching display and exports");
+    Expect(note_quote_test::Run(), "quote continuation defaults off, opt-in preserves lists, references, cache policy and undo/redo");
     {
         const auto fullwidth = note_fullwidth_test::Run();
         Expect(note_fullwidth_test::RunExport(TestWideToUTF8),
@@ -603,6 +609,28 @@ int main() {
         Expect(pdf_render_queue::AfterDispatch(std::numeric_limits<unsigned>::max(), true) ==
                    pdf_render_queue::kMaxVisibleBurst,
                "PDF fairness counter saturates without overflow");
+    }
+
+    {
+        pdf_scroll::RecentTravel travel;
+        travel.Observe(1000, 500, 800, 1.0, 0);
+        Expect(travel.Viewports(1000) == 0.0, "initial PDF viewport establishes a baseline");
+        travel.Observe(1020, 900, 800, 1.0, 0);
+        travel.Observe(1020, 500, 800, 1.0, 0);
+        travel.Observe(1021, 500, 800, 1.0, 0);
+        Expect(travel.Viewports(1021) == 1.0, "opposite PDF moves add even in one input burst");
+        travel.Observe(1120, 300, 800, 1.0, 0);
+        Expect(travel.Viewports(1120) == 1.25, "recent PDF travel includes moves from distinct ticks");
+        Expect(travel.Viewports(1230) == 0.25, "only old PDF travel expires after the time window");
+        Expect(travel.Viewports(1330) == 0.0, "stopped PDF viewport has no recent travel");
+        travel.Observe(1335, 0, 600, 1.0, 1);
+        travel.Observe(1340, -300, 600, 1.0, 1);
+        Expect(travel.Viewports(1340) == 0.5, "PDF travel is normalized after viewport geometry changes");
+        travel.Observe(1345, 900, 600, 2.0, 1);
+        Expect(travel.Viewports(1345) == 0.0, "PDF zoom resets travel instead of adding an anchor jump");
+        travel.Reset();
+        travel.Observe(1350, 5000, 600, 2.0, 1);
+        Expect(travel.Viewports(1350) == 0.0, "a new PDF generation cannot inherit scroll travel");
     }
 
     {
@@ -4502,6 +4530,11 @@ int main() {
         gdiInput.owner_input.editor_text_core_current = true;
         gdiInput.owner_input.visible_lines = {{0}, {gdiWrappedCore.logical_line_count()}};
         note::NoteRenderFinalGdiMeasurementProvider gdiProvider(gdiMeasurementDc);
+        const auto mHeadings = note_m_heading_test::Run(gdiMeasurementDc);
+        Expect(mHeadings.cases == 38 && mHeadings.parsing && mHeadings.literals && mHeadings.lineHeight,
+               "m/m1..m5 heading aliases preserve literal syntax, six tiers, fullwidth settings and line-height values");
+        Expect(mHeadings.geometry && mHeadings.exports,
+               "m heading aliases share final placement/caret/raw handoff and preserve ordered text/HTML output");
         const auto whitespace = note_whitespace_test::Run(gdiMeasurementDc);
         Expect(whitespace.cases == 24 && whitespace.display,
                "structured paragraphs preserve leading whitespace without duplicating Markdown structural indentation");
@@ -5717,6 +5750,84 @@ int main() {
             return !note::ResolveNoteRenderTrailingSyntaxBlankHit(source, placement, 100000, 0);
         }();
         Expect(suffixBlankExceptions, "table trailing pipe retains cell-based click mapping");
+
+        const bool headingIndentBaseline = [&]() {
+            const std::wstring raw = L"# Top\ntop\n## Mid\nmid\n<d=3>explicit</>\n</##>\nback\n"
+                L"###### Deep\ndeep\n</#>\nplain";
+            note::NoteTextCore core;
+            core.Reset(note::NoteId{1008}, note::NoteMetadata{L"heading-indent.clro", L"heading-indent"},
+                raw, 432, 1);
+            auto input = gdiInput;
+            input.layout_key = {640, 96, 96, 7, 4, 8, false};
+            input.owner_input.visible_lines = {{0}, {core.logical_line_count()}};
+            std::shared_ptr<const note::NoteRenderFinalPublication> publication;
+            const auto built = note::NoteRenderFinalTransaction::BuildComplete(core, input, gdiProvider, &publication);
+            if (built != note::NoteRenderFinalCompleteBuildResult::Built || !publication) {
+                std::cerr << "heading publication result=" << static_cast<int>(built) << '\n';
+                return false;
+            }
+            SIZE space{};
+            if (!GetTextExtentPoint32W(gdiMeasurementDc, L" ", 1, &space)) return false;
+            for (const auto& expected : {std::pair<size_t, int>{0, 0}, {1, 0}, {2, 0}, {3, 1},
+                    {4, 3}, {6, 0}, {8, 5}, {10, 0}}) {
+                note::NoteRenderSourceLinePlan source;
+                note::NoteRenderLinePlacement placement;
+                if (!publication->source_plan()->ResolveLine({expected.first}, &source) ||
+                    !publication->placement()->ResolveLine({expected.first}, &placement) ||
+                    source.runs.size() != placement.runs.size()) {
+                    std::cerr << "heading line resolution=" << expected.first << '\n';
+                    return false;
+                }
+                bool found = false;
+                for (size_t i = 0; i < source.runs.size() && !found; ++i) {
+                    if (source.runs[i].kind == note::NoteRenderSourceRunKind::HiddenSyntax) continue;
+                    for (const auto& fragment : placement.runs[i].fragments) {
+                        if (fragment.width_px <= 0) continue;
+                        if (fragment.x_px != 8 + expected.second * std::max<LONG>(1, space.cx)) {
+                            std::cerr << "heading indent line=" << expected.first << " x=" << fragment.x_px
+                                << " expected=" << 8 + expected.second * std::max<LONG>(1, space.cx) << '\n';
+                            return false;
+                        }
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    std::cerr << "heading no visible text line=" << expected.first << '\n';
+                    return false;
+                }
+            }
+            const note::Utf16CodeUnitOffset start{raw.find(L"top")};
+            note::NoteRenderFinalWin32AdapterInput adapter;
+            adapter.text_core = &core;
+            adapter.structural_publication = publication;
+            adapter.owner_input = input.owner_input;
+            adapter.editor_selection = {start, start};
+            adapter.editor_caret = start;
+            adapter.measurement_dc = gdiMeasurementDc;
+            for (bool rawLine : {false, true}) {
+                if (rawLine) {
+                    adapter.owner_input.requested_editor_lines = {{{1}, {2}}};
+                    adapter.owner_input.caret_line = 1;
+                }
+                std::shared_ptr<const note::NoteRenderFinalWin32AdapterFrame> frame;
+                note::NoteRenderFinalCaretGeometry caret;
+                note::NoteRenderFinalHit hit;
+                if (note::NoteRenderFinalWin32AdapterFrame::Build(adapter, &frame) !=
+                        note::NoteRenderFinalWin32AdapterBuildResult::Built || !frame ||
+                    frame->Caret(&caret) != note::NoteRenderFinalPresentationInteractionResult::Resolved ||
+                    caret.x_px != 8 || frame->HitTest(caret.x_px, caret.top_px, &hit) !=
+                        note::NoteRenderFinalPresentationInteractionResult::Resolved ||
+                    hit.source_offset != start) {
+                    std::cerr << "heading caret raw=" << rawLine << " x=" << caret.x_px
+                        << " hit=" << hit.source_offset.value << " expected=" << start.value << '\n';
+                    return false;
+                }
+            }
+            return core.CopyRawRange({0}, core.text_length()) == raw;
+        }();
+        Expect(headingIndentBaseline,
+            "heading tier one uses base padding across structured/raw caret hits; nested tiers, explicit indent and closes retain scope");
 
         note::NoteTextCore gdiPositionStyleCore;
         gdiPositionStyleCore.Reset(
@@ -8249,6 +8360,13 @@ int main() {
                    "promoted legacy heading keeps legacy origin");
             Expect(heading->level == 2, "promoted legacy heading keeps level");
         }
+        Expect(FindStyleSpan(doc, note::StyleKind::Indent, L"1") != nullptr,
+               "legacy heading tier two inherits one indentation step");
+    }
+    {
+        const auto doc = ParseMd4c(L"<h1>Legacy Heading</>\n\nParagraph\n");
+        Expect(FindStyleSpan(doc, note::StyleKind::Indent, L"0") != nullptr,
+               "legacy heading tier one retains its scope with no additional indentation");
     }
 
     {

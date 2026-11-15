@@ -86,7 +86,7 @@ inline LRESULT CALLBACK HostProc(HWND host, UINT message, WPARAM wp, LPARAM lp,
             const uint32_t pixels = lines == WHEEL_PAGESCROLL ? info.nPage
                 : static_cast<uint32_t>(std::min<uint64_t>(static_cast<uint64_t>(lines) * 28, UINT_MAX));
             const int delta = GET_WHEEL_DELTA_WPARAM(wp);
-            next += state->wheel.Take(delta, pixels);
+            next += state->wheel.Take(delta, pixels, scroll_input::ListWheelInput::Rounding::TowardZero);
             const int limit = std::max(0, info.nMax + 1 - static_cast<int>(info.nPage));
             if (next < 0 || next > limit || (info.nPos == 0 && delta > 0) ||
                 (info.nPos == limit && delta < 0)) state->wheel.Reset();
@@ -126,6 +126,20 @@ inline LRESULT CALLBACK HostProc(HWND host, UINT message, WPARAM wp, LPARAM lp,
     return control && detail::GetState(host) && SetWindowSubclass(control, detail::ChildProc,
         detail::kSubclass, reinterpret_cast<DWORD_PTR>(host));
 }
+
+// SetWindowPos on a dropdown combo takes the expanded height. The closed
+// field is sized by the control's font and occupies only its toolbar row.
+[[nodiscard]] inline int DropDownHeight(HWND control) {
+    COMBOBOXINFO info{};
+    info.cbSize = sizeof(info);
+    if (!GetComboBoxInfo(control, &info)) return 0;
+    const auto type = GetWindowLongPtrW(control, GWL_STYLE) & CBS_DROPDOWNLIST;
+    if (type != CBS_DROPDOWNLIST && type != CBS_DROPDOWN) return 0;
+    RECT expanded{};
+    if (!SendMessageW(control, CB_GETDROPPEDCONTROLRECT, 0, reinterpret_cast<LPARAM>(&expanded))) return 0;
+    return expanded.bottom - expanded.top;
+}
+
 [[nodiscard]] inline int Offset(HWND host, int contentHeight, int pageHeight, int key) {
     const auto* state = detail::GetState(host);
     SCROLLINFO info{}; info.cbSize = sizeof(info); info.fMask = SIF_POS;

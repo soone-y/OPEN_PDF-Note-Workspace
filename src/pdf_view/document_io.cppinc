@@ -149,6 +149,7 @@ static bool LoadImageDocument(HWND pdfWnd, const std::wstring& path) {
 }
 
 bool LoadPdfDocument(HWND pdfWnd, const std::wstring& path) {
+    clrop::InvalidatePdfIdCache(path);
     write_checks::NormalOperation read(g_workspaceRoot, std::filesystem::path(path), write_checks::Kind::PdfRead, std::filesystem::path(path));
     read.Failure(ERROR_INVALID_DATA);
     const ULONGLONG startTick = preview_trace::TickNow();
@@ -160,11 +161,12 @@ bool LoadPdfDocument(HWND pdfWnd, const std::wstring& path) {
     for (;;) {
         ClearPdfState();
 
-        // Open with generous sharing so we can load PDFs even if another app has the file open.
+        // Allow independent readers and owned moves, but no writer while PDFium
+        // reads this handle (including a brief source-protection rebind).
         std::wstring openPath = ToExtendedPathIfAbsolute(path);
         HANDLE hFile = CreateFileW(openPath.c_str(),
                                    GENERIC_READ,
-                                   FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                   FILE_SHARE_READ | FILE_SHARE_DELETE,
                                    nullptr,
                                    OPEN_EXISTING,
                                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_RANDOM_ACCESS | FILE_FLAG_OVERLAPPED,

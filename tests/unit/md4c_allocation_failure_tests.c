@@ -104,6 +104,8 @@ int main(void)
            "[g]: /g\n[h]: /h\n[i]: /i\n[j]: /j\n\n[a] [b] [c] [i] [j]\n"),
         _T("[x](a&amp;b \"c &amp; d\") ![y](a\\*b \"e &quot; f\")\n"),
         _T("|a|b|\n|-|-|\n|*x*|[y](z)|\n\n- [x] item\n  - nested\n"),
+        _T("__underline__ _italic_ ___both___ **bold** **__nested__**\n"),
+        _T(">> *deep*\n> outer\nplain\n\n- > [link](local.md)\nlazy list\n"),
 #ifdef MD4C_TEST_LIBREOFFICE
         _T("[[page]] [[page|label &amp; title]]\n\n<div>inline</div>\n"
            "https://example.invalid/ test@example.invalid\n"),
@@ -119,7 +121,8 @@ int main(void)
     parser.flags = MD_DIALECT_GITHUB | MD_FLAG_WIKILINKS;
 #else
     parser.flags = MD_FLAG_NOHTML | MD_FLAG_NOINDENTEDCODEBLOCKS |
-                   MD_FLAG_STRIKETHROUGH | MD_FLAG_TABLES | MD_FLAG_TASKLISTS;
+                   MD_FLAG_STRIKETHROUGH | MD_FLAG_TABLES | MD_FLAG_TASKLISTS |
+                   MD_FLAG_NOQUOTE_LAZY_CONTINUATION | MD_FLAG_DOUBLEUNDERSCOREUNDERLINE;
 #endif
     parser.enter_block = parser.leave_block = block;
     parser.enter_span = parser.leave_span = span;

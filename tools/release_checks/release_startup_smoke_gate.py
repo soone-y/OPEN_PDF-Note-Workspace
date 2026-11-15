@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -125,6 +126,19 @@ def smoke_start(executable: Path) -> None:
             desktop.close()
 
 
+def remove_smoke_copy(root: Path) -> None:
+    # Windows can briefly retain DLL mappings after the owned job has exited.
+    deadline = time.monotonic() + 5
+    while True:
+        try:
+            shutil.rmtree(root)
+            return
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.1)
+
+
 def validate_release_set(release_set: Path) -> list[str]:
     try:
         manifest = json.loads((release_set / "release_set_manifest.json").read_text(encoding="utf-8-sig"))
@@ -135,8 +149,9 @@ def validate_release_set(release_set: Path) -> list[str]:
     errors: list[str] = []
     if not isinstance(zip_roots, dict):
         return ["release-set manifest has invalid ZIP root metadata"]
-    with tempfile.TemporaryDirectory(prefix="pdf_note_release_smoke_") as temporary:
-        root = Path(temporary)
+    temp_parent = Path(tempfile.gettempdir()).resolve()
+    root = Path(tempfile.mkdtemp(prefix="pdf_note_release_smoke_", dir=temp_parent))
+    try:
         for label, directory_key, zip_key in (("full", "release", "release_zip"), ("Lite", "release_lite", "release_lite_zip")):
             try:
                 release_dir = child_path(release_set, components.get(directory_key), label=f"{label} directory")
@@ -154,6 +169,13 @@ def validate_release_set(release_set: Path) -> list[str]:
                 smoke_start(executable)
             except (OSError, RuntimeError, ValueError, zipfile.BadZipFile) as error:
                 errors.append(f"{label}: {error}")
+    finally:
+        try:
+            if root.resolve().parent != temp_parent or root.is_symlink():
+                raise OSError("smoke copy is outside its temporary directory")
+            remove_smoke_copy(root)
+        except OSError as error:
+            errors.append(f"cannot remove smoke copy {root}: {error}")
     return errors
 
 

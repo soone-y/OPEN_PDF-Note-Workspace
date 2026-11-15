@@ -9,11 +9,11 @@ release パッケージ利用時は、まず `docs/THIRD_PARTY_NOTICES.md` と `
 
 | コンポーネント | 用途 | 同梱形態 | ライセンス参照 |
 | --- | --- | --- | --- |
-| PDFium package `158.0.8111.0` | PDF の読み込み、描画、テキスト抽出、書き出し | `third_party/pdfium/` を同梱。release では `pdfium.dll` と対応ライセンス文書を配布 | `third_party/pdfium/LICENSE`, `third_party/pdfium/licenses/` |
+| PDFium package `159.0.8152.0` | PDF の読み込み、描画、テキスト抽出、書き出し | `third_party/pdfium/` を同梱。release では `pdfium.dll` と対応ライセンス文書を配布 | `third_party/pdfium/LICENSE`, `third_party/pdfium/licenses/` |
 | MD4C | Markdown 解析 | `third_party/md4c/` をリポジトリへ配置。導入時は `md4c.c`, `md4c.h`, `LICENSE.md` を参照 | `third_party/md4c/LICENSE.md` |
 | LibreOffice custom runtime `26.2.6.3` / 比較用 image `26.2.3.2` | 同梱フォントのアプリ内 private font 利用。docx/pptx から PDF への headless 変換 | `image/` は比較・フォント・license 参照用。通信機能を除いた custom runtime を標準 release へ配置する | runtime および `third_party/libreoffice/image/` の `license.txt`, `LICENSE.html`, `NOTICE` |
 | MinGW-w64 runtime DLLs | `pdf_note_workspace.exe` と `readonly_viewer.exe` 実行に必要な C++/GCC runtime | `libstdc++-6.dll`, `libgcc_s_seh-1.dll`, `libwinpthread-1.dll` を `out/bin/` と release へコピー | `third_party/mingw_runtime_licenses/mingw-w64/` |
-| zlib runtime `1.3.2` | DOCX staging copy の ZIP 展開/検証 | `third_party/zlib/` の固定成果物から `zlib1.dll` を `out/bin/` と release へコピー | `third_party/zlib/LICENSE` |
+| zlib runtime `1.4` | DOCX staging copy の ZIP 展開/検証 | `third_party/zlib/` の固定成果物から `zlib1.dll` を `out/bin/` と release へコピー | `third_party/zlib/LICENSE` |
 
 ## 2. PDFium
 
@@ -26,8 +26,8 @@ release パッケージ利用時は、まず `docs/THIRD_PARTY_NOTICES.md` と `
   - `third_party/pdfium/bin/pdfium.dll`
   - release では `pdfium.dll`
 - バージョン:
-  - `third_party/pdfium/VERSION`: `158.0.8111.0`
-  - `third_party/pdfium/PDFiumConfig.cmake`: `158.0.8111.0`
+  - `third_party/pdfium/VERSION`: `159.0.8152.0`
+  - `third_party/pdfium/PDFiumConfig.cmake`: `159.0.8152.0`
 
 ### 2.2 ライセンス文書
 

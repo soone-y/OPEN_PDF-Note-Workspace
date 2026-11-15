@@ -22,9 +22,15 @@ def main():
     parser.add_argument("--exe", type=Path, required=True)
     parser.add_argument("--presentation-only", action="store_true",
                         help="Check folding, native main-window ownership and focus on a small fixture.")
+    parser.add_argument("--groups-only", action="store_true",
+                        help="Check external-folder selection, explicit group persistence and size confirmation.")
+    parser.add_argument("--scope-close-only", action="store_true",
+                        help="Check native close and cancellation routes of the search-scope window.")
     parser.add_argument("--completion-timeout", type=float, default=35,
                         help="Cold 601-file completion deadline; includes durable first-time identity registration.")
     args = parser.parse_args()
+    if args.groups_only:
+        from readonly_viewer_next_app_smoke import screenshot
     if not 0 < args.completion_timeout <= 180:
         parser.error("--completion-timeout must be greater than 0 and at most 180 seconds")
     repo = Path(__file__).resolve().parents[2]
@@ -35,13 +41,15 @@ def main():
     app_dir.mkdir()
     executable = app_dir / "pdf_note_workspace.exe"
     shutil.copy2(source, executable)
+    if args.groups_only:
+        shutil.copy2(source.parent / "readonly_viewer.exe", app_dir / "readonly_viewer.exe")
     for dll in source.parent.glob("*.dll"):
         shutil.copy2(dll, app_dir / dll.name)
     workspace = root / "workspace"
     session = workspace / "01_Lecture/01_Session"
     session.mkdir(parents=True)
     # Enough distinct files for multiple timer ticks and observable partial results.
-    for index in range(12 if args.presentation_only else 600):
+    for index in range(12 if args.presentation_only or args.groups_only or args.scope_close_only else 600):
         (session / f"source_{index:04}.txt").write_bytes(b"needle preserved source\n")
     dotted_dir = workspace / "..draft"
     dotted_dir.mkdir()
@@ -79,6 +87,8 @@ def main():
         "GetWindowRect": ([w.HWND, c.POINTER(w.RECT)], w.BOOL),
         "GetWindow": ([w.HWND, w.UINT], w.HWND),
         "GetWindowLongPtrW": ([w.HWND, c.c_int], c.c_ssize_t),
+        "GetSystemMenu": ([w.HWND, w.BOOL], w.HMENU),
+        "GetMenuState": ([w.HMENU, w.UINT, w.UINT], w.UINT),
         "SetWindowPos": ([w.HWND, w.HWND, c.c_int, c.c_int, c.c_int, c.c_int, w.UINT], w.BOOL),
         "AttachThreadInput": ([w.DWORD, w.DWORD, w.BOOL], w.BOOL),
         "GetKeyboardState": ([c.c_void_p], w.BOOL), "SetKeyboardState": ([c.c_void_p], w.BOOL),
@@ -103,11 +113,12 @@ def main():
         raise c.WinError(error)
     app = None
     checks = 0
+    case_context = ""
 
     def require(ok, label):
         nonlocal checks
         if not ok:
-            raise RuntimeError(label)
+            raise RuntimeError(f"{case_context}: {label}" if case_context else label)
         checks += 1
 
     def send(hwnd, message, wp=0, lp=0):
@@ -121,7 +132,7 @@ def main():
         send(hwnd, 0xD, len(buf), c.addressof(buf))
         return buf.value
 
-    def find(class_name):
+    def find(class_name, owner_pid=None):
         matches = []
 
         @callback
@@ -130,7 +141,8 @@ def main():
             u.GetWindowThreadProcessId(hwnd, c.byref(pid))
             name = c.create_unicode_buffer(128)
             u.GetClassNameW(hwnd, name, len(name))
-            if pid.value == app.pid and name.value == class_name and u.IsWindowVisible(hwnd):
+            expected_pid = app.pid if owner_pid is None else owner_pid
+            if (expected_pid == -1 or pid.value == expected_pid) and name.value == class_name and u.IsWindowVisible(hwnd):
                 matches.append(hwnd)
             return True
 
@@ -151,7 +163,7 @@ def main():
             if result:
                 return result
             time.sleep(0.02)
-        raise RuntimeError("Timed out: " + label)
+        raise RuntimeError(f"Timed out: {case_context}: {label}" if case_context else "Timed out: " + label)
 
     def focus(window, control):
         target_thread = u.GetWindowThreadProcessId(window, None)
@@ -229,6 +241,245 @@ def main():
         require(u.PostMessageW(main_window, 0x111, 1190, 0), "queue search after application startup")
         search = wait(lambda: find("SearchWnd"), "search window")
         edit, run, results = (u.GetDlgItem(search, control) for control in (4101, 4102, 4103))
+        if args.scope_close_only:
+            routes = ("title-bar close", "dialog cancellation", "close button", "Escape")
+            completed = []
+
+            def close_via_queue(window, control, route):
+                # Sent WM_CLOSE bypasses WH_GETMESSAGE/IsDialogMessage and hid
+                # the original defect. Exercise the production message loop.
+                menu = u.GetSystemMenu(window, False)
+                require(menu and (u.GetMenuState(menu, 0xF060, 0) & 3) == 0,
+                        "native title-bar close is enabled")
+                if route == "close button":
+                    button = u.GetDlgItem(window, 2)
+                    require(button and u.IsWindowVisible(button) and u.IsWindowEnabled(button),
+                            "visible enabled cancellation button exists")
+                    require(u.PostMessageW(button, 0xF5, 0, 0), "queue cancellation button click")
+                elif route == "Escape":
+                    focus(window, control)
+                    require(u.PostMessageW(control, 0x100, 0x1B, 1), "queue Escape from a child control")
+                else:
+                    message, command = (0x112, 0xF060) if route == "title-bar close" else (0x111, 2)
+                    require(u.PostMessageW(window, message, command, 0), "queue " + route)
+                wait(lambda: not u.IsWindow(window), route, 3)
+
+            def assert_draft_unchanged(scopes):
+                require(send(u.GetDlgItem(scopes, 4150), 0x18B) == 0,
+                        "cancelled folder selection does not add a candidate")
+                require(not (workspace / "__pdf_note_workspace__/__settings__/search_groups.bin").exists(),
+                        "cancelled operation does not save a group")
+
+            for label in routes:
+                case_context = "scopes/" + label
+                send(u.GetDlgItem(search, 4158), 0xF5)
+                scopes = wait(lambda: find("PdfNoteSearchScopes"), "scope editor")
+                require(u.IsWindowEnabled(scopes), "scope editor is enabled")
+                require(not u.IsWindowEnabled(search), "scope editor disables its search owner")
+                close_via_queue(scopes, u.GetDlgItem(scopes, 4150), label)
+                require(u.IsWindowEnabled(search), "closing scope restores search")
+                completed.append("scopes/" + label)
+            for command, popup_class, control_id in ((4151, "LocalPathBrowserDlg", 102),
+                                                     (4155, "SimpleInputDlg", 101)):
+                send(u.GetDlgItem(search, 4158), 0xF5)
+                scopes = wait(lambda: find("PdfNoteSearchScopes"), "scope editor for popup cancellation")
+                for label in routes:
+                    case_context = popup_class + "/" + label
+                    require(u.PostMessageW(scopes, 0x111, command, 0), "open " + popup_class)
+                    popup = wait(lambda: find(popup_class), popup_class)
+                    require(u.GetWindow(popup, 4) == scopes, "popup has the scope window as native owner")
+                    if popup_class == "SimpleInputDlg":
+                        draft = c.create_unicode_buffer("cancelled group draft")
+                        send(u.GetDlgItem(popup, control_id), 0xC, 0, c.addressof(draft))
+                    close_via_queue(popup, u.GetDlgItem(popup, control_id), label)
+                    wait(lambda: u.IsWindow(scopes) and u.IsWindowEnabled(scopes), "popup restores scope owner", 3)
+                    require(not u.IsWindowEnabled(search), "search remains disabled until scope closes")
+                    assert_draft_unchanged(scopes)
+                    completed.append(popup_class + "/" + label)
+                # A close intent while a nested loop owns stack context must
+                # cancel that operation, then destroy scopes and restore search.
+                case_context = popup_class + "/deferred parent close"
+                require(u.PostMessageW(scopes, 0x111, command, 0), "reopen nested scope operation")
+                popup = wait(lambda: find(popup_class), "nested scope popup")
+                require(u.PostMessageW(scopes, 0x10, 0, 0), "close scope during nested operation")
+                wait(lambda: not u.IsWindow(scopes) and not u.IsWindow(popup), "deferred nested close", 5)
+                require(u.IsWindowEnabled(search), "nested close restores search")
+                require(not (workspace / "__pdf_note_workspace__/__settings__/search_groups.bin").exists(),
+                        "closing an unconfirmed operation does not save a group")
+                completed.append(popup_class + "/deferred parent close")
+            require(len(completed) == 14, "all 14 close cases completed")
+            case_context = "final preservation and exit"
+            for index in range(12):
+                require((session / f"source_{index:04}.txt").read_bytes() == b"needle preserved source\n",
+                        "closing auxiliary windows preserves original source")
+            (root / "close_cases.json").write_text(json.dumps(completed, indent=2), encoding="utf-8")
+            send(search, 0x10)
+            send(main_window, 0x10)
+            require(app.wait(timeout=10) == 0, "owned app exits normally")
+            print(f"Search scope close ({args.locale}) PASS: {checks} checks; native close, cancellation, button, Escape, nested close, owner restoration.", flush=True)
+            print("Search auxiliary close contract PASS: windows=3 routes=4 cases=14", flush=True)
+            return
+        if args.groups_only:
+            external = root / "external_資料"
+            deep = external
+            for index in range(18):
+                deep /= "level"
+            deep.mkdir(parents=True)
+            external_sources = {external / "root.txt": b"needle external\n",
+                                deep / "deep.txt": b"needle deep\n",
+                                external / "broken.pdf": b"not a PDF"}
+            for path, content in external_sources.items():
+                path.write_bytes(content)
+            group_path = workspace / "__pdf_note_workspace__/__settings__/search_groups.bin"
+            require(not group_path.exists(), "opening search does not save a group")
+            send(u.GetDlgItem(search, 4158), 0xF5)
+            scopes = wait(lambda: find("PdfNoteSearchScopes"), "scope editor")
+            require(not u.IsWindowEnabled(search) and u.IsWindowEnabled(main_window),
+                    "scope editor owns search while main remains usable")
+            require(u.PostMessageW(scopes, 0x111, 4151, 0), "open folder picker")
+            browser = wait(lambda: find("LocalPathBrowserDlg"), "local folder picker")
+            require(u.PostMessageW(browser, 0x111, 2, 0), "queue folder-selection cancel")
+            wait(lambda: not u.IsWindow(browser), "cancel folder selection")
+            require(not group_path.exists(), "canceling folder selection does not save settings")
+            require(u.PostMessageW(scopes, 0x111, 4151, 0), "reopen folder picker")
+            browser = wait(lambda: find("LocalPathBrowserDlg"), "reopened local folder picker")
+            send(browser, 0x111, 201)  # workspace -> owned fixture root
+            browser_list = u.GetDlgItem(browser, 102)
+            found_index = None
+            for index in range(send(browser_list, 0x18B)):
+                value = c.create_unicode_buffer(65536)
+                send(browser_list, 0x189, index, c.addressof(value))
+                if external.name in value.value:
+                    found_index = index
+                    break
+            require(found_index is not None, "owned external folder appears in picker")
+            send(browser_list, 0x186, found_index)
+            send(browser, 0x111, 102 | (2 << 16))
+            require(u.PostMessageW(browser, 0x111, 1, 0), "queue folder-selection accept")
+            folders = u.GetDlgItem(scopes, 4150)
+            wait(lambda: send(folders, 0x18B) == 1, "selected folder added")
+            require(send(folders, 0x187, 0) == 1 and not group_path.exists(),
+                    "candidate is enabled and remains unsaved")
+            require(send(folders, 0x193) > 600, "long source path can be scrolled horizontally")
+            require(send(u.GetDlgItem(search, 4113), 0xF0) == 1, "first added folder selects folder-only scope")
+            require(u.PostMessageW(scopes, 0x111, 4155, 0), "save a named group")
+            name_dialog = wait(lambda: find("SimpleInputDlg"), "group name")
+            require(u.PostMessageW(name_dialog, 0x111, 2, 0), "queue group-name cancel")
+            wait(lambda: not u.IsWindow(name_dialog), "cancel group naming")
+            require(not group_path.exists(), "canceling naming keeps the draft unsaved")
+            require(u.PostMessageW(scopes, 0x111, 4155, 0), "reopen group naming")
+            name_dialog = wait(lambda: find("SimpleInputDlg"), "reopened group name")
+            name = c.create_unicode_buffer("保持する検索_資料")
+            send(u.GetDlgItem(name_dialog, 101), 0xC, 0, c.addressof(name))
+            require(u.PostMessageW(name_dialog, 0x111, 1, 0), "queue group-name accept")
+            combo = u.GetDlgItem(scopes, 4153)
+            wait(lambda: group_path.exists() and send(combo, 0x146) == 1, "group saved explicitly")
+            require(u.IsWindowEnabled(scopes), "scope editor remains enabled after naming a group")
+            saved_group = group_path.read_bytes()
+            send(scopes, 0x111, 4152)
+            require(send(folders, 0x18B) == 0 and group_path.read_bytes() == saved_group,
+                    "draft removal does not change saved group")
+            send(combo, 0x14E, 0)
+            send(scopes, 0x111, 4154)
+            require(send(folders, 0x18B) == 1, "group reload restores folder")
+            send(folders, 0x114, 7)  # Show the distinguishing end of a long candidate path.
+            screenshot(scopes, root / f"search_scopes_{args.locale}.png")
+            send(u.GetDlgItem(scopes, 2), 0xF5)
+            require(not u.IsWindow(scopes), "Close button closes scope editor after saving/loading")
+            require(u.IsWindowEnabled(search), "closing scope editor restores search")
+            for control in (4132,):
+                send(u.GetDlgItem(search, control), 0xF1, 0)
+            query = c.create_unicode_buffer("needle")
+            send(edit, 0xC, 0, c.addressof(query))
+            send(search, 0x111, 4102)
+            continue_button = u.GetDlgItem(search, 4157)
+            wait(lambda: u.IsWindowVisible(continue_button), "deep scope confirmation")
+            require(not u.IsWindowEnabled(edit) and send(results, 0x18B) == 0,
+                    "confirmation pauses before searching content")
+            screenshot(search, root / f"search_confirmation_{args.locale}.png")
+            send(u.GetDlgItem(search, 4144), 0xF5)
+            require(u.IsWindowVisible(continue_button), "confirmation remains usable with folded conditions")
+            latency = []
+            for _ in range(15):
+                began = time.monotonic()
+                send(main_window, 0)
+                latency.append((time.monotonic() - began) * 1000)
+            require(max(latency) < 500, "main UI responds while confirmation waits")
+            send(continue_button, 0xF5)
+            wait(lambda: u.IsWindowEnabled(edit) and send(results, 0x18B) == 4, "external recursive search reports matches and unreadable PDF")
+            unreadable_index = note_index = None
+            for index in range(send(results, 0x18B)):
+                value = c.create_unicode_buffer(65536)
+                send(results, 0x189, index, c.addressof(value))
+                if "broken.pdf" in value.value:
+                    unreadable_index = index
+                if ".txt" in value.value:
+                    note_index = index
+            require(unreadable_index is not None and note_index is not None,
+                    "unreadable source is distinct from note matches")
+            send(results, 0x186, unreadable_index)
+            send(search, 0x111, 4103 | (2 << 16))
+            detail = wait(lambda: find("SilentDialogClass"), "unreadable-item details")
+            require(text(detail) == ("検索" if args.locale == "ja" else "Search"), "owned search error detail")
+            require(u.PostMessageW(detail, 0x10, 0, 0), "queue unreadable-detail close")
+            wait(lambda: not u.IsWindow(detail), "close unreadable-item details")
+            send(results, 0x186, note_index)
+            send(search, 0x111, 4103 | (2 << 16))
+            viewer = wait(lambda: find("PdfReadonlyViewerWindow", -1), "external result opens read-only viewer")
+            wait(lambda: ".txt" in text(viewer), "external note is displayed by viewer")
+            require(u.IsWindowEnabled(main_window), "read-only result leaves main usable")
+            send(viewer, 0x10)
+            wait(lambda: not u.IsWindow(viewer), "owned read-only viewer closes")
+            require(all(path.read_bytes() == content for path, content in external_sources.items()),
+                    "external originals unchanged")
+            require(set(path for path in external.rglob("*") if path.is_file()) == set(external_sources),
+                    "search creates no external metadata")
+            send(search, 0x10)
+            require(u.PostMessageW(main_window, 0x111, 1190, 0), "reopen search")
+            search = wait(lambda: find("SearchWnd"), "fresh search window")
+            send(u.GetDlgItem(search, 4158), 0xF5)
+            scopes = wait(lambda: find("PdfNoteSearchScopes"), "reopened scope editor")
+            combo, folders = u.GetDlgItem(scopes, 4153), u.GetDlgItem(scopes, 4150)
+            require(send(combo, 0x146) == 1 and send(folders, 0x18B) == 0,
+                    "saved group survives reopening; drafts are separate")
+            send(combo, 0x14E, 0)
+            send(scopes, 0x111, 4154)
+            require(send(folders, 0x18B) == 1, "saved group is reusable")
+            send(scopes, 0x10)
+            send(search, 0x10)
+            send(main_window, 0x10)
+            require(app.wait(timeout=10) == 0, "first owned app exits normally")
+            app.close()
+            os.environ["PDF_NOTE_SMALL_INSTANCE_SUFFIX"] = "_" + desktop_name
+            try:
+                app = DesktopApp(executable, app_dir, desktop_name)
+            finally:
+                os.environ.pop("PDF_NOTE_SMALL_INSTANCE_SUFFIX", None)
+            main_window = wait(lambda: find("PdfWorkspaceMainWnd"), "restart main window")
+            wait(ready, "restart startup")
+            require(u.PostMessageW(main_window, 0x111, 1190, 0), "restart search")
+            search = wait(lambda: find("SearchWnd"), "restart search window")
+            send(u.GetDlgItem(search, 4158), 0xF5)
+            scopes = wait(lambda: find("PdfNoteSearchScopes"), "restart scope editor")
+            combo = u.GetDlgItem(scopes, 4153)
+            require(send(combo, 0x146) == 1 and group_path.read_bytes() == saved_group,
+                    "group survives actual process restart")
+            send(combo, 0x14E, 0)
+            send(scopes, 0x111, 4156)
+            require(send(combo, 0x146) == 0 and group_path.read_bytes() != saved_group,
+                    "explicit delete persists")
+            require(any((workspace / "__pdf_note_workspace__/__escape__").glob("search_groups_*.bin")),
+                    "previous group data remains backed up")
+            send(scopes, 0x10)
+            send(search, 0x10)
+            send(main_window, 0x10)
+            require(app.wait(timeout=10) == 0, "restarted owned app exits normally")
+            require(all(path.read_bytes() == content for path, content in external_sources.items()),
+                    "all external sources remain unchanged after restart")
+            print(f"Search groups ({args.locale}) PASS: {checks} checks; picker, explicit save/reload/delete, "
+                  f"restart, deep-scope pause/continue, max_main_probe_ms={max(latency):.1f}, external originals unchanged.", flush=True)
+            print("Physical input, DPI and audible-silence checks were not performed.", flush=True)
+            return
         if args.presentation_only:
             details, pin = (u.GetDlgItem(search, control) for control in (4144, 4145))
             require(details and pin, "presentation controls exist")
@@ -251,7 +502,7 @@ def main():
             wait(lambda: u.IsWindowEnabled(edit) and send(results, 0x18B) == 13,
                  "small fixture search completes")
             send(results, 0x186, 3)
-            for width, height in ((760, 660), (620, 640)):
+            for width, height in ((760, 820), (620, 780), (620, 640)):
                 resize(width, height)
                 expanded = rect(results)
                 require(expanded.bottom > expanded.top, "expanded minimum layout retains results")
@@ -260,7 +511,7 @@ def main():
                 compact = rect(results)
                 require(compact.bottom - compact.top > expanded.bottom - expanded.top + 300,
                         "folding gives the result list substantially more space")
-                for item in (4110, 4111, 4112, 4119, 4130, 4131, 4132, 4140, 4141, 4142, 4143):
+                for item in (4110, 4111, 4112, 4113, 4119, 4130, 4131, 4132, 4140, 4141, 4142, 4143, 4158):
                     require(not u.IsWindowVisible(u.GetDlgItem(search, item)), "detail control is hidden")
                 require(all(u.IsWindowVisible(item) for item in (edit, run, results, details, pin)),
                         "query/run/results and restore/pin controls stay visible")
@@ -268,7 +519,7 @@ def main():
                         "query, hits and selection survive folding")
                 require(before == [send(u.GetDlgItem(search, item), 0xF0) for item in (4112, 4130, 4131, 4132)],
                         "hidden search conditions remain unchanged")
-                resize(width, 240)
+                resize(width, 300)
                 compact = rect(results)
                 require(compact.bottom - compact.top > 80, "compact window can be made short")
                 send(details, 0xF5)

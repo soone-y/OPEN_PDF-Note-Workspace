@@ -9,6 +9,7 @@ $exe = Join-Path $output 'page_rotation_tests.exe'
 & g++ -std=c++17 -O2 -Wall -Wextra -Werror -I (Join-Path $repoRoot 'src') `
     -I (Join-Path $repoRoot 'third_party/pdfium/include') `
     (Join-Path $repoRoot 'tests/unit/page_rotation_tests.cpp') `
+    (Join-Path $repoRoot 'src/readonly_viewer/annotation_text.cpp') `
     (Join-Path $repoRoot 'third_party/pdfium/lib/pdfium.dll.lib') -lgdi32 -lmsimg32 `
     -static-libgcc -static-libstdc++ -o $exe
 if ($LASTEXITCODE -ne 0) { throw 'Page rotation test compilation failed.' }

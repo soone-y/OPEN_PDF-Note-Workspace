@@ -114,6 +114,7 @@ struct WorkspaceConfig {
     bool restoreLastSession = true;
     bool noteRenderEnabled = true;
     bool clroAsciiOnly = false;
+    bool noteQuoteLazyContinuation = false;
     int noteBottomSpaceMode = 0;
     int noteBottomSpaceFixedDip = 32;
     int noteBottomSpaceFontPercent = 400;
@@ -183,6 +184,7 @@ struct WorkspaceConfig {
     // Keep the TextBox anchor fixed and wrap at the page edge. Disable only to
     // retain the legacy behavior that shifts a growing box left.
     bool textBoxAutoWrap = true;
+    bool textBoxVertical = false;
     // Line-like tools (Line / Arrow / Wave)
     // Default behavior: share style across these tools.
     bool lineToolsShareStyle = true;
@@ -254,6 +256,7 @@ struct WorkspaceConfig {
     bool quickPdfStandardTextAnnots = true;
     bool quickPdfMatchPdfPaneTextLayout = true;
     bool quickPdfKeepPageRotation = true;
+    bool quickPdfEmbedEditableData = true;
     int quickPdfTextColorMode = 0;
     COLORREF quickPdfTextColorBackground = RGB(255, 255, 255);
     bool quickNoteStripMarkup = false;

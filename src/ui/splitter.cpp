@@ -215,7 +215,10 @@ void CancelDrag(HWND hWnd) {
     s_hasPending = false;
     ClearDraggingFlags();
     KillTimer(hWnd, kSplitDragTimerId);
-    ReleaseCapture();
+    if (GetCapture() == hWnd) ReleaseCapture();
+    // Capture can be lost without a button-up. Repaint the last applied layout
+    // after clearing the drag state so any nested capture notification is inert.
+    RedrawLayoutTree(hWnd);
 }
 
 } // namespace ui

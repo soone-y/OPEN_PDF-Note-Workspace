@@ -2,6 +2,7 @@
 #include "workspace/workspace_config_io.h"
 #include "core/app_core.h"
 #include "core/localization.h"
+#include "core/identity_path_scope.h"
 #include "core/ui_prompts.h"
 #include "core/ui_notify.h"
 #include "ui/dialogs/pending_write_retry.h"
@@ -153,7 +154,13 @@ bool ValidateCreateFileSystemName(HWND owner,
 
 std::vector<std::wstring> NewSessionNameSuggestions() {
     std::vector<std::wstring> suggestions;
-    const int next = NextSessionNumberForSuggestions(g_sessions, ParseSessionNumberingMode(g_config.sessionNumberingMode));
+    const auto lecture = identity_path_scope::LocalPath(g_currentLecturePath);
+    std::vector<SessionEntry> siblings;
+    for (const auto& session : g_sessions) {
+        const auto path = identity_path_scope::LocalPath(session.path);
+        if (path && lecture && (*path == *lecture || path->parent_path() == *lecture)) siblings.push_back(session);
+    }
+    const int next = NextSessionNumberForSuggestions(siblings, ParseSessionNumberingMode(g_config.sessionNumberingMode));
     PushUniqueSuggestion(suggestions, std::to_wstring(next));
     PushUniqueSuggestion(suggestions, L"第" + std::to_wstring(next) + L"回");
     PushUniqueSuggestion(suggestions, L"第" + ToJapaneseNumeralForName(next) + L"回");
@@ -320,7 +327,7 @@ void ShowNewSessionDialog(HWND owner) {
         ShowSoftNotice(owner, ui.errSessionCreate, SoftNoticeKind::Error);
         return;
     }
-    ReloadSessionsAndSelect(g_currentLecturePath, name, true);
+    ReloadSessionsAndSelect(g_currentLecturePath, sessionPath.wstring(), true);
     ClearNoteEditorSilently(owner);
     RefreshStatusDisplay(owner);
 }
@@ -1809,7 +1816,7 @@ bool ImportDroppedDirectories(HWND hWnd, const std::vector<std::wstring>& paths,
             LoadSessions(g_currentLecturePath);
             SyncLeftPaneSelection();
             RefreshMainWindowUiState(hWnd);
-        } else ReloadSessionsAndSelect(parent.wstring(), last.filename().wstring(), true);
+        } else ReloadSessionsAndSelect(parent.wstring(), last.wstring(), true);
     }
     if (imported != plans.size()) {
         // Completed directories are retained and explicitly reported. The failed

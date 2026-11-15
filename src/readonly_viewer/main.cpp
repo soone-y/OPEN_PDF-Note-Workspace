@@ -4,6 +4,7 @@
 #include "core/json_string.h"
 #include "core/atomic_write.h"
 #include "core/localization.h"
+#include "resources/app_resource.h"
 
 #include <windows.h>
 #include <windowsx.h>
@@ -35,8 +36,10 @@
 #include <algorithm>
 
 #include "pdf_preview_panel.h"
+#include "pair_preview.h"
 #include "reader_chrome.h"
 #include "reader_document.h"
+#include "byte_dump.h"
 #include "pdf_search.h"
 #include "ui/window_corners.h"
 #include "ui/application_shortcuts.h"
@@ -142,6 +145,9 @@ WNDPROC g_originalEditProc = nullptr;
 int g_splitX = 280;
 bool g_isDraggingSplitter = false;
 bool g_leftPaneVisible = true;
+bool g_focusSearchVisible = false;
+HMENU g_tabSelectionMenu = nullptr;
+std::wstring g_viewerStatus;
 bool g_persistSessionEnabled = false;
 bool g_sessionStateLoaded = false;
 bool g_isRichEdit = false;
@@ -163,6 +169,9 @@ constexpr int kPathMarkFolderPersistentMenuId = 120;
 constexpr int kPathMarkFolderTemporaryMenuId = 121;
 constexpr int kLicensesMenuId = 122;
 constexpr int kShortcutReferenceMenuId = 123;
+constexpr int kBinaryButtonId = 124;
+constexpr int kFindTextMenuId = 125;
+constexpr int kToggleTopmostMenuId = 126;
 constexpr int kDetachedDiagramZoomInButtonId = 201;
 constexpr int kDetachedDiagramZoomOutButtonId = 202;
 constexpr int kDetachedDiagramResetButtonId = 203;
@@ -194,6 +203,7 @@ enum class ViewMode {
     Hex,
     Diagram,
     Pdf,
+    Binary, // Appended so existing view-position indexes keep their meanings.
 };
 
 std::vector<std::wstring> g_filePaths;
@@ -227,7 +237,7 @@ struct OpenTab {
     std::vector<int> jpLines;
     int totalLines = 1;
     bool persistent = false;
-    ReaderViewPosition readingPositions[5];
+    ReaderViewPosition readingPositions[6];
     reader_next::PdfViewState pdfPosition;
     textviewer::mermaid::DiagramViewState diagramPosition;
     std::vector<textviewer::mermaid::DiagramViewState> inlineDiagramPositions;
@@ -235,6 +245,10 @@ struct OpenTab {
     std::vector<InlineDiagram> diagrams;
     std::optional<textviewer::mermaid::DiagramModel> combinedDiagram;
 };
+bool IsClropPath(const std::wstring& path);
+bool CanChooseByteRange(const OpenTab& tab) {
+    return !tab.isPdf && !tab.loadError && tab.sourceSize > 0 && !IsClropPath(tab.path);
+}
 std::vector<OpenTab> g_tabs;
 std::vector<OpenTab> g_closedTabs;
 std::vector<HWND> g_tabTransferTargets;
@@ -296,17 +310,21 @@ void BuildViewerMenu(HWND hwnd) {
     using ShortcutAction = application_shortcuts::Action;
     AppendMenuW(file, MF_STRING, kOpenFileButtonId, shortcutText(L"readonly.menu.open_file", ShortcutAction::OpenFile).c_str());
     AppendMenuW(file, MF_STRING, kOpenFolderButtonId, localization::Text(L"readonly.menu.open_folder").c_str());
+    AppendMenuW(file, MF_STRING, reader_next::kFolderBackId, localization::Text(L"readonly.menu.folder_back").c_str());
+    AppendMenuW(file, MF_STRING, reader_next::kFolderUpId, localization::Text(L"readonly.menu.folder_up").c_str());
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(file, MF_STRING, kTabMenuClose, shortcutText(L"readonly.tab.close", ShortcutAction::CloseFile).c_str());
     AppendMenuW(file, MF_STRING, kTabMenuCloseAll, shortcutText(L"readonly.menu.close_all_tabs", ShortcutAction::CloseAll).c_str());
+    AppendMenuW(file, MF_STRING, kTabMenuReopenClosed, localization::Text(L"readonly.tab.reopen_closed").c_str());
     AppendMenuW(file, MF_STRING | MF_GRAYED, readonly_viewer::kCmdPdfExportAnnotatedPdf, shortcutText(L"shortcut.action.export_pdf", ShortcutAction::Export).c_str());
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(file, MF_STRING, SC_CLOSE, localization::Text(L"readonly.menu.exit").c_str());
-    AppendMenuW(view, MF_STRING, kToggleLeftPaneButtonId, localization::Text(L"readonly.menu.toggle_list_pane").c_str());
+    AppendMenuW(view, MF_STRING, kToggleLeftPaneButtonId, localization::Text(L"readonly.menu.focus_mode").c_str());
     AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(view, MF_STRING, kDecoratedButtonId, localization::Text(L"readonly.menu.decorated_view").c_str());
     AppendMenuW(view, MF_STRING, kRawButtonId, localization::Text(L"readonly.menu.raw_shortcut").c_str());
     AppendMenuW(view, MF_STRING, kHexButtonId, localization::Text(L"readonly.menu.hex_shortcut").c_str());
+    AppendMenuW(view, MF_STRING, kBinaryButtonId, localization::Text(L"reader_next.binary").c_str());
     AppendMenuW(view, MF_STRING, kDiagramButtonId, localization::Text(L"readonly.menu.diagram_list").c_str());
     AppendMenuW(view, MF_STRING, kPdfRangeButtonId, localization::Text(L"readonly.menu.pdf_page_range").c_str());
     AppendMenuW(view, MF_STRING | MF_GRAYED, readonly_viewer::kCmdPdfJumpPage, shortcutText(L"shortcut.action.jump", ShortcutAction::JumpPage).c_str());
@@ -321,6 +339,14 @@ void BuildViewerMenu(HWND hwnd) {
                 shortcutText(L"readonly.pdf.menu.rotate_right", ShortcutAction::RotateRight).c_str());
     AppendMenuW(view, MF_STRING | MF_GRAYED, readonly_viewer::kCmdPdfRotateReset,
                 shortcutText(L"readonly.pdf.menu.rotate_reset", ShortcutAction::ResetRotation).c_str());
+    AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(view, MF_STRING, reader_next::kZoomInId, localization::Text(L"readonly.pdf.menu.zoom_in").c_str());
+    AppendMenuW(view, MF_STRING, reader_next::kZoomOutId, localization::Text(L"readonly.pdf.menu.zoom_out").c_str());
+    AppendMenuW(view, MF_STRING, reader_next::kZoomResetId, localization::Text(L"readonly.pdf.menu.zoom_reset").c_str());
+    AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(view, MF_STRING, kFindTextMenuId, localization::Text(L"readonly.menu.find_text").c_str());
+    AppendMenuW(view, MF_STRING, reader_next::kFindNextId, localization::Text(L"readonly.menu.find_next").c_str());
+    AppendMenuW(view, MF_STRING, reader_next::kFindPreviousId, localization::Text(L"readonly.menu.find_previous").c_str());
     AppendMenuW(paths, MF_STRING, kPathMarkTabPersistentMenuId, localization::Text(L"readonly.menu.persist_current_tab").c_str());
     AppendMenuW(paths, MF_STRING, kPathMarkTabTemporaryMenuId, localization::Text(L"readonly.menu.mark_current_tab_temporary").c_str());
     AppendMenuW(paths, MF_SEPARATOR, 0, nullptr);
@@ -333,7 +359,37 @@ void BuildViewerMenu(HWND hwnd) {
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(paths), localization::Text(L"readonly.menu.path_management").c_str());
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(settings), localization::Text(L"readonly.menu.settings").c_str());
     AppendMenuW(bar, MF_STRING, kLicensesMenuId, localization::Text(L"reader_next.licenses").c_str());
+    HMENU tabs = CreatePopupMenu();
+    if (tabs) {
+        MENUINFO info{};
+        info.cbSize = sizeof(info);
+        info.fMask = MIM_STYLE;
+        info.dwStyle = MNS_NOTIFYBYPOS;
+        if (SetMenuInfo(tabs, &info) &&
+            AppendMenuW(tabs, MF_STRING | MF_GRAYED, 0, localization::Text(L"reader_next.empty_detail").c_str()) &&
+            AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(tabs), localization::Text(L"readonly.tab.list").c_str()))
+            g_tabSelectionMenu = tabs;
+        else DestroyMenu(tabs);
+    }
+    AppendMenuW(bar, MF_STRING | MFT_RIGHTJUSTIFY, kToggleTopmostMenuId,
+                localization::Text(L"readonly.menu.pin_topmost").c_str());
     SetMenu(hwnd, bar);
+}
+
+void ToggleViewerTopmost(HWND hwnd) {
+    const bool pinned = (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
+    if (!SetWindowPos(hwnd, pinned ? HWND_NOTOPMOST : HWND_TOPMOST, 0, 0, 0, 0,
+                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER)) {
+        SetViewerStatus(hwnd, localization::Text(L"readonly.status.topmost_failed"));
+        return;
+    }
+
+    std::wstring label = localization::Text(pinned ? L"readonly.menu.pin_topmost" : L"readonly.menu.unpin_topmost");
+    MENUITEMINFOW item{};
+    item.cbSize = sizeof(item);
+    item.fMask = MIIM_STRING;
+    item.dwTypeData = label.data();
+    if (SetMenuItemInfoW(GetMenu(hwnd), kToggleTopmostMenuId, FALSE, &item)) DrawMenuBar(hwnd);
 }
 
 bool HasActivePdfPreview() {
@@ -347,6 +403,23 @@ void UpdatePdfViewMenu(HWND hwnd) {
     HMENU bar = GetMenu(hwnd);
     HMENU view = bar ? GetSubMenu(bar, 1) : nullptr;
     if (!view) return;
+    const bool byte_range = g_currentTab >= 0 && g_currentTab < static_cast<int>(g_tabs.size()) &&
+        CanChooseByteRange(g_tabs[g_currentTab]);
+    ModifyMenuW(view, kPdfRangeButtonId, MF_BYCOMMAND | MF_STRING |
+        (HasActivePdfPreview() || byte_range ? MF_ENABLED : MF_GRAYED), kPdfRangeButtonId,
+        localization::Text(byte_range ? L"readonly.range.menu" : L"readonly.menu.pdf_page_range").c_str());
+    CheckMenuItem(view, kToggleLeftPaneButtonId, MF_BYCOMMAND | (g_leftPaneVisible ? MF_UNCHECKED : MF_CHECKED));
+    for (UINT id : {static_cast<UINT>(kDecoratedButtonId), static_cast<UINT>(kRawButtonId),
+                    static_cast<UINT>(kHexButtonId), static_cast<UINT>(kBinaryButtonId), static_cast<UINT>(kDiagramButtonId),
+                    reader_next::kZoomInId, reader_next::kZoomOutId, reader_next::kZoomResetId})
+        EnableMenuItem(view, id, MF_BYCOMMAND | (IsWindowEnabled(GetDlgItem(hwnd, id)) ? MF_ENABLED : MF_GRAYED));
+    const bool search = IsWindowEnabled(GetDlgItem(hwnd, reader_next::kSearchId));
+    for (UINT id : {static_cast<UINT>(kFindTextMenuId), reader_next::kFindNextId, reader_next::kFindPreviousId})
+        EnableMenuItem(view, id, MF_BYCOMMAND | (search ? MF_ENABLED : MF_GRAYED));
+    HMENU file = GetSubMenu(bar, 0);
+    for (UINT id : {reader_next::kFolderBackId, reader_next::kFolderUpId})
+        EnableMenuItem(file, id, MF_BYCOMMAND | (IsWindowEnabled(GetDlgItem(hwnd, id)) ? MF_ENABLED : MF_GRAYED));
+    EnableMenuItem(file, kTabMenuReopenClosed, MF_BYCOMMAND | (g_closedTabs.empty() ? MF_GRAYED : MF_ENABLED));
     for (UINT command : {readonly_viewer::kCmdPdfRotateLeft, readonly_viewer::kCmdPdfRotateRight,
                          readonly_viewer::kCmdPdfRotateReset, readonly_viewer::kCmdPdfJumpPage, readonly_viewer::kCmdPdfFitPage, readonly_viewer::kCmdPdfToggleAnnots}) {
         const bool enabled = HasActivePdfPreview() && (command != readonly_viewer::kCmdPdfRotateReset ||
@@ -455,7 +528,7 @@ LRESULT CALLBACK TabProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             AppendMenuW(menu, MF_STRING, kTabMenuClose, localization::Text(L"readonly.tab.close").c_str());
             AppendMenuW(menu, MF_STRING, kTabMenuCloseOthers, localization::Text(L"readonly.tab.close_others").c_str());
             AppendMenuW(menu, MF_STRING, kTabMenuCloseToRight, localization::Text(L"readonly.tab.close_to_right").c_str());
-            if (g_tabs[index].isPartialText) AppendMenuW(menu, MF_STRING, kTabMenuChangeRange, localization::Text(L"readonly.tab.change_range").c_str());
+            if (CanChooseByteRange(g_tabs[index])) AppendMenuW(menu, MF_STRING, kTabMenuChangeRange, localization::Text(L"readonly.tab.change_range").c_str());
             AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
             AppendMenuW(menu, index > 0 ? MF_STRING : MF_STRING | MF_GRAYED,
                         kTabMenuMoveLeft, localization::Text(L"readonly.tab.move_left").c_str());
@@ -568,36 +641,17 @@ struct LoadFileResult {
 };
 
 constexpr uintmax_t kDirectTextLoadBytes = 50ull * 1024ull * 1024ull;
-constexpr uintmax_t kMaximumRangeLoadBytes = 256ull * 1024ull * 1024ull;
+constexpr uintmax_t kMaximumRangeLoadBytes = readonly_viewer::file_range::kMaximumBytes;
 
-std::wstring BuildHexText(const std::vector<unsigned char>& bytes) {
-    std::wstringstream wss;
-    wss << localization::Text(L"readonly.hex.preview_heading");
-
-    const size_t displaySize = std::min<size_t>(bytes.size(), 65536);
-    for (size_t i = 0; i < displaySize; i += 16) {
-        wss << std::hex << std::setw(8) << std::setfill(L'0') << i << L"  ";
-        for (size_t j = 0; j < 16; ++j) {
-            if (i + j < displaySize) {
-                wss << std::hex << std::setw(2) << std::setfill(L'0') << static_cast<int>(bytes[i + j]) << L" ";
-            } else {
-                wss << L"   ";
-            }
-            if (j == 7) wss << L" ";
-        }
-
-        wss << L" |";
-        for (size_t j = 0; j < 16 && i + j < displaySize; ++j) {
-            const unsigned char c = bytes[i + j];
-            wss << ((c >= 32 && c <= 126) ? static_cast<wchar_t>(c) : L'.');
-        }
-        wss << L"|\n";
+std::wstring BuildByteText(const std::vector<unsigned char>& bytes, uintmax_t base, bool binary) {
+    namespace dump = readonly_viewer::byte_dump;
+    std::wstring text = localization::Text(binary ? L"readonly.binary.preview_heading" : L"readonly.hex.preview_heading");
+    text += dump::Rows(bytes, base, binary ? dump::Format::Binary : dump::Format::Hex);
+    if (bytes.size() > dump::kMaximumPreviewBytes) {
+        text += localization::Format(L"readonly.hex.remaining", {
+            {L"BYTES", std::to_wstring(bytes.size() - dump::kMaximumPreviewBytes)}});
     }
-
-    if (bytes.size() > displaySize) {
-        wss << std::dec << L"\n... (truncated " << (bytes.size() - displaySize) << L" bytes) ...\n";
-    }
-    return wss.str();
+    return text;
 }
 
 
@@ -666,7 +720,7 @@ std::wstring DecodeTextBytes(const std::vector<unsigned char>& bytes) {
         {L"DETAIL", localization::Text(text_encoding::ErrorTextId(encodingCode))}});
 }
 
-LoadFileResult LoadTextFile(const std::wstring& path, const std::optional<ByteRange>& requested_range = std::nullopt) {
+[[nodiscard]] LoadFileResult LoadTextFile(const std::wstring& path, const std::optional<ByteRange>& requested_range = std::nullopt) try {
     if (IsPdfPath(path)) {
         LoadFileResult res;
         res.isBinary = true;
@@ -692,9 +746,9 @@ LoadFileResult LoadTextFile(const std::wstring& path, const std::optional<ByteRa
     uintmax_t read_start = 0;
     uintmax_t read_end = size;
     if (requested_range) {
-        read_start = std::min(requested_range->start, size);
-        read_end = std::min(std::max(requested_range->end, read_start), size);
-        if (read_end - read_start > kMaximumRangeLoadBytes) {
+        read_start = requested_range->start;
+        read_end = requested_range->end;
+        if (read_end <= read_start || !readonly_viewer::file_range::Make(size, read_start, read_end - read_start)) {
             result.text = localization::Text(L"readonly.error.range_too_large");
             result.hasError = true;
             return result;
@@ -708,15 +762,30 @@ LoadFileResult LoadTextFile(const std::wstring& path, const std::optional<ByteRa
         return result;
     }
 
-    if (read_start > 0) {
-        file.seekg(static_cast<std::streamoff>(read_start));
-        uintmax_t skipped = 0;
-        char character = 0;
-        while (skipped < 64 * 1024 && file.get(character)) {
-            ++skipped;
-            if (character == '\n') break;
-        }
-        read_start += skipped; // Begin at the next full line without allocating an arbitrarily long line.
+    // Probe only a bounded prefix, so an ASCII-only slice of a binary stays binary.
+    std::vector<unsigned char> probe(static_cast<size_t>(std::min<uintmax_t>(size, 8192)));
+    if (!probe.empty()) file.read(reinterpret_cast<char*>(probe.data()), static_cast<std::streamsize>(probe.size()));
+    if (static_cast<size_t>(file.gcount()) != probe.size() || file.bad()) {
+        result.text = localization::Text(L"readonly.error.read_failed");
+        result.hasError = true;
+        return result;
+    }
+    const bool source_binary = IsLikelyBinary(probe);
+    if (!requested_range && source_binary && size > readonly_viewer::file_range::kDefaultBytes) {
+        result.requires_range_selection = true;
+        return result;
+    }
+    if (read_start > static_cast<uintmax_t>(std::numeric_limits<std::streamoff>::max())) {
+        result.text = localization::Text(L"readonly.error.read_failed");
+        result.hasError = true;
+        return result;
+    }
+    file.clear();
+    file.seekg(static_cast<std::streamoff>(read_start));
+    if (!file) {
+        result.text = localization::Text(L"readonly.error.read_failed");
+        result.hasError = true;
+        return result;
     }
     const uintmax_t requested_bytes = read_end > read_start ? read_end - read_start : 0;
     result.bytes.resize(static_cast<size_t>(requested_bytes));
@@ -735,26 +804,32 @@ LoadFileResult LoadTextFile(const std::wstring& path, const std::optional<ByteRa
         total_read += read_count;
         if (read_count != chunk) break;
     }
-    result.bytes.resize(total_read);
-    if (file.bad()) {
+    if (file.bad() || total_read != result.bytes.size()) {
         result.bytes.clear();
         result.text = localization::Text(L"readonly.error.read_failed");
         result.hasError = true;
         return result;
     }
-    result.isBinary = IsLikelyBinary(result.bytes);
+    result.isBinary = source_binary || IsLikelyBinary(result.bytes);
     if (result.isBinary) {
         return result;
     }
     result.text = DecodeTextBytes(result.bytes);
     return result;
+} catch (const std::exception&) {
+    LoadFileResult result;
+    result.hasError = true;
+    result.text = localization::Text(L"readonly.error.read_failed");
+    return result;
 }
 
+// The modal dialog owns its draft range. No I/O until confirmation; cancellation
+// never publishes the draft. The caller keeps the old tab until a complete read.
 struct RangeDialogState {
     uintmax_t file_size = 0;
-    int start = 0;
-    int end = 1;
     bool accepted = false;
+    bool updating = false;
+    bool valid = false;
     ByteRange selected{};
 };
 
@@ -765,41 +840,99 @@ constexpr int kRangeWarningId = 604;
 constexpr int kRangeConfirmId = 605;
 constexpr int kRangeCancelId = 606;
 constexpr int kRangeVisualBarId = 607;
+constexpr int kRangeOffsetId = 608;
+constexpr int kRangeCountId = 609;
+constexpr int kRangePreviousId = 610;
+constexpr int kRangeNextId = 611;
 constexpr wchar_t kRangeDialogClass[] = L"PdfNoteLargeTextRangeDialog";
 
+void WriteRangeFields(HWND hwnd, RangeDialogState& state) {
+    state.updating = true;
+    SetWindowTextW(GetDlgItem(hwnd, kRangeOffsetId), std::to_wstring(state.selected.start).c_str());
+    SetWindowTextW(GetDlgItem(hwnd, kRangeCountId), std::to_wstring(state.selected.end - state.selected.start).c_str());
+    state.updating = false;
+}
+
 void UpdateRangeDialog(HWND hwnd, RangeDialogState& state) {
-    state.start = std::clamp(state.start, 0, 999);
-    state.end = std::clamp(state.end, state.start + 1, 1000);
-    const uintmax_t start = state.file_size * static_cast<uintmax_t>(state.start) / 1000;
-    const uintmax_t end = state.file_size * static_cast<uintmax_t>(state.end) / 1000;
-    const uintmax_t bytes = end - start;
-    const uintmax_t megabytes = (bytes + 1024 * 1024 - 1) / (1024 * 1024);
-    const uintmax_t estimated_characters = bytes / 2;
+    namespace range = readonly_viewer::file_range;
+    wchar_t start_text[34]{}, count_text[34]{};
+    GetDlgItemTextW(hwnd, kRangeOffsetId, start_text, 34);
+    GetDlgItemTextW(hwnd, kRangeCountId, count_text, 34);
+    const auto start = range::ParseBytes(start_text), count = range::ParseBytes(count_text);
+    const bool in_file = start && count && *count && *start < state.file_size && *count <= state.file_size - *start;
+    const uintmax_t bytes = in_file ? *count : 0;
+    if (in_file) state.selected = {*start, *start + *count};
     MEMORYSTATUSEX memory_status{};
     memory_status.dwLength = sizeof(memory_status);
-    const uintmax_t available_memory = GlobalMemoryStatusEx(&memory_status) ? memory_status.ullAvailPhys : 0;
-    const uintmax_t estimated_working_set = bytes * 3;
+    const uintmax_t available = GlobalMemoryStatusEx(&memory_status) ? memory_status.ullAvailPhys : 0;
+    // Check the hard cap before multiplying untrusted input.
+    const bool within_cap = in_file && bytes <= kMaximumRangeLoadBytes;
+    const bool enough_memory = within_cap && (available == 0 || bytes * 3 <= available / 2);
+    state.valid = enough_memory;
+    std::wstring warning;
+    if (!in_file) warning = localization::Text(L"readonly.range.invalid_bytes");
+    else if (!within_cap) warning = localization::Text(L"readonly.range.too_large");
+    else if (!enough_memory) warning = localization::Text(L"readonly.range.memory_critical");
+    else if (available > 0 && bytes * 3 > available / 4) warning = localization::Text(L"readonly.range.memory_low");
+    else if (bytes > 128ull * 1024 * 1024) warning = localization::Text(L"readonly.range.memory_heavy");
+    else if (bytes > 32ull * 1024 * 1024) warning = localization::Text(L"readonly.range.memory_slow");
+    else warning = localization::Text(L"readonly.range.memory_light");
+    SetWindowTextW(GetDlgItem(hwnd, kRangeWarningId), warning.c_str());
+    EnableWindow(GetDlgItem(hwnd, kRangeConfirmId), state.valid);
+    EnableWindow(GetDlgItem(hwnd, kRangePreviousId), state.valid && state.selected.start > 0);
+    EnableWindow(GetDlgItem(hwnd, kRangeNextId), state.valid && state.selected.end < state.file_size);
+    if (in_file) {
+        SendDlgItemMessageW(hwnd, kRangeStartSliderId, TBM_SETPOS, TRUE, range::PositionOf(state.file_size, state.selected.start));
+        SendDlgItemMessageW(hwnd, kRangeEndSliderId, TBM_SETPOS, TRUE, range::PositionOf(state.file_size, state.selected.end));
+    }
     std::wstring range_bar = L"0%  [";
     for (int part = 0; part < 40; ++part) {
-        const int position = part * 1000 / 40;
-        range_bar += position >= state.start && position < state.end ? L"■" : L"─";
+        const uintmax_t left = range::OffsetAt(state.file_size, part * 25);
+        const uintmax_t right = range::OffsetAt(state.file_size, (part + 1) * 25);
+        range_bar += in_file && state.selected.start < right && state.selected.end > left ? L"■" : L"─";
     }
     range_bar += L"]  100%";
     SetWindowTextW(GetDlgItem(hwnd, kRangeVisualBarId), range_bar.c_str());
-    std::wstring summary = localization::Format(L"readonly.range.summary", {{L"START", std::to_wstring(state.start / 10)}, {L"END", std::to_wstring(state.end / 10)}, {L"MB", std::to_wstring(megabytes)}, {L"CHARS", std::to_wstring(estimated_characters)}});
+    const std::wstring summary = in_file ? localization::Format(L"readonly.range.byte_summary", {
+        {L"START", std::to_wstring(state.selected.start)}, {L"END", std::to_wstring(state.selected.end)},
+        {L"BYTES", std::to_wstring(bytes)}, {L"TOTAL", std::to_wstring(state.file_size)}}) : L"";
     SetWindowTextW(GetDlgItem(hwnd, kRangeSummaryId), summary.c_str());
-    std::wstring warning;
-    if (bytes > kMaximumRangeLoadBytes) warning = localization::Text(L"readonly.range.too_large");
-    else if (available_memory > 0 && estimated_working_set > available_memory / 2)
-        warning = localization::Text(L"readonly.range.memory_critical");
-    else if (available_memory > 0 && estimated_working_set > available_memory / 4)
-        warning = localization::Text(L"readonly.range.memory_low");
-    else if (bytes > 128ull * 1024ull * 1024ull) warning = localization::Text(L"readonly.range.memory_heavy");
-    else if (bytes > 32ull * 1024ull * 1024ull) warning = localization::Text(L"readonly.range.memory_slow");
-    else warning = localization::Text(L"readonly.range.memory_light");
-    SetWindowTextW(GetDlgItem(hwnd, kRangeWarningId), warning.c_str());
-    EnableWindow(GetDlgItem(hwnd, kRangeConfirmId), bytes <= kMaximumRangeLoadBytes &&
-                 (available_memory == 0 || estimated_working_set <= available_memory / 2));
+}
+
+LRESULT CALLBACK RangeByteEditProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam,
+                                   UINT_PTR, DWORD_PTR) {
+    // Suppress native edit beeps on rejected input and overlong numeric pastes.
+    DWORD first = 0, last = 0;
+    if (message == WM_CHAR || message == WM_PASTE || (message == WM_KEYDOWN && wParam == VK_DELETE)) {
+        SendMessageW(hwnd, EM_GETSEL, reinterpret_cast<WPARAM>(&first), reinterpret_cast<LPARAM>(&last));
+        const int length = GetWindowTextLengthW(hwnd);
+        if (message == WM_CHAR) {
+            if (wParam == 1) { SendMessageW(hwnd, EM_SETSEL, 0, -1); return 0; }
+            if ((wParam == 3 || wParam == 24) && first == last) return 0;
+            if (wParam == 26 && !SendMessageW(hwnd, EM_CANUNDO, 0, 0)) return 0;
+            if (wParam < 32 && wParam != 1 && wParam != 3 && wParam != 8 && wParam != 22 && wParam != 24 && wParam != 26) return 0;
+            if (wParam == 8 && first == 0 && last == 0) return 0;
+            if (wParam >= 32 && length >= 32 && first == last) return 0;
+        }
+        if (message == WM_KEYDOWN && first == last && last >= static_cast<DWORD>(length)) return 0;
+        if (message == WM_PASTE) {
+            if (!OpenClipboard(hwnd)) return 0;
+            HANDLE data = GetClipboardData(CF_UNICODETEXT);
+            const auto* value = data ? static_cast<const wchar_t*>(GlobalLock(data)) : nullptr;
+            size_t count = 0;
+            const size_t capacity = data ? GlobalSize(data) / sizeof(wchar_t) : 0;
+            if (value) while (count < std::min<size_t>(capacity, 33) && value[count]) ++count;
+            const bool fits = value && count < capacity && count <= 32 &&
+                static_cast<size_t>(length) - (last - first) + count <= 32;
+            wchar_t pasted[33]{};
+            if (fits) std::copy_n(value, count, pasted);
+            if (value) GlobalUnlock(data);
+            CloseClipboard();
+            if (fits) SendMessageW(hwnd, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(pasted));
+            return 0;
+        }
+    }
+    return DefSubclassProc(hwnd, message, wParam, lParam);
 }
 
 LRESULT CALLBACK LargeTextRangeDialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -810,57 +943,88 @@ LRESULT CALLBACK LargeTextRangeDialogProc(HWND hwnd, UINT message, WPARAM wParam
     }
     if (!state) return DefWindowProcW(hwnd, message, wParam, lParam);
     if (message == WM_CREATE) {
+        (void)ui::ApplyAuxiliaryWindowCorners(hwnd);
         const HINSTANCE instance = GetModuleHandleW(nullptr);
-        CreateWindowExW(0, L"STATIC", localization::Text(L"readonly.range.large_text_help").c_str(),
-                        WS_CHILD | WS_VISIBLE, 16, 16, 500, 22, hwnd, nullptr, instance, nullptr);
-        CreateWindowExW(0, L"STATIC", localization::Text(L"readonly.range.selection_label").c_str(), WS_CHILD | WS_VISIBLE, 16, 44, 500, 20, hwnd, nullptr, instance, nullptr);
-        CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE, 16, 64, 500, 22, hwnd, reinterpret_cast<HMENU>(kRangeVisualBarId), instance, nullptr);
-        CreateWindowExW(0, L"STATIC", localization::Text(L"readonly.range.start_handle").c_str(), WS_CHILD | WS_VISIBLE, 16, 92, 90, 20, hwnd, nullptr, instance, nullptr);
-        HWND start = CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_AUTOTICKS,
-                                     110, 86, 400, 32, hwnd, reinterpret_cast<HMENU>(kRangeStartSliderId), instance, nullptr);
-        CreateWindowExW(0, L"STATIC", localization::Text(L"readonly.range.end_handle").c_str(), WS_CHILD | WS_VISIBLE, 16, 132, 90, 20, hwnd, nullptr, instance, nullptr);
-        HWND end = CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_AUTOTICKS,
-                                   110, 126, 400, 32, hwnd, reinterpret_cast<HMENU>(kRangeEndSliderId), instance, nullptr);
-        for (HWND slider : {start, end}) { SendMessageW(slider, TBM_SETRANGE, TRUE, MAKELPARAM(0, 1000)); SendMessageW(slider, TBM_SETTICFREQ, 100, 0); }
-        SendMessageW(start, TBM_SETPOS, TRUE, state->start);
-        SendMessageW(end, TBM_SETPOS, TRUE, state->end);
-        CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE, 16, 170, 500, 42, hwnd, reinterpret_cast<HMENU>(kRangeSummaryId), instance, nullptr);
-        CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE, 16, 218, 500, 36, hwnd, reinterpret_cast<HMENU>(kRangeWarningId), instance, nullptr);
-        CreateWindowExW(0, L"BUTTON", localization::Text(L"readonly.range.open").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-                        284, 264, 130, 28, hwnd, reinterpret_cast<HMENU>(kRangeConfirmId), instance, nullptr);
-        CreateWindowExW(0, L"BUTTON", localization::Text(L"readonly.common.cancel").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                        424, 264, 90, 28, hwnd, reinterpret_cast<HMENU>(kRangeCancelId), instance, nullptr);
+        const auto px = [hwnd](int value) { return reader_next::Px(hwnd, value); };
+        const auto control = [&](const wchar_t* cls, const std::wstring& label, DWORD style,
+                                 int x, int y, int w, int h, int id = 0) {
+            HWND child = CreateWindowExW(0, cls, label.c_str(), WS_CHILD | WS_VISIBLE | style,
+                px(x), px(y), px(w), px(h), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance, nullptr);
+            SendMessageW(child, WM_SETFONT, reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)), FALSE);
+            return child;
+        };
+        control(L"STATIC", localization::Text(L"readonly.range.large_file_help"), 0, 16, 16, 600, 44);
+        control(L"STATIC", localization::Text(L"readonly.range.selection_label"), 0, 16, 64, 600, 20);
+        control(L"STATIC", L"", 0, 16, 88, 600, 22, kRangeVisualBarId);
+        control(L"STATIC", localization::Text(L"readonly.range.start_handle"), 0, 16, 118, 100, 20);
+        HWND start = control(TRACKBAR_CLASSW, L"", WS_TABSTOP | TBS_AUTOTICKS, 120, 112, 490, 32, kRangeStartSliderId);
+        control(L"STATIC", localization::Text(L"readonly.range.end_handle"), 0, 16, 158, 100, 20);
+        HWND end = control(TRACKBAR_CLASSW, L"", WS_TABSTOP | TBS_AUTOTICKS, 120, 152, 490, 32, kRangeEndSliderId);
+        for (HWND slider : {start, end}) {
+            SendMessageW(slider, TBM_SETRANGE, TRUE, MAKELPARAM(0, 1000));
+            SendMessageW(slider, TBM_SETTICFREQ, 100, 0);
+        }
+        control(L"STATIC", localization::Text(L"readonly.range.byte_offset"), 0, 16, 196, 190, 22);
+        control(L"STATIC", localization::Text(L"readonly.range.byte_count"), 0, 326, 196, 270, 22);
+        HWND offset = control(L"EDIT", L"", WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, 16, 220, 290, 26, kRangeOffsetId);
+        HWND count = control(L"EDIT", L"", WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, 326, 220, 290, 26, kRangeCountId);
+        for (HWND edit : {offset, count}) {
+            SendMessageW(edit, EM_SETLIMITTEXT, 32, 0);
+            if (!SetWindowSubclass(edit, RangeByteEditProc, 1, 0)) return -1;
+        }
+        control(L"BUTTON", localization::Text(L"readonly.range.previous"), WS_TABSTOP, 16, 258, 145, 28, kRangePreviousId);
+        control(L"BUTTON", localization::Text(L"readonly.range.next"), WS_TABSTOP, 171, 258, 145, 28, kRangeNextId);
+        control(L"STATIC", L"", 0, 16, 300, 600, 44, kRangeSummaryId);
+        control(L"STATIC", L"", 0, 16, 350, 600, 40, kRangeWarningId);
+        control(L"BUTTON", localization::Text(L"readonly.range.open"), WS_TABSTOP | BS_DEFPUSHBUTTON, 356, 400, 150, 30, kRangeConfirmId);
+        control(L"BUTTON", localization::Text(L"readonly.common.cancel"), WS_TABSTOP, 516, 400, 100, 30, kRangeCancelId);
+        WriteRangeFields(hwnd, *state);
         UpdateRangeDialog(hwnd, *state);
         return 0;
     }
     if (message == WM_HSCROLL) {
-        const HWND slider = reinterpret_cast<HWND>(lParam);
-        if (GetDlgCtrlID(slider) == kRangeStartSliderId) state->start = static_cast<int>(SendMessageW(slider, TBM_GETPOS, 0, 0));
-        if (GetDlgCtrlID(slider) == kRangeEndSliderId) state->end = static_cast<int>(SendMessageW(slider, TBM_GETPOS, 0, 0));
-        if (state->start >= state->end) {
-            if (GetDlgCtrlID(slider) == kRangeStartSliderId) state->end = std::min(1000, state->start + 1);
-            else state->start = std::max(0, state->end - 1);
-            SendMessageW(GetDlgItem(hwnd, kRangeStartSliderId), TBM_SETPOS, TRUE, state->start);
-            SendMessageW(GetDlgItem(hwnd, kRangeEndSliderId), TBM_SETPOS, TRUE, state->end);
-        }
+        const int id = GetDlgCtrlID(reinterpret_cast<HWND>(lParam));
+        const int position = static_cast<int>(SendMessageW(reinterpret_cast<HWND>(lParam), TBM_GETPOS, 0, 0));
+        namespace range = readonly_viewer::file_range;
+        if (id == kRangeStartSliderId) {
+            const uintmax_t count = std::min(state->selected.end - state->selected.start, kMaximumRangeLoadBytes);
+            state->selected.start = std::min(range::OffsetAt(state->file_size, position), state->file_size - 1);
+            state->selected.end = state->selected.start + std::min(std::max<uintmax_t>(1, count), state->file_size - state->selected.start);
+        } else if (id == kRangeEndSliderId) {
+            state->selected.end = std::max(state->selected.start + 1, range::OffsetAt(state->file_size, position));
+        } else return 0;
+        WriteRangeFields(hwnd, *state);
         UpdateRangeDialog(hwnd, *state);
         return 0;
     }
     if (message == WM_COMMAND) {
-        if (LOWORD(wParam) == kRangeConfirmId) {
-            state->selected = {state->file_size * static_cast<uintmax_t>(state->start) / 1000,
-                               state->file_size * static_cast<uintmax_t>(state->end) / 1000};
-            state->accepted = true;
-            DestroyWindow(hwnd);
+        const int id = LOWORD(wParam);
+        if ((id == kRangeOffsetId || id == kRangeCountId) && HIWORD(wParam) == EN_CHANGE && !state->updating) {
+            UpdateRangeDialog(hwnd, *state);
             return 0;
         }
-        if (LOWORD(wParam) == kRangeCancelId) { DestroyWindow(hwnd); return 0; }
+        if (id == kRangePreviousId || id == kRangeNextId) {
+            UpdateRangeDialog(hwnd, *state);
+            if (state->valid) {
+                state->selected = readonly_viewer::file_range::Move(state->file_size, state->selected, id == kRangeNextId);
+                WriteRangeFields(hwnd, *state);
+                UpdateRangeDialog(hwnd, *state);
+            }
+            return 0;
+        }
+        if (id == kRangeConfirmId || id == IDOK) {
+            UpdateRangeDialog(hwnd, *state); // Revalidate even a posted command to a disabled button.
+            if (state->valid) { state->accepted = true; DestroyWindow(hwnd); }
+            return 0;
+        }
+        if (id == kRangeCancelId || id == IDCANCEL) { DestroyWindow(hwnd); return 0; }
     }
     if (message == WM_CLOSE) { DestroyWindow(hwnd); return 0; }
     return DefWindowProcW(hwnd, message, wParam, lParam);
 }
 
-std::optional<ByteRange> ChooseLargeTextRange(HWND owner, uintmax_t file_size, const std::optional<ByteRange>& current = std::nullopt) {
+[[nodiscard]] std::optional<ByteRange> ChooseLargeTextRange(HWND owner, uintmax_t file_size, const std::optional<ByteRange>& current = std::nullopt) {
+    if (!file_size) return std::nullopt;
     static ATOM atom = 0;
     if (!atom) {
         WNDCLASSW wc{}; wc.lpfnWndProc = LargeTextRangeDialogProc; wc.hInstance = GetModuleHandleW(nullptr);
@@ -869,18 +1033,23 @@ std::optional<ByteRange> ChooseLargeTextRange(HWND owner, uintmax_t file_size, c
     }
     if (!atom) return std::nullopt;
     RangeDialogState state{}; state.file_size = file_size;
-    state.start = current ? static_cast<int>(current->start * 1000 / file_size) : 0;
-    state.end = current ? static_cast<int>(current->end * 1000 / file_size) :
-        std::max(1, std::min(1000, static_cast<int>((16ull * 1024ull * 1024ull * 1000ull) / file_size)));
+    state.selected = current.value_or(ByteRange{0, std::min(file_size, readonly_viewer::file_range::kDefaultBytes)});
+    if (!readonly_viewer::file_range::Make(file_size, state.selected.start, state.selected.end - state.selected.start))
+        state.selected = {0, std::min(file_size, readonly_viewer::file_range::kDefaultBytes)};
+    RECT bounds{0, 0, reader_next::Px(owner, 640), reader_next::Px(owner, 450)};
+    AdjustWindowRectEx(&bounds, WS_CAPTION | WS_SYSMENU | WS_POPUP, FALSE, WS_EX_DLGMODALFRAME);
     HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, kRangeDialogClass, localization::Text(L"readonly.range.title").c_str(),
-                                  WS_CAPTION | WS_SYSMENU | WS_POPUP | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT, 540, 340,
-                                  owner, nullptr, GetModuleHandleW(nullptr), &state);
+                                  WS_CAPTION | WS_SYSMENU | WS_POPUP | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT,
+                                  bounds.right - bounds.left, bounds.bottom - bounds.top, owner, nullptr, GetModuleHandleW(nullptr), &state);
     if (!dialog) return std::nullopt;
     EnableWindow(owner, FALSE);
     MSG message{};
-    while (IsWindow(dialog) && GetMessageW(&message, nullptr, 0, 0) > 0) {
+    int status = 1;
+    while (IsWindow(dialog) && (status = GetMessageW(&message, nullptr, 0, 0)) > 0) {
         if (!IsDialogMessageW(dialog, &message)) { TranslateMessage(&message); DispatchMessageW(&message); }
     }
+    if (IsWindow(dialog)) DestroyWindow(dialog);
+    if (status == 0) PostQuitMessage(static_cast<int>(message.wParam));
     EnableWindow(owner, TRUE); SetForegroundWindow(owner);
     return state.accepted ? std::optional<ByteRange>(state.selected) : std::nullopt;
 }
@@ -1443,19 +1612,21 @@ void UpdateModeButtons(ViewMode mode) {
     const bool hasTab = g_currentTab >= 0 && g_currentTab < static_cast<int>(g_tabs.size());
     const bool pdf = hasTab && g_tabs[g_currentTab].isPdf;
     const bool binary = hasTab && g_tabs[g_currentTab].isBinary;
-    const int ids[] = {kDecoratedButtonId, kRawButtonId, kHexButtonId, kDiagramButtonId};
-    const ViewMode modes[] = {ViewMode::Decorated, ViewMode::Raw, ViewMode::Hex, ViewMode::Diagram};
+    const int ids[] = {kDecoratedButtonId, kRawButtonId, kHexButtonId, kBinaryButtonId, kDiagramButtonId};
+    const ViewMode modes[] = {ViewMode::Decorated, ViewMode::Raw, ViewMode::Hex, ViewMode::Binary, ViewMode::Diagram};
     const bool diagram = hasTab && g_tabs[g_currentTab].combinedDiagram.has_value();
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 5; ++i) {
         HWND button = GetDlgItem(g_hwndMain, ids[i]);
-        ShowWindow(button, pdf ? SW_HIDE : SW_SHOW);
-        EnableWindow(button, hasTab && (i == 2 || (!binary && (i != 3 || diagram))));
+        const bool byte_mode = modes[i] == ViewMode::Hex || modes[i] == ViewMode::Binary;
+        EnableWindow(button, hasTab && !pdf && (byte_mode || (!binary && (modes[i] != ViewMode::Diagram || diagram))));
         reader_next::SetActive(button, hasTab && mode == modes[i]);
     }
-    ShowWindow(GetDlgItem(g_hwndMain, kPdfRangeButtonId), pdf ? SW_SHOW : SW_HIDE);
-    EnableWindow(GetDlgItem(g_hwndMain, reader_next::kSearchId), hasTab && mode != ViewMode::Diagram);
-    for (UINT id : {reader_next::kZoomInId, reader_next::kZoomOutId, reader_next::kZoomResetId})
+    SetWindowTextW(GetDlgItem(g_hwndMain, kPdfRangeButtonId),
+        localization::Text(pdf ? L"reader_next.range" : L"readonly.range.button").c_str());
+    for (UINT id : {reader_next::kSearchId, reader_next::kFindPreviousId, reader_next::kFindNextId})
         EnableWindow(GetDlgItem(g_hwndMain, id), hasTab && mode != ViewMode::Diagram);
+    for (UINT id : {reader_next::kZoomInId, reader_next::kZoomOutId, reader_next::kZoomResetId})
+        EnableWindow(GetDlgItem(g_hwndMain, id), hasTab);
     InvalidateRect(g_hwndMain, nullptr, FALSE);
 }
 
@@ -1597,7 +1768,9 @@ void ShowCurrentTab(bool rememberView = true) {
             }
             break;
         case ViewMode::Hex:
-            ApplyEditorText(BuildHexText(tab.bytes), {}, true);
+        case ViewMode::Binary:
+            ApplyEditorText(BuildByteText(tab.bytes, tab.isPartialText ? tab.textRange.start : 0,
+                tab.viewMode == ViewMode::Binary), {}, true);
             break;
         case ViewMode::Diagram:
             if (has_renderable_mermaid) {
@@ -1751,28 +1924,47 @@ void MoveTab(int from_index, int to_index) {
     SelectTab(to_index);
 }
 
+std::optional<FileSnapshot> CaptureFileSnapshot(const std::wstring& path);
 void ChangePartialTextRange(HWND owner, int index) {
+    if (g_loadInProgress) return;
     if (index < 0 || index >= static_cast<int>(g_tabs.size())) return;
-    OpenTab& tab = g_tabs[index];
-    if (!tab.isPartialText || tab.sourceSize == 0) return;
-    const std::optional<ByteRange> range = ChooseLargeTextRange(owner, tab.sourceSize, tab.textRange);
+    if (!CanChooseByteRange(g_tabs[index])) return;
+    // Do not keep a vector reference across either modal or cancellation pumping.
+    const std::wstring path = g_tabs[index].path;
+    const ViewMode previous_mode = g_tabs[index].viewMode;
+    std::error_code ec;
+    const uintmax_t size = std::filesystem::file_size(path, ec);
+    if (ec) { SetViewerStatus(owner, localization::Text(L"readonly.error.file_access_failed")); return; }
+    const auto current = g_tabs[index].isPartialText ? std::optional<ByteRange>(g_tabs[index].textRange) : std::nullopt;
+    const std::optional<ByteRange> range = ChooseLargeTextRange(owner, size, current);
     if (!range) return;
     BeginCancellableLoad(owner, localization::Text(L"readonly.status.loading"));
-    LoadFileResult loaded = LoadTextFile(tab.path, range);
+    LoadFileResult loaded = LoadTextFile(path, range);
     EndCancellableLoad();
     if (loaded.hasError || loaded.cancelled) { SetViewerStatus(owner, loaded.text); return; }
+    const auto found = std::find_if(g_tabs.begin(), g_tabs.end(), [&](const OpenTab& candidate) { return candidate.path == path; });
+    if (found == g_tabs.end()) return;
+    index = static_cast<int>(std::distance(g_tabs.begin(), found));
+    OpenTab& tab = *found;
     tab.rawText = std::move(loaded.text);
     tab.bytes = std::move(loaded.bytes);
     InvalidateReaderPreparation(tab);
     tab.isBinary = loaded.isBinary;
+    tab.isPartialText = true;
     tab.textRange = *range;
     tab.sourceSize = loaded.source_size;
-    tab.viewMode = tab.isBinary ? ViewMode::Hex : (IsMarkdownPath(tab.path) ? ViewMode::Decorated : ViewMode::Raw);
+    tab.sourceSnapshot = CaptureFileSnapshot(path);
+    tab.title = std::filesystem::path(path).filename().wstring() + localization::Text(L"readonly.tab.partial_suffix");
+    tab.viewMode = previous_mode == ViewMode::Binary ? ViewMode::Binary :
+        (tab.isBinary || previous_mode == ViewMode::Hex ? ViewMode::Hex : (IsMarkdownPath(tab.path) ? ViewMode::Decorated : ViewMode::Raw));
     ParseJapaneseLines(tab);
+    RebuildTabControl();
     SelectTab(index);
+    SetViewerStatus(owner, L"");
 }
 
 void SetViewerStatus(HWND owner, const std::wstring& message) {
+    g_viewerStatus = message;
     SetWindowTextW(GetDlgItem(owner, 817), message.empty() ? localization::Text(L"reader_next.ready").c_str() : message.c_str());
     UpdateReaderWindowTitle(owner);
 }
@@ -1783,6 +1975,7 @@ void UpdateReaderWindowTitle(HWND owner) {
 #else
     std::wstring title = localization::Text(L"readonly.window.title");
 #endif
+    if (!g_leftPaneVisible && !g_viewerStatus.empty()) title += L" — " + g_viewerStatus;
     if (!g_tabs.empty()) {
         title += localization::Format(L"readonly.window.tab_count", {{L"COUNT", std::to_wstring(g_tabs.size())}});
     }
@@ -2538,32 +2731,59 @@ void PopulateFileTree(const std::wstring& directoryPath) {
 
 void LayoutToolbarControls(HWND hWnd, int splitX, int rightPaneWidth, int height) {
     const auto px = [hWnd](int n) { return reader_next::Px(hWnd, n); };
-    const int gap = px(12), x = splitX + gap, width = std::max(0, rightPaneWidth - gap * 2);
-    MoveWindow(g_hwndTabControl, x, px(4), width, px(28), TRUE);
+    const bool focus = !g_leftPaneVisible;
+    const int gap = focus ? 0 : px(12);
+    const int x = splitX + gap, width = std::max(0, rightPaneWidth - gap * 2);
+    const bool hasTab = g_currentTab >= 0 && g_currentTab < static_cast<int>(g_tabs.size());
+    const bool pdf = hasTab && g_tabs[g_currentTab].isPdf;
+    const bool binary = hasTab && g_tabs[g_currentTab].isBinary;
+    ShowWindow(g_hwndTabControl, focus ? SW_HIDE : SW_SHOW);
+    if (!focus) MoveWindow(g_hwndTabControl, x, px(4), width, px(28), TRUE);
     int modeX = x;
-    for (int id : {kDecoratedButtonId, kRawButtonId, kHexButtonId, kDiagramButtonId}) {
-        MoveWindow(GetDlgItem(hWnd, id), modeX, px(40), px(70), px(28), TRUE); modeX += px(74);
+    for (int id : {kDecoratedButtonId, kRawButtonId, kHexButtonId, kBinaryButtonId, kDiagramButtonId}) {
+        HWND button = GetDlgItem(hWnd, id);
+        const bool byteMode = id == kHexButtonId || id == kBinaryButtonId;
+        const bool visible = !focus && !pdf && (!binary || byteMode);
+        ShowWindow(button, visible ? SW_SHOW : SW_HIDE);
+        if (visible) {
+            MoveWindow(button, modeX, px(40), px(70), px(28), TRUE);
+            modeX += px(74);
+        }
     }
-    MoveWindow(GetDlgItem(hWnd, kPdfRangeButtonId), x, px(40), px(150), px(28), TRUE);
-    int zoomX = x + width - px(192);
+    const int rangeX = pdf ? x : modeX;
+    const int rangeWidth = px(pdf ? 150 : 110);
+    MoveWindow(GetDlgItem(hWnd, kPdfRangeButtonId), rangeX, px(40), rangeWidth, px(28), TRUE);
+    ShowWindow(GetDlgItem(hWnd, kPdfRangeButtonId), !focus && hasTab && (pdf || CanChooseByteRange(g_tabs[g_currentTab])) &&
+        rangeX + rangeWidth + px(8) <= x + width - px(192) ? SW_SHOW : SW_HIDE);
+    const int zoomX = x + width - px(192);
+    for (UINT id : {reader_next::kZoomOutId, reader_next::kZoomResetId, reader_next::kZoomInId, 817u, 818u})
+        ShowWindow(GetDlgItem(hWnd, id), focus ? SW_HIDE : SW_SHOW);
     MoveWindow(GetDlgItem(hWnd, reader_next::kZoomOutId), zoomX, px(40), px(42), px(28), TRUE);
     MoveWindow(GetDlgItem(hWnd, reader_next::kZoomResetId), zoomX + px(46), px(40), px(88), px(28), TRUE);
     MoveWindow(GetDlgItem(hWnd, reader_next::kZoomInId), zoomX + px(138), px(40), px(42), px(28), TRUE);
-    MoveWindow(GetDlgItem(hWnd, reader_next::kSearchId), x, px(76), std::max(px(80), width - px(156)), px(28), TRUE);
-    MoveWindow(GetDlgItem(hWnd, reader_next::kFindPreviousId), x + width - px(148), px(76), px(70), px(28), TRUE);
-    MoveWindow(GetDlgItem(hWnd, reader_next::kFindNextId), x + width - px(74), px(76), px(70), px(28), TRUE);
+    const bool showSearch = !focus || (g_focusSearchVisible && hasTab && g_tabs[g_currentTab].viewMode != ViewMode::Diagram);
+    for (UINT id : {reader_next::kSearchId, reader_next::kFindPreviousId, reader_next::kFindNextId})
+        ShowWindow(GetDlgItem(hWnd, id), showSearch ? SW_SHOW : SW_HIDE);
+    const int searchY = focus ? px(4) : px(76);
+    const int searchX = focus ? x + px(8) : x;
+    const int searchWidth = focus ? width - px(16) : width;
+    MoveWindow(GetDlgItem(hWnd, reader_next::kSearchId), searchX, searchY, std::max(px(80), searchWidth - px(156)), px(28), TRUE);
+    MoveWindow(GetDlgItem(hWnd, reader_next::kFindPreviousId), searchX + searchWidth - px(148), searchY, px(70), px(28), TRUE);
+    MoveWindow(GetDlgItem(hWnd, reader_next::kFindNextId), searchX + searchWidth - px(74), searchY, px(70), px(28), TRUE);
     MoveWindow(GetDlgItem(hWnd, 818), x + width * 2 / 3, std::max(0, height - px(28)), width / 3, px(22), TRUE);
     MoveWindow(GetDlgItem(hWnd, 817), x, std::max(0, height - px(28)), width * 2 / 3 - px(8), px(22), TRUE);
-    const int top = px(116), contentHeight = std::max(0, height - top - px(36));
-    // Limit line length in rendered reading mode; raw and hex retain their working width.
+    const int top = focus ? (showSearch ? px(36) : 0) : px(116);
+    const int contentHeight = std::max(0, height - top - (focus ? 0 : px(36)));
+    // Keep the readable line length in document view, while the canvas fills the window.
     const bool reading = g_currentTab >= 0 && g_currentTab < static_cast<int>(g_tabs.size()) &&
                          g_tabs[g_currentTab].viewMode == ViewMode::Decorated;
-    const int pageWidth = reading ? std::min(width, px(940)) : width;
+    const int pageWidth = reading && !focus ? std::min(width, px(940)) : width;
     const int pageX = x + (width - pageWidth) / 2;
     MoveWindow(g_hwndEditControl, pageX, top, std::max(0, pageWidth - px(12)), contentHeight, TRUE);
     MoveWindow(g_hwndHighlightBar, pageX + pageWidth - px(12), top, px(12), contentHeight, TRUE);
     if (g_isRichEdit) {
-        RECT inset{px(28), px(18), std::max(px(28), pageWidth - px(58)), std::max(px(22), contentHeight - px(20))};
+        const int insetX = reading && focus ? std::max(px(28), (pageWidth - px(940)) / 2) : px(28);
+        RECT inset{insetX, px(18), std::max(insetX, pageWidth - insetX - px(30)), std::max(px(22), contentHeight - px(20))};
         SendMessageW(g_hwndEditControl, EM_SETRECT, 0, reinterpret_cast<LPARAM>(&inset));
     }
     if (g_hwndPdfPanel) MoveWindow(g_hwndPdfPanel, x, top, width, contentHeight, TRUE);
@@ -2571,8 +2791,11 @@ void LayoutToolbarControls(HWND hWnd, int splitX, int rightPaneWidth, int height
     UpdateInlineDiagramBounds();
     if (g_currentTab >= 0 && g_currentTab < static_cast<int>(g_tabs.size())) {
         const OpenTab& tab = g_tabs[g_currentTab];
-        std::wstring detail = tab.title + L"   ·   " + (tab.isPdf ? L"PDF" : (tab.isBinary ? L"HEX" : L"TEXT"));
-        if (tab.isPartialText) detail += L"   ·   " + localization::Text(L"reader_next.partial");
+        const wchar_t* format = tab.viewMode == ViewMode::Binary ? L"reader_next.binary" :
+            (tab.viewMode == ViewMode::Hex ? L"reader_next.hex" : nullptr);
+        std::wstring detail = tab.title + L"   ·   " + (format ? localization::Text(format) : (tab.isPdf ? L"PDF" : L"TEXT"));
+        if (tab.isPartialText) detail += L"   ·   " + localization::Format(L"readonly.range.current", {
+            {L"START", std::to_wstring(tab.textRange.start)}, {L"END", std::to_wstring(tab.textRange.end)}});
         SetWindowTextW(GetDlgItem(hWnd, 818), detail.c_str());
     } else SetWindowTextW(GetDlgItem(hWnd, 818), localization::Text(L"reader_next.empty_detail").c_str());
 }
@@ -2583,6 +2806,13 @@ void RelayoutViewer() {
     GetClientRect(g_hwndMain, &client);
     SendMessageW(g_hwndMain, WM_SIZE, SIZE_RESTORED,
                  MAKELPARAM(client.right - client.left, client.bottom - client.top));
+}
+
+void CloseFocusSearch() {
+    if (!g_focusSearchVisible) return;
+    g_focusSearchVisible = false;
+    SetFocus(g_hwndMain);
+    RelayoutViewer();
 }
 
 namespace {
@@ -2723,6 +2953,7 @@ bool CreateReaderControls(HWND owner) {
     controlsCreated &= button(kDecoratedButtonId, L"reader_next.reading") != nullptr;
     controlsCreated &= button(kRawButtonId, L"reader_next.raw") != nullptr;
     controlsCreated &= button(kHexButtonId, L"reader_next.hex") != nullptr;
+    controlsCreated &= button(kBinaryButtonId, L"reader_next.binary") != nullptr;
     controlsCreated &= button(kDiagramButtonId, L"reader_next.diagram") != nullptr;
     controlsCreated &= button(kPdfRangeButtonId, L"reader_next.range") != nullptr;
     controlsCreated &= button(reader_next::kFolderBackId, L"reader_next.folder_back") != nullptr;
@@ -2799,7 +3030,7 @@ bool HandleReaderKey(const MSG& message) {
     if (!command && ctrl && !alt) {
         if (message.wParam == 'O') command = shift ? kOpenFolderButtonId : kOpenFileButtonId;
         else if (message.wParam == 'B') command = kToggleLeftPaneButtonId;
-        else if (message.wParam == 'F') { SetFocus(GetDlgItem(g_hwndMain, reader_next::kSearchId)); return true; }
+        else if (message.wParam == 'F') command = kFindTextMenuId;
         else if (shift && message.wParam == 'T') { ReopenLastClosedTab(); return true; }
         else if (message.wParam == VK_TAB && !g_tabs.empty()) {
             SelectTab((g_currentTab + (shift ? static_cast<int>(g_tabs.size()) - 1 : 1)) % static_cast<int>(g_tabs.size())); return true;
@@ -2813,9 +3044,11 @@ bool HandleReaderKey(const MSG& message) {
             ? readonly_viewer::kCmdPdfRotateLeft : readonly_viewer::kCmdPdfRotateRight;
     }
     if (!ctrl && !alt && (message.wParam == VK_F3 || (message.wParam == VK_RETURN && message.hwnd == GetDlgItem(g_hwndMain, reader_next::kSearchId)))) {
+        CloseFocusSearch();
         FindReaderText(shift); return true;
     }
     if (!ctrl && !alt && message.wParam == VK_ESCAPE) {
+        CloseFocusSearch();
         CancelReaderSearch(); SetViewerStatus(g_hwndMain, localization::Text(L"reader_next.search_canceled"));
         if (g_currentTab >= 0) SetFocus(g_tabs[g_currentTab].isPdf ? g_hwndPdfPanel : g_hwndEditControl);
         return true;
@@ -2902,15 +3135,17 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             if (!g_publishingReaderView) RememberReaderView();
             const auto px = [hWnd](int n) { return reader_next::Px(hWnd, n); };
             const int width = LOWORD(lParam), height = HIWORD(lParam);
-            int split = g_leftPaneVisible ? std::clamp(g_splitX, px(210), std::max(px(210), width - px(530))) : px(128);
-            if (g_leftPaneVisible) g_splitX = split;
-            MoveWindow(g_hwndToggleLeftPaneButton, px(12), px(44), split - px(24), px(28), TRUE);
-            SetWindowTextW(g_hwndToggleLeftPaneButton, localization::Text(g_leftPaneVisible ? L"reader_next.focus" : L"reader_next.show_pane").c_str());
-            MoveWindow(GetDlgItem(hWnd, kOpenFileButtonId), px(12), px(80), split - px(24), px(28), TRUE);
-            MoveWindow(g_hwndOpenFolderButton, px(12), px(114), split - px(24), px(28), TRUE);
-            for (HWND control : {g_hwndFileTree, g_hwndTocTree, g_hwndFileTreeLabel, g_hwndTocTreeLabel})
+            const int split = g_leftPaneVisible ? std::clamp(g_splitX, px(210), std::max(px(210), width - px(530))) : 0;
+            HWND openFile = GetDlgItem(hWnd, kOpenFileButtonId);
+            for (HWND control : {g_hwndToggleLeftPaneButton, openFile, g_hwndOpenFolderButton,
+                                 g_hwndFileTree, g_hwndTocTree, g_hwndFileTreeLabel, g_hwndTocTreeLabel})
                 ShowWindow(control, g_leftPaneVisible ? SW_SHOW : SW_HIDE);
             if (g_leftPaneVisible) {
+                g_splitX = split;
+                MoveWindow(g_hwndToggleLeftPaneButton, px(12), px(44), split - px(24), px(28), TRUE);
+                SetWindowTextW(g_hwndToggleLeftPaneButton, localization::Text(L"reader_next.focus").c_str());
+                MoveWindow(openFile, px(12), px(80), split - px(24), px(28), TRUE);
+                MoveWindow(g_hwndOpenFolderButton, px(12), px(114), split - px(24), px(28), TRUE);
                 int treeHeight = std::max(0, height - px(220));
                 int fileHeight = treeHeight * 55 / 100;
                 MoveWindow(g_hwndFileTreeLabel, px(18), px(160), split - px(104), px(24), TRUE);
@@ -2918,10 +3153,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 MoveWindow(g_hwndTocTreeLabel, px(18), px(202) + fileHeight, split - px(36), px(24), TRUE);
                 MoveWindow(g_hwndTocTree, px(12), px(234) + fileHeight, split - px(24), std::max(0, height - px(250) - fileHeight), TRUE);
             }
-            MoveWindow(GetDlgItem(hWnd, reader_next::kFolderBackId), split - px(78), px(156), px(30), px(28), TRUE);
-            MoveWindow(GetDlgItem(hWnd, reader_next::kFolderUpId), split - px(42), px(156), px(30), px(28), TRUE);
-            for (UINT id : {reader_next::kFolderBackId, reader_next::kFolderUpId})
-                ShowWindow(GetDlgItem(hWnd, id), g_leftPaneVisible ? SW_SHOW : SW_HIDE);
+            int folderX = split - px(78);
+            for (UINT id : {reader_next::kFolderBackId, reader_next::kFolderUpId}) {
+                HWND control = GetDlgItem(hWnd, id);
+                ShowWindow(control, g_leftPaneVisible ? SW_SHOW : SW_HIDE);
+                if (g_leftPaneVisible) MoveWindow(control, folderX, px(156), px(30), px(28), TRUE);
+                folderX += px(36);
+            }
             LayoutToolbarControls(hWnd, split, width - split, height);
             if (!g_publishingReaderView && g_isRichEdit && g_currentTab >= 0 &&
                 g_displayedPath == g_tabs[g_currentTab].path && IsWindowVisible(g_hwndEditControl))
@@ -2947,7 +3185,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             return 0;
         }
         case WM_PAINT:
-            reader_next::Paint(hWnd, g_leftPaneVisible ? g_splitX : reader_next::Px(hWnd, 128), reader_next::Px(hWnd, 110), g_tabs.empty());
+            reader_next::Paint(hWnd, g_leftPaneVisible ? g_splitX : 0, g_leftPaneVisible ? reader_next::Px(hWnd, 110) : 0, g_tabs.empty());
             return 0;
         case WM_ERASEBKGND: return 1;
         case WM_CTLCOLORSTATIC:
@@ -2981,9 +3219,28 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             }
             break;
         case WM_INITMENUPOPUP:
+            if (g_tabSelectionMenu && reinterpret_cast<HMENU>(wParam) == g_tabSelectionMenu) {
+                while (GetMenuItemCount(g_tabSelectionMenu) > 0) {
+                    if (!DeleteMenu(g_tabSelectionMenu, 0, MF_BYPOSITION)) return 0;
+                }
+                if (g_tabs.empty()) AppendMenuW(g_tabSelectionMenu, MF_STRING | MF_GRAYED, 0, localization::Text(L"reader_next.empty_detail").c_str());
+                for (size_t i = 0; i < g_tabs.size(); ++i) {
+                    std::wstring label = g_tabs[i].title;
+                    for (size_t amp = label.find(L'&'); amp != std::wstring::npos; amp = label.find(L'&', amp + 2))
+                        label.insert(amp, 1, L'&');
+                    if (!AppendMenuW(g_tabSelectionMenu, MF_STRING | (static_cast<int>(i) == g_currentTab ? MF_CHECKED : MF_UNCHECKED), 0, label.c_str())) break;
+                }
+                return 0;
+            }
             if (GetMenu(hWnd) && (reinterpret_cast<HMENU>(wParam) == GetSubMenu(GetMenu(hWnd), 0) ||
                                  reinterpret_cast<HMENU>(wParam) == GetSubMenu(GetMenu(hWnd), 1)))
                 UpdatePdfViewMenu(hWnd);
+            break;
+        case WM_MENUCOMMAND:
+            if (g_tabSelectionMenu && reinterpret_cast<HMENU>(lParam) == g_tabSelectionMenu) {
+                if (wParam < g_tabs.size()) SelectTab(static_cast<int>(wParam));
+                return 0;
+            }
             break;
         case WM_COMMAND: {
             const UINT command = LOWORD(wParam);
@@ -3011,29 +3268,45 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             }
             if (command == kTabMenuCloseAll) { CloseAllTabs(); SetViewerStatus(hWnd, L""); return 0; }
             if (command == SC_CLOSE) { PostMessageW(hWnd, WM_CLOSE, 0, 0); return 0; }
-            if (command == kDecoratedButtonId || command == kRawButtonId || command == kHexButtonId || command == kDiagramButtonId) {
+            if (command == kDecoratedButtonId || command == kRawButtonId || command == kHexButtonId || command == kBinaryButtonId || command == kDiagramButtonId) {
                 HWND button = GetDlgItem(hWnd, command);
-                if (!IsWindowEnabled(button) || !IsWindowVisible(button)) return 0;
+                if (!IsWindowEnabled(button)) return 0;
             }
             if (command == reader_next::kSearchId && HIWORD(wParam) == EN_CHANGE) {
                 CancelReaderSearch();
                 RefreshSearchOverview();
             }
             if (command == reader_next::kFindNextId || command == reader_next::kFindPreviousId) {
-                FindReaderText(command == reader_next::kFindPreviousId); return 0;
+                CloseFocusSearch();
+                FindReaderText(command == reader_next::kFindPreviousId);
+                return 0;
             }
             if (command >= reader_next::kZoomInId && command <= reader_next::kZoomResetId) {
                 ZoomReader(command); return 0;
             }
             switch (command) {
+                case kToggleTopmostMenuId:
+                    ToggleViewerTopmost(hWnd);
+                    return 0;
                 case kToggleLeftPaneButtonId:
                     g_leftPaneVisible = !g_leftPaneVisible;
-                    {
-                        RECT client{};
-                        GetClientRect(hWnd, &client);
-                        SendMessageW(hWnd, WM_SIZE, 0,
-                                     MAKELPARAM(client.right - client.left, client.bottom - client.top));
+                    g_focusSearchVisible = false;
+                    SetFocus(hWnd);
+                    RelayoutViewer();
+                    UpdateReaderWindowTitle(hWnd);
+                    return 0;
+                case kFindTextMenuId: {
+                    HWND search = GetDlgItem(hWnd, reader_next::kSearchId);
+                    if (!IsWindowEnabled(search)) return 0;
+                    if (!g_leftPaneVisible) {
+                        g_focusSearchVisible = true;
+                        RelayoutViewer();
                     }
+                    SetFocus(search);
+                    return 0;
+                }
+                case kTabMenuReopenClosed:
+                    ReopenLastClosedTab();
                     return 0;
                 case kPersistSessionMenuId: {
                     g_sessionStateLoaded = true;
@@ -3093,6 +3366,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                         // A selected folder is represented by the left file tree.  Reopen it
                         // when necessary so the newly selected root is immediately visible.
                         g_leftPaneVisible = true;
+                        g_focusSearchVisible = false;
                         RECT client{};
                         GetClientRect(hWnd, &client);
                         SendMessageW(hWnd, WM_SIZE, SIZE_RESTORED,
@@ -3119,13 +3393,19 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                     g_tabs[g_currentTab].viewMode = ViewMode::Hex;
                     ShowCurrentTab();
                     return 0;
+                case kBinaryButtonId:
+                    if (g_currentTab < 0 || g_currentTab >= static_cast<int>(g_tabs.size())) return 0;
+                    g_tabs[g_currentTab].viewMode = ViewMode::Binary;
+                    ShowCurrentTab();
+                    return 0;
                 case kDiagramButtonId:
                     if (g_currentTab < 0 || g_currentTab >= static_cast<int>(g_tabs.size())) return 0;
                     g_tabs[g_currentTab].viewMode = ViewMode::Diagram;
                     ShowCurrentTab();
                     return 0;
                 case kPdfRangeButtonId:
-                    if (g_hwndPdfPanel) readonly_viewer::PdfPreviewPanel_ChoosePageRange(g_hwndPdfPanel);
+                    if (HasActivePdfPreview()) readonly_viewer::PdfPreviewPanel_ChoosePageRange(g_hwndPdfPanel);
+                    else ChangePartialTextRange(hWnd, g_currentTab);
                     return 0;
                 case readonly_viewer::kCmdPdfToggleGrayscale:
                     if (HasActivePdfPreview()) {
@@ -3415,6 +3695,8 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmd
     icex.dwICC = ICC_WIN95_CLASSES | ICC_TAB_CLASSES | ICC_TREEVIEW_CLASSES | ICC_BAR_CLASSES;
     InitCommonControlsEx(&icex);
 
+    if (const auto preview = readonly_viewer::RunPdfPairPreviewCommand(hInstance, nCmdShow)) return *preview;
+
     const wchar_t* CLASS_NAME = kViewerWindowClass;
 
     WNDCLASSW hc = { };
@@ -3425,14 +3707,19 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmd
     hc.hbrBackground = NULL;
     RegisterClassW(&hc);
 
-    WNDCLASSW wc = { };
+    WNDCLASSEXW wc{};
+    wc.cbSize       = sizeof(wc);
     wc.lpfnWndProc   = WndProc;
     wc.hInstance     = hInstance;
     wc.lpszClassName = CLASS_NAME;
     wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW+1);
+    const auto iconId = MAKEINTRESOURCEW(IDI_READONLY_VIEWER_ICON);
+    wc.hIcon = LoadIconW(hInstance, iconId);
+    wc.hIconSm = static_cast<HICON>(LoadImageW(hInstance, iconId, IMAGE_ICON,
+        GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_SHARED));
 
-    RegisterClassW(&wc);
+    if (!RegisterClassExW(&wc)) return 0;
 
     HWND hwnd = CreateWindowExW(
         0,

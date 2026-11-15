@@ -50,12 +50,12 @@ constexpr int kFinalNoteHorizontalPaddingPx = 8;
     SendMessageW(hWnd, EM_GETSEL, reinterpret_cast<WPARAM>(&selectionStart),
                  reinterpret_cast<LPARAM>(&selectionEnd));
     const auto start = IsRichEditControl(hWnd)
-        ? note::NoteSourceLineMap::RichEditIndexToCanonicalOffset(
+        ? note::NoteSourceLineMap::RichEditSelectionEndpointToCanonicalOffset(
               textCore.source_line_map(), static_cast<size_t>(selectionStart))
         : std::optional<note::Utf16CodeUnitOffset>{note::Utf16CodeUnitOffset{
               std::min(static_cast<size_t>(selectionStart), textCore.text_length())}};
     const auto end = IsRichEditControl(hWnd)
-        ? note::NoteSourceLineMap::RichEditIndexToCanonicalOffset(
+        ? note::NoteSourceLineMap::RichEditSelectionEndpointToCanonicalOffset(
               textCore.source_line_map(), static_cast<size_t>(selectionEnd))
         : std::optional<note::Utf16CodeUnitOffset>{note::Utf16CodeUnitOffset{
               std::min(static_cast<size_t>(selectionEnd), textCore.text_length())}};
@@ -183,7 +183,7 @@ constexpr int kFinalNoteHorizontalPaddingPx = 8;
         if (!IsRichEditControl(hWnd)) {
             return std::min(richEditOffset, textCore->text_length());
         }
-        const auto canonical = note::NoteSourceLineMap::RichEditIndexToCanonicalOffset(
+        const auto canonical = note::NoteSourceLineMap::RichEditSelectionEndpointToCanonicalOffset(
             textCore->source_line_map(), richEditOffset);
         return canonical.has_value() ? std::optional<size_t>{canonical->value} : std::nullopt;
     };

@@ -821,8 +821,7 @@ static void ScrollPaletteSettingsPage(HWND hWnd, PaletteSettingsCtx* ctx, int po
     const int delta = ctx->scrollY - position;
     ctx->scrollY = position;
     SetScrollPos(hWnd, SB_VERT, position, TRUE);
-    if (delta) ScrollWindowEx(hWnd, 0, delta, nullptr, nullptr, nullptr, nullptr,
-                              SW_SCROLLCHILDREN | SW_INVALIDATE | SW_ERASE);
+    ScrollSettingsContents(hWnd, delta);
 }
 
 static void LayoutPaletteSettingsPage(HWND hWnd, PaletteSettingsCtx* ctx) {
@@ -1200,6 +1199,7 @@ static void EnsurePaletteSettingsClass() {
 
             ApplyThemeToDialog(hWnd);
             LayoutPaletteSettingsPage(hWnd, ctx);
+            PrepareSettingsScroll(hWnd, hWnd);
             return 0;
         }
         case WM_THEMECHANGED:
@@ -1426,6 +1426,7 @@ static void EnsurePaletteSettingsClass() {
             }
             if (id == IDCANCEL || id == 0) {
                 if (ctx->embedded) return 0;
+                if (ctx && !ctx->embedded) RestoreOwnerAfterModal(ctx->owner);
                 DestroyWindow(hWnd);
                 return 0;
             }
@@ -1465,6 +1466,7 @@ static void EnsurePaletteSettingsClass() {
             break;
         case WM_CLOSE:
             if (ctx && ctx->embedded) return 0;
+            if (ctx && !ctx->embedded) RestoreOwnerAfterModal(ctx->owner);
             DestroyWindow(hWnd);
             return 0;
         case WM_TIMER:

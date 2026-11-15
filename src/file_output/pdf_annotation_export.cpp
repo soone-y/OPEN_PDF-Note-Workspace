@@ -1,4 +1,5 @@
 #include "file_output/pdf_annotation_export.h"
+#include "file_output/pdf_annotation_detach.h"
 #include "fpdf_annot.h"
 #include "fpdf_edit.h"
 #include <cmath>
@@ -165,7 +166,7 @@ template<class GetSegment>
 
 } // namespace
 
-[[nodiscard]] static bool AddImpl(FPDF_DOCUMENT output, FPDF_PAGE destination, FPDF_PAGE scratch, const Annotation& a, bool preferFreeText) {
+[[nodiscard]] static bool AddImpl(FPDF_DOCUMENT output, FPDF_PAGE destination, FPDF_PAGE scratch, const Annotation& a, bool preferFreeText, const Annotation* editable, bool embedEditableData) {
     if (!output || !destination || !scratch || destination == scratch || a.type == Annotation::Type::TextColor) return false;
     const int count = FPDFPage_CountObjects(scratch);
     if (count <= 0) return false; // Never report a silently omitted annotation as success.
@@ -270,14 +271,14 @@ template<class GetSegment>
         return !!FPDFAnnot_SetAP(annot.get(), FPDF_ANNOT_APPEARANCEMODE_NORMAL,
                                  reinterpret_cast<FPDF_WIDESTRING>(ap.c_str()));
     };
-    const bool ok = build();
+    const bool ok = build() && (!embedEditableData || pdf_annotation_detach::Attach(annot.get(), editable ? *editable : a));
     annot.reset();
     if (!ok) { const bool removed = !!FPDFPage_RemoveAnnot(destination, index); (void)removed; }
     return ok;
 }
 
-bool Add(FPDF_DOCUMENT output, FPDF_PAGE destination, FPDF_PAGE scratch, const Annotation& a, bool preferFreeText) {
-    try { return AddImpl(output, destination, scratch, a, preferFreeText); }
+bool Add(FPDF_DOCUMENT output, FPDF_PAGE destination, FPDF_PAGE scratch, const Annotation& a, bool preferFreeText, const Annotation* editable, bool embedEditableData) {
+    try { return AddImpl(output, destination, scratch, a, preferFreeText, editable, embedEditableData); }
     catch (...) { return false; } // Caller discards the output copy, with no write.
 }
 
@@ -335,7 +336,7 @@ bool Contains(const ColorQuad& q, double x, double y) {
 }
 } // namespace
 
-bool AddTextColorOverlay(FPDF_PAGE destination, const Annotation& a, const TextColorOptions& options) {
+bool AddTextColorOverlay(FPDF_PAGE destination, const Annotation& a, const TextColorOptions& options, bool embedEditableData) {
     if (!destination || a.type!=Annotation::Type::TextColor || options.mode==TextColorMode::Marker ||
         static_cast<unsigned>(options.mode)>static_cast<unsigned>(TextColorMode::SpecifiedBackground)) return false;
     const int index=FPDFPage_GetAnnotCount(destination);
@@ -416,7 +417,8 @@ bool AddTextColorOverlay(FPDF_PAGE destination, const Annotation& a, const TextC
         const bool ok=FPDFAnnot_SetRect(annot.get(),&bounds) && FPDFAnnot_SetFlags(annot.get(),FPDF_ANNOT_FLAG_PRINT) &&
             SetString(annot.get(),"NM",a.id) && SetString(annot.get(),"T",L"PDF Note Workspace") &&
             FPDFAnnot_SetAP(annot.get(),FPDF_ANNOT_APPEARANCEMODE_NORMAL,
-                           reinterpret_cast<FPDF_WIDESTRING>(appearance.c_str()));
+                           reinterpret_cast<FPDF_WIDESTRING>(appearance.c_str())) &&
+            (!embedEditableData || pdf_annotation_detach::Attach(annot.get(),a));
         annot.reset();
         if (!ok) { const bool removed=!!FPDFPage_RemoveAnnot(destination,index); (void)removed; }
         return ok;
@@ -462,7 +464,8 @@ bool Finalize(FPDF_PAGE destination) {
         AnnotHandle annot(FPDFPage_GetAnnot(destination, i), FPDFPage_CloseAnnot);
         FS_RECTF rect{};
         if (!annot || !FPDFAnnot_GetRect(annot.get(), &rect) ||
-            !Finite(rect.left) || !Finite(rect.right) || !Finite(rect.top) || !Finite(rect.bottom)) return false;
+            !Finite(rect.left) || !Finite(rect.right) || !Finite(rect.top) || !Finite(rect.bottom) ||
+            !pdf_annotation_detach::Seal(annot.get())) return false;
     }
     return true;
 }

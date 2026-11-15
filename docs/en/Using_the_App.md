@@ -24,7 +24,7 @@ Ctrl+E fits the current page, Ctrl+G goes to a page number, and Ctrl+wheel chang
 
 ### Rotate a PDF page
 
-Use **View > Rotate** for the current page or all pages in 90-degree steps. The PDF original is unchanged; viewing angles are stored with the previous position and restored when reopened. Annotations created on a rotated view keep their direction in `.clrop`. PDF output follows Keep page rotation; PNG uses the original orientation. See [PDF view and navigation](Help_Reference.md#pdf-view-and-navigation) for details.
+**View > Rotate** applies a temporary rotation until the PDF closes. **Edit > Rotate** turns pages from their displayed angles and saves the result with the last view position. Annotations created on a rotated view keep their direction in `.clrop`. PDF output follows **Keep page rotation**, and PNG uses the original orientation. See [PDF page rotation](Help_Reference.md#pdf-page-rotation) for details.
 
 ## Choose how to keep your record
 

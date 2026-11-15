@@ -2,6 +2,7 @@
 // NOTE: Included by workspace_controller.cppinc. This fragment owns lecture/session/file
 // enumeration and selection reload flows.
 #include "note/note_identity_store.h"
+#include "core/identity_path_scope.h"
 #include "core/localization.h"
 
 void LoadLectures() {
@@ -216,6 +217,25 @@ void RefreshRegisteredExternalLectures(const std::vector<std::wstring>& previous
     RefreshLectureOrderWindow();
 }
 
+// The session list and the file list use the same three source directories.
+// Do not open junctions or unreadable entries while discovering candidates.
+template<class OnFile>
+static void ForEachSessionFile(const std::filesystem::path& session, OnFile onFile) {
+    for (const auto& dir : {session / L"pdf", session / L"note", session}) {
+        DWORD attrs = 0;
+        if (!TryGetPathAttributesWin32(dir, &attrs) ||
+            !(attrs & FILE_ATTRIBUTE_DIRECTORY) || (attrs & FILE_ATTRIBUTE_REPARSE_POINT)) continue;
+        std::error_code ec;
+        for (auto it = std::filesystem::directory_iterator(dir, ec);
+             !ec && it != std::filesystem::directory_iterator(); it.increment(ec)) {
+            bool reparse = false;
+            if (!TryIsReparsePointNoFollow(it->path(), reparse) || reparse) continue;
+            std::error_code statusError;
+            if (it->is_regular_file(statusError) && !statusError && !onFile(it->path())) return;
+        }
+    }
+}
+
 void LoadSessions(const std::wstring& lecturePath) {
     const ui::ListBoxUpdate update(g_hSessionList);
     ui::RememberOpenListIndex(g_hSessionList, -1);
@@ -224,8 +244,11 @@ void LoadSessions(const std::wstring& lecturePath) {
     g_sessions.clear();
     SendMessageW(g_hSessionList, LB_RESETCONTENT, 0, 0);
     g_currentSessionPath.clear();
-    std::error_code ec;
-    if (!std::filesystem::exists(lecturePath, ec) || ec) {
+    auto rootText = lecturePath;
+    std::replace(rootText.begin(), rootText.end(), L'/', L'\\');
+    const std::filesystem::path root(rootText);
+    const auto localRoot = identity_path_scope::LocalPath(rootText);
+    if (!localRoot || !identity_path_scope::NoReparseAncestors(*localRoot) || !DirectoryExistsWin32(root)) {
         InvalidateRect(g_hSessionList, nullptr, TRUE);
         preview_trace::Append(
             L"LoadSessions",
@@ -240,69 +263,46 @@ void LoadSessions(const std::wstring& lecturePath) {
         std::transform(s.begin(), s.end(), s.begin(), ::towlower);
         return s;
     };
-    auto cacheKey = norm(std::filesystem::path(g_config.cacheDir).filename().wstring());
-
-    struct DirEntry {
-        std::filesystem::path path;
-        std::wstring name;
-        std::wstring key;
+    const auto cacheKey = norm(std::filesystem::path(g_config.cacheDir).filename().wstring());
+    const auto settingsKey = norm(kLectureSettingsDirName);
+    const auto hasSessionFiles = [](const std::filesystem::path& dir) {
+        bool found = false;
+        ForEachSessionFile(dir, [&](const auto& file) {
+            found = IsPdfFile(file) || IsImageFile(file) || IsNoteFile(file) || IsOfficeImportSourcePath(file);
+            return !found;
+        });
+        return found;
     };
 
-    auto isReserved = [&](const std::wstring& name) {
-        auto key = norm(name);
-        if (key.empty()) return true;
-        if (key == L"pdf" || key == L"note") return true;
-        if (key == norm(kLectureSettingsDirName)) return true;
-        if (!cacheKey.empty() && key == cacheKey) return true;
-        return false;
-    };
-
-    auto hasManagedFilesInDirectory = [&](const std::filesystem::path& dir) -> bool {
-        std::error_code dirEc;
-        if (!std::filesystem::exists(dir, dirEc) || dirEc) return false;
-        dirEc.clear();
-        if (!std::filesystem::is_directory(dir, dirEc) || dirEc) return false;
-        for (const auto& e : std::filesystem::directory_iterator(dir, dirEc)) {
-            bool isReparse = false;
-            if (TryIsReparsePointNoFollow(e.path(), isReparse) && isReparse) continue;
-            std::error_code stEc;
-            if (!e.is_regular_file(stEc) || stEc) continue;
-            if (IsPdfFile(e.path()) || IsImageFile(e.path()) || IsNoteFile(e.path())) {
-                return true;
+    // Ordinary folders stay selectable even when empty. The conventional
+    // storage folders belong to their parent, but can contain nested sessions.
+    std::vector<std::filesystem::path> pending{root};
+    while (!pending.empty()) {
+        auto parent = std::move(pending.back());
+        pending.pop_back();
+        std::error_code ec;
+        for (auto it = std::filesystem::directory_iterator(parent, ec);
+             !ec && it != std::filesystem::directory_iterator(); it.increment(ec)) {
+            const auto& path = it->path();
+            DWORD attrs = 0;
+            if (!TryGetPathAttributesWin32(path, &attrs) ||
+                !(attrs & FILE_ATTRIBUTE_DIRECTORY) || (attrs & FILE_ATTRIBUTE_REPARSE_POINT)) continue;
+            const auto name = path.filename().wstring();
+            const auto key = norm(name);
+            if (key.empty() || key == settingsKey || key == cacheKey) continue;
+            const bool typeFolder = key == L"pdf" || key == L"note";
+            if (!typeFolder) {
+                g_sessions.push_back({name, path.wstring()});
             }
+            pending.push_back(path);
         }
-        return false;
-    };
-
-    std::vector<DirEntry> dirs;
-    for (const auto& entry : std::filesystem::directory_iterator(lecturePath, ec)) {
-        bool isReparse = false;
-        if (TryIsReparsePointNoFollow(entry.path(), isReparse) && isReparse) continue;
-        std::error_code stEc;
-        if (!entry.is_directory(stEc) || stEc) continue;
-        auto name = entry.path().filename().wstring();
-        if (isReserved(name)) continue;
-        auto key = norm(name);
-        if (key.empty()) continue;
-        dirs.push_back({entry.path(), name, std::move(key)});
-    }
-
-    for (const auto& entry : dirs) {
-        SessionEntry s;
-        s.displayName = entry.name;
-        s.path = entry.path.wstring();
-        g_sessions.push_back(std::move(s));
     }
     SortSessionsForDisplay(g_sessions, ParseSessionSortMode(g_config.sessionSortMode));
 
-    const bool hasLectureLevelFiles =
-        hasManagedFilesInDirectory(std::filesystem::path(lecturePath)) ||
-        hasManagedFilesInDirectory(std::filesystem::path(lecturePath) / L"pdf") ||
-        hasManagedFilesInDirectory(std::filesystem::path(lecturePath) / L"note");
-    if (hasLectureLevelFiles) {
+    if (hasSessionFiles(root)) {
         SessionEntry direct;
         direct.displayName = DirectFilesSessionLabel();
-        direct.path = lecturePath;
+        direct.path = root.wstring();
         g_sessions.push_back(std::move(direct));
     }
 
@@ -342,10 +342,8 @@ void LoadFiles(const SessionEntry& session, std::wstring& preferredPdf, std::wst
     const bool callerSpecifiedPdf = !preferredPdf.empty();
     const bool callerSpecifiedNote = !preferredNote.empty();
 
-    std::error_code ec;
     g_currentSessionPath = session.path;
     std::filesystem::path sessionRoot = std::filesystem::path(session.path);
-    RecoverPendingFileOperationTransactionsForSession(g_hMainWnd, sessionRoot);
     std::vector<FileEntry> officePdfFiles;
     std::unordered_set<std::wstring> pdfStemKeys;
     auto stemKeyForSameNamePdf = [](const std::filesystem::path& p) {
@@ -372,32 +370,13 @@ void LoadFiles(const SessionEntry& session, std::wstring& preferredPdf, std::wst
         }
     };
 
-    // pdf/noteサブディレクトリ優先探索を両方に適用
-    auto pdfDir  = sessionRoot / L"pdf";
-    auto noteDir = sessionRoot / L"note";
-    if (std::filesystem::exists(pdfDir, ec) && !ec && std::filesystem::is_directory(pdfDir, ec) && !ec) {
-        for (const auto& entry : std::filesystem::directory_iterator(pdfDir, ec)) {
-            bool isReparse = false;
-            if (TryIsReparsePointNoFollow(entry.path(), isReparse) && isReparse) continue;
-            std::error_code stEc;
-            if (entry.is_regular_file(stEc) && !stEc) addFile(entry.path());
-        }
-    }
-    ec.clear();
-    if (std::filesystem::exists(noteDir, ec) && !ec && std::filesystem::is_directory(noteDir, ec) && !ec) {
-        for (const auto& entry : std::filesystem::directory_iterator(noteDir, ec)) {
-            bool isReparse = false;
-            if (TryIsReparsePointNoFollow(entry.path(), isReparse) && isReparse) continue;
-            std::error_code stEc;
-            if (entry.is_regular_file(stEc) && !stEc) addFile(entry.path());
-        }
-    }
-    // fallback: direct children
-    for (const auto& entry : std::filesystem::directory_iterator(sessionRoot, ec)) {
-        bool isReparse = false;
-        if (TryIsReparsePointNoFollow(entry.path(), isReparse) && isReparse) continue;
-        std::error_code stEc;
-        if (entry.is_regular_file(stEc) && !stEc) addFile(entry.path());
+    const auto localSession = identity_path_scope::LocalPath(session.path);
+    if (localSession && identity_path_scope::NoReparseAncestors(*localSession)) {
+        RecoverPendingFileOperationTransactionsForSession(g_hMainWnd, sessionRoot);
+        ForEachSessionFile(sessionRoot, [&](const auto& path) {
+            addFile(path);
+            return true;
+        });
     }
 
     for (const auto& officeFile : officePdfFiles) {
@@ -463,11 +442,11 @@ void LoadFiles(const SessionEntry& session, std::wstring& preferredPdf, std::wst
         [](const FileEntry& a, const FileEntry& b) {
             return std::filesystem::path(a.path).filename().wstring() < std::filesystem::path(b.path).filename().wstring();
         });
-    for (const auto& name : FileDisplayLabelsForPaths(g_pdfFiles, sessionRoot)) {
+    for (const auto& name : FileDisplayLabelsForPaths(g_pdfFiles)) {
         SendMessageW(g_hPdfList, LB_ADDSTRING, 0,
                      reinterpret_cast<LPARAM>(name.c_str()));
     }
-    for (const auto& name : FileDisplayLabelsForPaths(g_noteFiles, sessionRoot)) {
+    for (const auto& name : FileDisplayLabelsForPaths(g_noteFiles)) {
         SendMessageW(g_hNoteList, LB_ADDSTRING, 0,
                      reinterpret_cast<LPARAM>(name.c_str()));
     }
@@ -536,29 +515,35 @@ bool RefreshWorkspaceList(HWND list) {
 }
 
 void ReloadSessionsAndSelect(const std::wstring& lecturePath,
-                                    const std::wstring& desiredName,
+                                    const std::wstring& desiredPath,
                                     bool reopenFiles) {
     const ULONGLONG startTick = preview_trace::TickNow();
     preview_trace::Append(
         L"ReloadSessionsAndSelect",
         L"begin lecturePath=" + lecturePath +
-        L" desiredName=" + desiredName +
+        L" desiredPath=" + desiredPath +
         L" reopenFiles=" + preview_trace::Bool(reopenFiles));
     if (lecturePath.empty()) return;
     HWND owner = nullptr;
     if (g_hLectureList) owner = GetParent(g_hLectureList);
+    auto lectureText = lecturePath;
+    std::replace(lectureText.begin(), lectureText.end(), L'/', L'\\');
+    const auto localLecture = identity_path_scope::LocalPath(lectureText);
+    if (!localLecture || !identity_path_scope::NoReparseAncestors(*localLecture)) return;
     if (!VerifyWorkspaceWritableForEditing(owner) ||
-        !VerifyDirReadableWritableForEditing(owner, std::filesystem::path(lecturePath),
+        !VerifyDirReadableWritableForEditing(owner, std::filesystem::path(lectureText),
                                              g_config.studentMode ? L"workspace.directory.lecture.student"
                                                                   : L"workspace.directory.lecture.parent")) {
         return;
     }
-    g_currentLecturePath = lecturePath;
-    LoadSessions(lecturePath);
-    if (desiredName.empty()) return;
+    g_currentLecturePath = lectureText;
+    LoadSessions(lectureText);
+    if (desiredPath.empty()) return;
+    const auto desired = identity_path_scope::LocalPath(desiredPath);
+    if (!desired) return;
     int idx = -1;
     for (size_t i = 0; i < g_sessions.size(); ++i) {
-        if (g_sessions[i].displayName == desiredName) {
+        if (identity_path_scope::LocalPath(g_sessions[i].path) == desired) {
             idx = static_cast<int>(i);
             break;
         }
@@ -566,6 +551,7 @@ void ReloadSessionsAndSelect(const std::wstring& lecturePath,
     if (idx >= 0) {
         SendMessageW(g_hSessionList, LB_SETCURSEL, idx, 0);
         if (reopenFiles) {
+            if (!identity_path_scope::NoReparseAncestors(*desired)) return;
             if (!VerifyDirReadableWritableForEditing(owner, std::filesystem::path(g_sessions[static_cast<size_t>(idx)].path),
                                                      g_config.studentMode ? L"workspace.directory.session.student"
                                                                           : L"workspace.directory.session.parent")) {
@@ -577,6 +563,8 @@ void ReloadSessionsAndSelect(const std::wstring& lecturePath,
             AutoOpenSingleSessionFiles(owner);
             SyncLeftPaneSelection();
             RefreshMainWindowUiState(owner);
+        } else {
+            g_currentSessionPath = g_sessions[static_cast<size_t>(idx)].path;
         }
     }
     if (g_hLectureList) {
@@ -586,7 +574,7 @@ void ReloadSessionsAndSelect(const std::wstring& lecturePath,
     preview_trace::Append(
         L"ReloadSessionsAndSelect",
         L"end lecturePath=" + lecturePath +
-        L" desiredName=" + desiredName +
+        L" desiredPath=" + desiredPath +
         L" elapsed_ms=" + preview_trace::ElapsedMs(startTick));
 }
 

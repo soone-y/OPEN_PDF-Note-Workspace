@@ -21,7 +21,7 @@ static void RenderPdf(HWND hwnd, HDC hdc, const RECT& client, const RECT& paintR
     DeleteObject(pdfBg);
 
     const int currentPage = PageAtCurrentView();
-    if (g_pdf.kind == DocKind::None && g_currentNotePath.empty()) {
+    if (ShouldShowEmptyViewGuide()) {
         empty_view_guide::Paint(hwnd, memDC, client,
             shortcut_help::Build(g_config.emptyViewGuideMode, AnnotToolShortcutBindings(), g_shapeDrawMode),
             g_hUIFont, g_theme);

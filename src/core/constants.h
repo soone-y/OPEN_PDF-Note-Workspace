@@ -60,6 +60,7 @@ inline constexpr int    kMinListHeight   = 60;
 //   0x2001 kScrollTimerId
 //   0x2002 kPdfVirtualRenderTimerId
 //   0x2003 kPdfKeyboardScrollTimerId
+//   0x2004 kPdfBitmapRetentionTimerId (defined in pdf_view/view_state.cppinc)
 //   0x2005 kZoomTimerId (defined in pdf_view/view_state.cppinc)
 //   0x504  kAutoScrollTimerId
 // MainWndProc timers:

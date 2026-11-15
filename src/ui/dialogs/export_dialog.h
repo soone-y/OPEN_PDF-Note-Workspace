@@ -20,6 +20,7 @@ struct ExportDialogResult {
     int pageIndex = 0; // 0-based for PNG export
     bool includeAnnots = true;
     bool standardTextAnnots = true;
+    bool embedEditableData = true;
     bool matchPdfPaneTextLayout = true;
     pdf_annotation_export::TextColorOptions textColor;
     double pdfScale = 1.0;

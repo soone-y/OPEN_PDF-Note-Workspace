@@ -1,7 +1,22 @@
 ﻿// file: pdf_view/layout_cache.cppinc
 // NOTE: Included by `src/pdf_view/navigation.cppinc` for page layout, cache population, and image loading.
 
-static void ClampPdfScroll(int viewH, int viewW) {
+// Owned by the UI thread. Observe clamped input before paints can coalesce
+// opposite moves, and sample the viewport again for other position changes.
+static pdf_scroll::RecentTravel g_pdfRecentScrollTravel;
+
+static void ObservePdfScrollTravel(int viewH, int viewW, PdfFlowMode mode, ULONGLONG now) {
+    if (g_pdf.kind != DocKind::Pdf || PdfSinglePageModeActive() || g_zoomAnimating ||
+        g_pdfInitialViewportUpdateDepth != 0 || g_pdf.pages.empty()) {
+        g_pdfRecentScrollTravel.Reset();
+        return;
+    }
+    const bool vertical = FlowIsVertical(mode);
+    g_pdfRecentScrollTravel.Observe(now, vertical ? g_pdf.scrollY : g_pdf.scrollX,
+                                   vertical ? viewH : viewW, g_pdf.scale, static_cast<int>(mode));
+}
+
+static void ClampPdfScroll(int viewH, int viewW, bool observeTravel) {
     PdfFlowMode mode = CurrentFlowMode();
     double padX = FlowCrossPaddingX(mode);
     double padY = FlowCrossPaddingY(mode);
@@ -9,6 +24,7 @@ static void ClampPdfScroll(int viewH, int viewW) {
     double contentHPad = g_pdf.contentHeight + padY * 2.0;
 
     if (contentWPad <= 0.0 || contentHPad <= 0.0) {
+        g_pdfRecentScrollTravel.Reset();
         g_pdf.scrollY = 0.0;
         g_pdf.scrollX = 0.0;
         if (g_hPdfView) {
@@ -40,6 +56,11 @@ static void ClampPdfScroll(int viewH, int viewW) {
     double minX = minXBase - kScrollOvershootPx;
     double maxBoundX = maxXBase + kScrollOvershootPx;
     g_pdf.scrollX = std::clamp(g_pdf.scrollX, minX, maxBoundX);
+    if (observeTravel) {
+        ObservePdfScrollTravel(viewH, viewW, mode, preview_trace::TickNow());
+    } else {
+        g_pdfRecentScrollTravel.Reset();
+    }
 
     if (g_hPdfView) {
         auto clampPos = [](double pos, double maxPos) {
@@ -97,7 +118,7 @@ static void UpdatePageLayout(HWND pdfWnd) {
     if (count == 0) {
         RECT rc{};
         GetClientRect(pdfWnd, &rc);
-        ClampPdfScroll(rc.bottom - rc.top, rc.right - rc.left);
+        ClampPdfScroll(rc.bottom - rc.top, rc.right - rc.left, false);
         g_scrollVelocity = 0.0;
         return;
     }
@@ -130,7 +151,7 @@ static void UpdatePageLayout(HWND pdfWnd) {
         g_pdf.pageRects[static_cast<size_t>(current)] = {
             pageLeft, pageTop, pageLeft + page.w, pageTop + page.h
         };
-        ClampPdfScroll(viewH, viewW);
+        ClampPdfScroll(viewH, viewW, false);
         g_scrollVelocity = 0.0;
         return;
     }
@@ -193,7 +214,7 @@ static void UpdatePageLayout(HWND pdfWnd) {
 
     RECT rc{};
     GetClientRect(pdfWnd, &rc);
-    ClampPdfScroll(rc.bottom - rc.top, rc.right - rc.left);
+    ClampPdfScroll(rc.bottom - rc.top, rc.right - rc.left, false);
     g_scrollVelocity = 0.0;
 }
 
@@ -257,6 +278,7 @@ struct PdfVirtualRenderCandidate {
     int targetH = 0;
     uint64_t targetPixels = 0;
     bool coarse = false;
+    bool speculative = false;
 };
 
 struct PdfVirtualRenderJob {
@@ -271,6 +293,7 @@ struct PdfVirtualRenderJob {
     int rotation = 0;
     bool coarse = false;
     bool textCoverage = false;
+    bool speculative = false;
 
     // Scheduling metadata only; never part of bitmap identity. Updated on
     // the UI thread under the same mutex used by worker dispatch.
@@ -293,6 +316,7 @@ struct PdfVirtualRenderResult {
     int stride = 0;
     bool coarse = false;
     bool textCoverage = false;
+    bool speculative = false;
     bool success = false;
     bool workerException = false;
     std::vector<uint8_t> pixels;
@@ -419,7 +443,7 @@ static bool OpenWorkerPdfDocument(const PdfVirtualRenderJob& job,
     std::wstring openPath = ToExtendedPathIfAbsoluteForRender(job.path);
     HANDLE hFile = CreateFileW(openPath.c_str(),
                                GENERIC_READ,
-                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                               FILE_SHARE_READ | FILE_SHARE_DELETE,
                                nullptr,
                                OPEN_EXISTING,
                                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_RANDOM_ACCESS,
@@ -559,6 +583,7 @@ static void PdfVirtualRenderWorkerMain() noexcept {
             result.pageIndex = job.pageIndex;
             result.targetW = job.targetW; result.targetH = job.targetH;
             result.coarse = job.coarse; result.textCoverage = job.textCoverage;
+            result.speculative = job.speculative;
             {
                 std::unique_lock<std::mutex> lock(g_pdfVirtualWorkerMutex);
                 if (result.workerException && g_pdfVirtualWorkerProbe.enabled) ++g_pdfVirtualWorkerProbe.exceptions;
@@ -657,6 +682,7 @@ static bool QueuePdfVirtualRenderJob(HWND hwnd, const PdfVirtualRenderCandidate&
     job.targetH = candidate.targetH;
     job.coarse = candidate.coarse;
     job.textCoverage = textCoverage;
+    job.speculative = candidate.speculative;
     job.visible = candidate.visible;
     job.distance = candidate.distance;
     {
@@ -763,7 +789,8 @@ static PdfVirtualUpdateResult ApplyPdfVirtualRenderResults(HWND hwnd) {
             // before leaving a page on its empty background.
             std::vector<uint8_t> fallbackPixels;
             int fallbackStride = 0;
-            if (!item.workerException && RenderPdfPageBitmap(item.pageIndex, item.targetW, item.targetH,
+            if (!item.speculative && !item.workerException &&
+                RenderPdfPageBitmap(item.pageIndex, item.targetW, item.targetH,
                                     fallbackPixels, fallbackStride)) {
                 page.bmpW = item.targetW;
                 page.bmpH = item.targetH;
@@ -1087,11 +1114,15 @@ static bool LoadPdfPageReadablePaths(int pageIndex, std::vector<PageCache::Reada
     return true;
 }
 
-static void EvictPageBitmap(PageCache& page) {
+static void EvictPageTextCoverage(PageCache& page) {
     std::vector<uint8_t>().swap(page.textCoverage);
     page.textCoverageW = page.textCoverageH = 0;
     page.textCoverageGeneration = page.textCoverageRequestedGeneration = 0;
     page.textCoverageRequestedW = page.textCoverageRequestedH = 0;
+}
+
+static void EvictPageBitmap(PageCache& page) {
+    EvictPageTextCoverage(page);
     if (!page.pixels.empty()) {
         std::vector<uint8_t>().swap(page.pixels);
     }
@@ -1099,6 +1130,7 @@ static void EvictPageBitmap(PageCache& page) {
     page.bmpH = 0;
     page.stride = 0;
     page.pixelsGeneration = 0;
+    page.bitmapRetainUntilTick = 0;
     page.bitmapCoarse = false;
     page.bitmapFailedGeneration = 0;
     page.bitmapFailedW = 0;
@@ -1130,6 +1162,7 @@ struct PdfVirtualViewport {
     double retainStart = 0.0;
     double retainEnd = 0.0;
     int retainMargin = 0;
+    double recentTravel = 0.0;
 };
 
 struct PdfVirtualCacheMetrics {
@@ -1157,6 +1190,31 @@ static bool g_pdfVirtualWasScrollActive = false;
 static bool g_pdfVirtualNeedsSettleRepaint = false;
 static bool g_pdfVirtualRenderTimerArmed = false;
 static HWND g_pdfVirtualRenderTimerHwnd = nullptr;
+static constexpr ULONGLONG kPdfBitmapRetentionMs = 2000;
+static constexpr ULONGLONG kPdfBitmapRetentionMinTimerMs = 125;
+static ULONGLONG g_pdfBitmapRetentionDeadline = 0;
+static HWND g_pdfBitmapRetentionTimerHwnd = nullptr;
+
+static void StopPdfBitmapRetentionTimer() {
+    if (!g_pdfBitmapRetentionTimerHwnd) return;
+    KillTimer(g_pdfBitmapRetentionTimerHwnd, kPdfBitmapRetentionTimerId);
+    g_pdfBitmapRetentionTimerHwnd = nullptr;
+    g_pdfBitmapRetentionDeadline = 0;
+}
+
+// UI-owned, one wakeup for the next expiry, with close deadlines batched.
+// If Windows cannot arm it, the next viewport update expires entries and
+// trims them to the same bitmap budget.
+static void SchedulePdfBitmapRetention(HWND pdfWnd, ULONGLONG deadline, ULONGLONG now) {
+    if (g_pdfBitmapRetentionTimerHwnd == pdfWnd && g_pdfBitmapRetentionDeadline == deadline) return;
+    StopPdfBitmapRetentionTimer();
+    if (deadline == 0) return;
+    const auto delay = static_cast<UINT>(std::max(deadline - now, kPdfBitmapRetentionMinTimerMs));
+    if (SetTimer(pdfWnd, kPdfBitmapRetentionTimerId, delay, nullptr)) {
+        g_pdfBitmapRetentionTimerHwnd = pdfWnd;
+        g_pdfBitmapRetentionDeadline = deadline;
+    }
+}
 
 static uint64_t PageBitmapBytes(const PageCache& page) {
     const uint64_t bitmap = page.pixels.empty() || page.bmpW <= 0 || page.bmpH <= 0 || page.stride <= 0
@@ -1166,6 +1224,7 @@ static uint64_t PageBitmapBytes(const PageCache& page) {
 
 static void InvalidatePdfRenderGeneration() {
     CancelPdfVirtualRenderJobs();
+    g_pdfRecentScrollTravel.Reset();
     g_pdfVirtualViewportSignatureValid = false;
     g_pdfVirtualWasScrollActive = false;
     g_pdfVirtualNeedsSettleRepaint = false;
@@ -1264,14 +1323,7 @@ static PdfVirtualViewport ComputePdfVirtualViewport(HWND pdfWnd) {
     viewport.visibleStart = viewport.vertical ? g_pdf.scrollY : g_pdf.scrollX;
     viewport.visibleEnd = viewport.visibleStart + primaryView;
 
-    int baseMargin = std::clamp(primaryView / 4, 200, 800);
-    double speed = std::abs(g_scrollVelocity);
-    if (speed >= 80.0) {
-        baseMargin = std::max(80, baseMargin / 4);
-    } else if (speed >= 35.0) {
-        baseMargin = std::max(120, baseMargin / 2);
-    }
-    viewport.retainMargin = baseMargin;
+    viewport.retainMargin = std::clamp(primaryView / 4, 200, 800);
     viewport.retainStart = viewport.visibleStart - viewport.retainMargin;
     viewport.retainEnd = viewport.visibleEnd + viewport.retainMargin;
     viewport.valid = true;
@@ -1302,14 +1354,18 @@ static double DistanceFromRangeCenter(double start, double end, double rangeStar
     return std::abs(itemCenter - rangeCenter);
 }
 
-static void TrimPdfVirtualOffscreenBitmaps(const PdfVirtualViewport& viewport,
-                                           const std::vector<char>& visiblePages,
-                                           PdfVirtualCacheMetrics& metrics) {
+[[nodiscard]] static uint64_t PdfBitmapBudgetBytes() {
     const int budgetMiB = std::clamp(g_config.pdfBitmapBudgetMiB,
-                                     kPdfBitmapBudgetMiBMin,
-                                     kPdfBitmapBudgetMiBMax);
-    const uint64_t kBitmapBudgetBytes = static_cast<uint64_t>(budgetMiB) * 1024ull * 1024ull;
-    if (metrics.bitmapBytes <= kBitmapBudgetBytes || g_pdf.pages.empty()) return;
+                                    kPdfBitmapBudgetMiBMin,
+                                    kPdfBitmapBudgetMiBMax);
+    return static_cast<uint64_t>(budgetMiB) * 1024ull * 1024ull;
+}
+
+static void TrimPdfVirtualOffscreenBitmaps(const PdfVirtualViewport& viewport,
+                                          const std::vector<char>& visiblePages,
+                                          PdfVirtualCacheMetrics& metrics) {
+    const uint64_t bitmapBudgetBytes = PdfBitmapBudgetBytes();
+    if (metrics.bitmapBytes <= bitmapBudgetBytes || g_pdf.pages.empty()) return;
 
     struct Candidate {
         size_t index = 0;
@@ -1332,7 +1388,7 @@ static void TrimPdfVirtualOffscreenBitmaps(const PdfVirtualViewport& viewport,
         return a.bytes > b.bytes;
     });
     for (const auto& candidate : candidates) {
-        if (metrics.bitmapBytes <= kBitmapBudgetBytes) break;
+        if (metrics.bitmapBytes <= bitmapBudgetBytes) break;
         PageCache& page = g_pdf.pages[candidate.index];
         uint64_t bytes = PageBitmapBytes(page);
         if (bytes == 0) continue;
@@ -1421,6 +1477,7 @@ static void TracePdfVirtualCacheUpdate(const PdfVirtualViewport& viewport,
         L" char_pages=" + std::to_wstring(metrics.charBoxPages) +
         L" bmp_mib=" + std::to_wstring(metrics.bitmapBytes / (1024ull * 1024ull)) +
         L" margin=" + std::to_wstring(viewport.retainMargin) +
+        L" travel_viewports=" + std::to_wstring(viewport.recentTravel) +
         L" coarse=" + preview_trace::Bool(coarseActive) +
         L" pending=" + preview_trace::Bool(result.pending) +
         L" elapsed_ms=" + preview_trace::ElapsedMs(startTick));
@@ -1457,16 +1514,41 @@ static PdfVirtualUpdateResult UpdatePdfVirtualScrollCaches(HWND pdfWnd,
     if (g_pendingPdfRestore) open_work::Record(open_work::Kind::PdfCacheBeforeRestore);
     PdfVirtualViewport viewport = ComputePdfVirtualViewport(pdfWnd);
     if (!viewport.valid) return result;
+    const ULONGLONG now = preview_trace::TickNow();
+    ObservePdfScrollTravel(viewport.viewH, viewport.viewW, CurrentFlowMode(), now);
+    const bool scrollActive = IsPdfVirtualScrollActive(viewport, now);
+    viewport.recentTravel = g_pdfRecentScrollTravel.Viewports(now);
+    const bool moving = scrollActive && viewport.recentTravel > 0.0;
+    const bool fastScroll = moving && viewport.recentTravel >= 1.0;
+    // Keep recently visited pages on both sides for reversals. The bitmap
+    // budget still evicts the farthest offscreen images under memory pressure.
+    if (moving) {
+        const int extent = viewport.vertical ? viewport.viewH : viewport.viewW;
+        const auto margin = static_cast<int>(extent * std::clamp(viewport.recentTravel, 0.5, 1.0));
+        viewport.retainMargin = std::max(viewport.retainMargin, margin);
+        viewport.retainStart = viewport.visibleStart - viewport.retainMargin;
+        viewport.retainEnd = viewport.visibleEnd + viewport.retainMargin;
+    }
+    const bool coarsePrefetch = moving && !fastScroll;
     {
         std::lock_guard<std::mutex> lock(g_pdfVirtualWorkerMutex);
         RefreshPdfVirtualJobPriorities(g_pdfVirtualJobs, viewport, g_pdf.renderGeneration, g_pdf.pageRects);
+        auto obsolete = std::remove_if(g_pdfVirtualJobs.begin(), g_pdfVirtualJobs.end(),
+            [&](const PdfVirtualRenderJob& job) {
+                if (job.visible || job.textCoverage || (!job.speculative && !moving)) return false;
+                if (!coarsePrefetch) return true;
+                if (job.pageIndex < 0 || static_cast<size_t>(job.pageIndex) >= g_pdf.pageRects.size()) return true;
+                const auto& rect = g_pdf.pageRects[static_cast<size_t>(job.pageIndex)];
+                return !RangesOverlap(PagePrimaryStart(viewport, rect), PagePrimaryEnd(viewport, rect),
+                                      viewport.retainStart, viewport.retainEnd);
+            });
+        g_pdfVirtualJobs.erase(obsolete, g_pdfVirtualJobs.end());
     }
 
     // Avoid caching huge offscreen bitmaps at high zoom. Visible pages still render at full target size.
     constexpr uint64_t kPrefetchMaxPixels = 8ull * 1024ull * 1024ull; // ~32MB @ BGRA
+    constexpr uint64_t kCoarsePrefetchMaxPixels = 1ull * 1024ull * 1024ull; // ~4MB @ BGRA
     constexpr uint64_t kOffscreenKeepMaxPixels = 12ull * 1024ull * 1024ull; // ~48MB @ BGRA
-    const ULONGLONG now = preview_trace::TickNow();
-    const bool scrollActive = IsPdfVirtualScrollActive(viewport, now);
     if (scrollActive) {
         result.pending = true;
         g_pdfVirtualWasScrollActive = true;
@@ -1477,17 +1559,18 @@ static PdfVirtualUpdateResult UpdatePdfVirtualScrollCaches(HWND pdfWnd,
         g_pdfVirtualNeedsSettleRepaint = false;
     }
     const bool allowOffscreenRender = !scrollActive && mode != PdfVirtualUpdateMode::Paint;
+    const bool allowCoarsePrefetch = coarsePrefetch && mode != PdfVirtualUpdateMode::Paint &&
+                                     !HasPdfVirtualRenderWork();
     const bool allowCoarseVisibleRender = scrollActive;
     const size_t maxVisibleRenders =
         (mode == PdfVirtualUpdateMode::Paint) ? 1 :
         (mode == PdfVirtualUpdateMode::Timer) ? 2 : 3;
-    const size_t maxOffscreenRenders =
-        (mode == PdfVirtualUpdateMode::Paint || scrollActive) ? 0 : 1;
     const ULONGLONG maxRenderMs =
         (mode == PdfVirtualUpdateMode::Paint) ? 6 :
         (mode == PdfVirtualUpdateMode::Timer) ? 12 : 18;
 
     PdfVirtualCacheMetrics metrics;
+    ULONGLONG nextBitmapExpiry = 0;
     std::vector<char> visiblePages(g_pdf.pages.size(), 0);
     std::vector<PdfVirtualRenderCandidate> renderCandidates;
     renderCandidates.reserve(g_pdf.pages.size());
@@ -1500,6 +1583,12 @@ static PdfVirtualUpdateResult UpdatePdfVirtualScrollCaches(HWND pdfWnd,
         bool inRetainedRange = RangesOverlap(start, end, viewport.retainStart, viewport.retainEnd);
         bool inVisibleRange = RangesOverlap(start, end, viewport.visibleStart, viewport.visibleEnd);
         double visibleDistance = DistanceFromRangeCenter(start, end, viewport.visibleStart, viewport.visibleEnd);
+        // Include the viewport we just left, even when the first large
+        // movement was a jump that took it straight outside the retain range.
+        if (fastScroll && (inVisibleRange || page.bitmapWasVisible)) {
+            page.bitmapRetainUntilTick = now + kPdfBitmapRetentionMs;
+        }
+        page.bitmapWasVisible = inVisibleRange;
         if (inVisibleRange) {
             visiblePages[i] = 1;
             ++metrics.visiblePages;
@@ -1513,9 +1602,18 @@ static PdfVirtualUpdateResult UpdatePdfVirtualScrollCaches(HWND pdfWnd,
             result.pending = true;
         }
         if (!inRetainedRange) {
-            if (!page.pixels.empty()) ++metrics.evictedBitmaps;
+            const uint64_t havePixels = static_cast<uint64_t>(page.bmpW) * static_cast<uint64_t>(page.bmpH);
+            if (now < page.bitmapRetainUntilTick && page.pixelsGeneration == g_pdf.renderGeneration &&
+                !page.pixels.empty() && havePixels <= kOffscreenKeepMaxPixels) {
+                EvictPageTextCoverage(page);
+                if (nextBitmapExpiry == 0 || page.bitmapRetainUntilTick < nextBitmapExpiry) {
+                    nextBitmapExpiry = page.bitmapRetainUntilTick;
+                }
+            } else {
+                if (!page.pixels.empty()) ++metrics.evictedBitmaps;
+                EvictPageBitmap(page);
+            }
             if (!page.charBoxes.empty()) ++metrics.evictedCharBoxes;
-            EvictPageBitmap(page);
             EvictPageCharBoxes(page);
             result.changed = true;
             continue;
@@ -1526,12 +1624,16 @@ static PdfVirtualUpdateResult UpdatePdfVirtualScrollCaches(HWND pdfWnd,
             !page.pixels.empty() &&
             page.pixelsGeneration == g_pdf.renderGeneration &&
             !page.bitmapCoarse;
-        const bool useCoarseTarget = inVisibleRange && allowCoarseVisibleRender && !pageHasFreshFull;
+        const bool speculative = !inVisibleRange && allowCoarsePrefetch && !pageHasFreshFull;
+        const bool useCoarseTarget = (inVisibleRange && allowCoarseVisibleRender && !pageHasFreshFull) ||
+                                     speculative;
         const bool useStationaryDetail = inVisibleRange && !scrollActive;
         auto [targetW, targetH] = ComputePageBitmapTargetSize(page, useCoarseTarget,
                                                               useStationaryDetail);
         uint64_t targetPixels = static_cast<uint64_t>(targetW) * static_cast<uint64_t>(targetH);
-        const bool allowRetainedRender = inVisibleRange || (allowOffscreenRender && targetPixels <= kPrefetchMaxPixels);
+        const bool allowRetainedRender = inVisibleRange ||
+            (allowOffscreenRender && targetPixels <= kPrefetchMaxPixels) ||
+            (speculative && targetPixels <= kCoarsePrefetchMaxPixels);
         if (!inVisibleRange && !allowRetainedRender) {
             uint64_t havePixels = static_cast<uint64_t>(page.bmpW) * static_cast<uint64_t>(page.bmpH);
             if (havePixels > kOffscreenKeepMaxPixels) {
@@ -1553,8 +1655,11 @@ static PdfVirtualUpdateResult UpdatePdfVirtualScrollCaches(HWND pdfWnd,
                 page.bitmapFailedH = 0;
                 page.bitmapFailedCoarse = false;
             }
-            renderCandidates.push_back({ i, inVisibleRange, visibleDistance, targetW, targetH, targetPixels,
-                                         useCoarseTarget });
+            const double distance = speculative
+                ? DistanceOutsideRange(start, end, viewport.visibleStart, viewport.visibleEnd)
+                : visibleDistance;
+            renderCandidates.push_back({ i, inVisibleRange, distance, targetW, targetH, targetPixels,
+                                         useCoarseTarget, speculative });
         }
     }
 
@@ -1577,9 +1682,13 @@ static PdfVirtualUpdateResult UpdatePdfVirtualScrollCaches(HWND pdfWnd,
                 continue;
             }
         } else {
-            if (offscreenRendered >= maxOffscreenRenders) {
+            if (offscreenRendered >= 1 || (candidate.speculative && visibleRendered != 0)) {
                 result.pending = true;
                 continue;
+            }
+            if (candidate.speculative) {
+                RecountPdfVirtualCacheMetrics(metrics);
+                if (metrics.bitmapBytes + candidate.targetPixels * 4 > PdfBitmapBudgetBytes()) break;
             }
         }
         ULONGLONG elapsed = preview_trace::TickNow() - startTick;
@@ -1639,6 +1748,7 @@ static PdfVirtualUpdateResult UpdatePdfVirtualScrollCaches(HWND pdfWnd,
     if (result.pending) {
         SchedulePdfVirtualRender(pdfWnd);
     }
+    SchedulePdfBitmapRetention(pdfWnd, nextBitmapExpiry, now);
     TracePdfVirtualCacheUpdate(viewport, metrics, result, mode, scrollActive, startTick);
     return result;
 }
@@ -1723,7 +1833,6 @@ void BuildPageCaches(HWND pdfWnd) {
         cache.canonicalHeightPt = heightPt;
         cache.pdfWidthPt = widthPt;
         cache.pdfHeightPt = heightPt;
-        g_pdf.pageViewRotations.resize(static_cast<size_t>(g_pdf.pageCount), 0);
         cache.viewRotation = g_pdf.pageViewRotations[static_cast<size_t>(i)];
         const auto extent = page_rotation::Extent(widthPt, heightPt, cache.viewRotation);
         cache.widthPt = extent.width;

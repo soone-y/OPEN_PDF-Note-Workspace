@@ -18,6 +18,7 @@
 
 #include "hash.h"
 #include "json.h"
+#include "pdf_identity.h"
 #include "core/atomic_write.h"
 
 namespace clrop_bridge {
@@ -696,12 +697,20 @@ bool LoadAnnotations(const std::wstring& clropPath,
 bool SaveAnnotations(const std::wstring& clropPath,
                      const std::wstring& pdfPath,
                      const std::vector<Annotation>& annots,
-                     std::wstring& err) {
+                     std::wstring& err,
+                     const std::wstring& publishedPdfPath) {
     auto buildDocument = [&](clrop::Document* outDoc) -> bool {
         if (!outDoc) return false;
         clrop::Document doc;
         doc.version = 2;
         doc.pdfId = clrop::ComputePdfId(pdfPath);
+        if (!publishedPdfPath.empty()) {
+            if (!clrop::PdfIdHasFastFingerprint(doc.pdfId) || doc.pdfId.sha256.empty()) {
+                err = L"Failed to compute the PDF identity for the detached copy.";
+                return false;
+            }
+            doc.pdfId.path = publishedPdfPath;
+        }
         std::map<int, std::vector<clrop::Item>> perPage;
         for (const auto& input : annots) {
             const auto canonical = annotation_rotation::Canonical(input);
@@ -779,7 +788,10 @@ bool SaveAnnotations(const std::wstring& clropPath,
     if (!buildDocument(&doc)) return false;
     std::filesystem::path preferredTmp;
     std::filesystem::path quarantineDir;
-    if (!g_workspaceRoot.empty()) {
+    if (!publishedPdfPath.empty()) {
+        preferredTmp = std::filesystem::path(clropPath).parent_path();
+        quarantineDir = preferredTmp;
+    } else if (!g_workspaceRoot.empty()) {
         std::filesystem::path resource = std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__";
         preferredTmp = resource / L"__tmp__";
         quarantineDir = resource / L"__escape__";
@@ -789,7 +801,7 @@ bool SaveAnnotations(const std::wstring& clropPath,
     }
     std::uint64_t writtenSize = 0;
     std::int64_t writtenMtimeMs = 0;
-    if (TryGetFileMeta(clropPath, &writtenSize, &writtenMtimeMs)) {
+    if (publishedPdfPath.empty() && TryGetFileMeta(clropPath, &writtenSize, &writtenMtimeMs)) {
         StoreCachedAnnotationLoad(NormalizePathKey(clropPath), writtenSize, writtenMtimeMs, doc.pdfId, annots);
     }
     return true;

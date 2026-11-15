@@ -6,8 +6,8 @@ Commit date: 2026-10-19
 Release baseline: v0.6.0
 Source archive: https://github.com/mity/md4c/archive/f9e5eb232b95b737373ae706648cb75bd259ed1a.tar.gz
 Source archive SHA256: 61a3fe09f1c325d738777fb08cf959162bacda5888de0f7578e82a39df473780
-Local changes: patches/0001-japanese-whitespace-and-punctuation.patch
+Local changes: patches/0001-japanese-whitespace-and-punctuation.patch; patches/0002-explicit-quote-continuation.patch; patches/0003-double-underscore-underline.patch
 Security fixes: ff1cd9f95e5d62688090818575d3e18e21b401a1 and be8a0fec7ec0aacb1bfb365da2813e5b693d24f0 avoid quadratic implicit-list parent scans (GHSA-582f-rcwc-x4mp referenced by upstream commits).
-Patch comparison: existing two Japanese macro changes retained; only context rebased for the added ISCNTRLORWHITESPACE_ macro. No extension flags enabled.
+Patch comparison: existing two Japanese macro changes retained; only context rebased for the added ISCNTRLORWHITESPACE_ macro. Added app-local MD_FLAG_NOQUOTE_LAZY_CONTINUATION: preserve list lazy continuation, require explicit quote markers when enabled, reuse cached list-only parent intervals. Without the flag, upstream grammar is unchanged. The app-local MD_FLAG_DOUBLEUNDERSCOREUNDERLINE emits MD_SPAN_U for paired underscores while preserving single-underscore emphasis; the adapter enables it for .clro files.
 Old vendor md4c.c used CRLF; official source and the new candidate use LF. Old source reproduces after explicit newline normalization; no other unexplained difference.
 Allocation/callback-failure regressions remain required. Source archive hash is an input identity, not signature verification.

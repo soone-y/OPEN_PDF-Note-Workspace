@@ -45,10 +45,11 @@ NoteWorkspaceService::ResolveIndex(
     NoteContentKind contentKind) {
     if (!snapshotIdentity.valid()) return nullptr;
     const bool asciiOnly = metadata.clro_ascii_only;
+    const bool quoteLazyContinuation = metadata.quote_lazy_continuation;
     {
         std::lock_guard<std::mutex> lock(index_mutex_);
         if (auto cached = FindCachedIndexLocked(
-                snapshotIdentity, targetPath, contentKind, asciiOnly)) {
+                snapshotIdentity, targetPath, contentKind, asciiOnly, quoteLazyContinuation)) {
             return cached;
         }
     }
@@ -61,7 +62,7 @@ NoteWorkspaceService::ResolveIndex(
 
     std::lock_guard<std::mutex> lock(index_mutex_);
     if (auto cached = FindCachedIndexLocked(
-            snapshotIdentity, targetPath, contentKind, asciiOnly)) {
+            snapshotIdentity, targetPath, contentKind, asciiOnly, quoteLazyContinuation)) {
         return cached;
     }
     InsertCachedIndexLocked(snapshotIdentity, std::move(targetPath),
@@ -83,7 +84,8 @@ NoteWorkspaceService::ResolveIndexFromKernel(
     {
         std::lock_guard<std::mutex> lock(index_mutex_);
         if (auto cached = FindCachedIndexLocked(
-                snapshotIdentity, targetPath, contentKind, kernel.text_core().clro_ascii_only())) {
+                snapshotIdentity, targetPath, contentKind, kernel.text_core().clro_ascii_only(),
+                kernel.text_core().quote_lazy_continuation())) {
             return cached;
         }
     }
@@ -95,7 +97,8 @@ NoteWorkspaceService::ResolveIndexFromKernel(
 
     std::lock_guard<std::mutex> lock(index_mutex_);
     if (auto cached = FindCachedIndexLocked(
-            snapshotIdentity, targetPath, contentKind, kernel.text_core().clro_ascii_only())) {
+            snapshotIdentity, targetPath, contentKind, kernel.text_core().clro_ascii_only(),
+            kernel.text_core().quote_lazy_continuation())) {
         return cached;
     }
     InsertCachedIndexLocked(snapshotIdentity, std::move(targetPath),
@@ -123,11 +126,12 @@ std::shared_ptr<const WorkspaceNoteIndexSnapshot>
 NoteWorkspaceService::FindCachedIndexLocked(
     const SnapshotIdentity& identity,
     const std::wstring& targetPath,
-    NoteContentKind contentKind, bool clroAsciiOnly) {
+    NoteContentKind contentKind, bool clroAsciiOnly, bool quoteLazyContinuation) {
     for (CachedIndex& entry : index_cache_) {
         if (entry.target_path != targetPath ||
             entry.content_kind != contentKind ||
             entry.snapshot->text_model.meta.clro_ascii_only != clroAsciiOnly ||
+            entry.snapshot->text_model.meta.quote_lazy_continuation != quoteLazyContinuation ||
             !SameSnapshotIdentity(entry.identity, identity)) {
             continue;
         }

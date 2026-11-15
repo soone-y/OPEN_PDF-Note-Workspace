@@ -3,6 +3,7 @@
 #include "core/app_core.h"
 #include "core/localization.h"
 #include "core/font_list.h"
+#include "core/annotation_page_target.h"
 #include "pdf_view/pdf_view.h"
 #include "bridge/view_bridge.h"
 #include "ui/listbox_presentation.h"
@@ -56,6 +57,8 @@ constexpr int kAnnotInspectorLinkId = 125;
 constexpr int kAnnotInspectorWritingMode = 126;
 constexpr int kAnnotInspectorBackgroundAssist = 127;
 constexpr int kAnnotInspectorMathKind = 128;
+constexpr int kAnnotInspectorPage = 129;
+constexpr int kAnnotInspectorPageHint = 130;
 // This is the only timer owned by AnnotInspectorProc. Each inspector HWND
 // has its own timer namespace, so a fixed ID is safe for concurrent dialogs.
 constexpr UINT_PTR kAnnotInspectorApplyFeedbackTimer = 1;
@@ -64,8 +67,10 @@ struct AnnotInspectorCtx {
     HWND owner = nullptr;
     int index = -1;
     std::wstring annotationId;
+    std::wstring documentPath;
     bool editable = false;
     bool initializing = false;
+    bool pageEdited = false;
     Annotation::Type type = Annotation::Type::TextBox;
     int inactiveDismissCount = 0;
 };
@@ -152,7 +157,9 @@ std::wstring AnnotTextSnippet(const std::wstring& text) {
 }
 
 std::wstring AnnotListLabel(const Annotation& ann) {
-    std::wstring page = (ann.pageIndex >= 0) ? (L"P" + std::to_wstring(ann.pageIndex + 1)) : L"P?";
+    std::wstring page = (ann.pageIndex >= 0) ? (L"P" + std::to_wstring(static_cast<long long>(ann.pageIndex) + 1)) : L"P?";
+    if (g_pdf.kind == DocKind::Pdf && (ann.pageIndex < 0 || ann.pageIndex >= g_pdf.pageCount))
+        page += L" " + localization::Text(L"annotation.inspector.page_outside");
     std::wstring label = page + L" " + AnnotTypeLabel(ann);
     if (ann.type == Annotation::Type::TextBox || ann.type == Annotation::Type::MathBox) {
         std::wstring snippet = AnnotTextSnippet(ann.text);
@@ -407,7 +414,7 @@ void SetAnnotInspectorEditable(HWND hWnd, AnnotInspectorCtx* ctx, bool editable)
                    localization::Text(ctx->editable ? L"dialog.action.apply_close" : L"common.close").c_str());
     HWND content = GetDlgItem(hWnd, kAnnotInspectorContent);
     if (content) EnableWindow(content, ctx->editable && InspectorHasContent(ctx->type));
-    for (const int id : { kAnnotInspectorX1, kAnnotInspectorY1, kAnnotInspectorX2, kAnnotInspectorY2,
+    for (const int id : { kAnnotInspectorPage, kAnnotInspectorX1, kAnnotInspectorY1, kAnnotInspectorX2, kAnnotInspectorY2,
                           kAnnotInspectorColorHex, kAnnotInspectorColor, kAnnotInspectorWidth, kAnnotInspectorAlpha,
                           kAnnotInspectorShapeKind, kAnnotInspectorShapeDrawMode,
                           kAnnotInspectorArrowHead, kAnnotInspectorDash, kAnnotInspectorFontName,
@@ -424,6 +431,11 @@ void SetAnnotInspectorEditable(HWND hWnd, AnnotInspectorCtx* ctx, bool editable)
 
 bool ApplyAnnotInspectorAll(HWND hWnd, AnnotInspectorCtx* ctx, bool showValidation) {
     if (!ctx || ctx->initializing || !ctx->editable) return true;
+    if (g_pdf.kind != DocKind::Pdf || CurrentLogicalPdfPath() != ctx->documentPath || IsPdfPreviewReadOnlyActive()) {
+        if (showValidation) ShowInspectorValidation(hWnd, kAnnotInspectorApply,
+            localization::Text(L"annotation.inspector.document_changed").c_str());
+        return false;
+    }
     if (!ctx->annotationId.empty()) {
         for (size_t i = 0; i < g_annots.size(); ++i) {
             if (g_annots[i].id == ctx->annotationId) {
@@ -436,6 +448,21 @@ bool ApplyAnnotInspectorAll(HWND hWnd, AnnotInspectorCtx* ctx, bool showValidati
         (!ctx->annotationId.empty() && g_annots[static_cast<size_t>(ctx->index)].id != ctx->annotationId)) {
         if (showValidation) ShowInspectorValidation(hWnd, kAnnotInspectorApply,
                                                     L"注釈が変更または削除されたため、適用できません。");
+        return false;
+    }
+
+    const int pageLength = GetWindowTextLengthW(GetDlgItem(hWnd, kAnnotInspectorPage));
+    std::wstring pageText(static_cast<size_t>(std::max(0, pageLength)) + 1, L'\0');
+    GetDlgItemTextW(hWnd, kAnnotInspectorPage, pageText.data(), static_cast<int>(pageText.size()));
+    pageText.resize(static_cast<size_t>(std::max(0, pageLength)));
+    const int currentPage = g_annots[static_cast<size_t>(ctx->index)].pageIndex;
+    // A modeless inspector can stay open across Undo. Untouched page text must
+    // not silently reapply the previously displayed page when the user closes it.
+    const auto targetPage = ctx->pageEdited ? annotation_page_target::Parse(pageText, currentPage, g_pdf.pageCount)
+        : std::optional<int>(currentPage);
+    if (!targetPage) {
+        if (showValidation) ShowInspectorValidation(hWnd, kAnnotInspectorPage,
+            localization::Format(L"annotation.inspector.page_invalid", {{L"COUNT", std::to_wstring(g_pdf.pageCount)}}).c_str());
         return false;
     }
 
@@ -570,9 +597,29 @@ bool ApplyAnnotInspectorAll(HWND hWnd, AnnotInspectorCtx* ctx, bool showValidati
         }
     }
 
+    const bool pageChanged = *targetPage != after.pageIndex;
+    const auto moved = annotation_page_target::Retarget(after, *targetPage, g_pdf.pageCount);
+    if (!moved) {
+        if (showValidation) ShowInspectorValidation(hWnd, kAnnotInspectorPage,
+            localization::Text(L"annotation.inspector.page_basis_invalid").c_str());
+        return false;
+    }
+    after = *moved;
     if(after.type==Annotation::Type::Shape)after.shapeDrawMode=ShapeDrawModeForKind(after.shapeKind,after.shapeDrawMode);
     NormalizeOpenShapeStyle(after);
+    const bool writingModeChanged = after.type == Annotation::Type::TextBox &&
+        after.writingMode != g_annots[static_cast<size_t>(ctx->index)].writingMode;
     if (!UpdateAnnotationAtIndex(ctx->owner, ctx->index, after)) return false;
+    if (writingModeChanged || pageChanged) {
+        // Direction changes reflow the box. A second Apply must use those
+        // resulting bounds rather than silently restoring the old rectangle.
+        const auto& applied = g_annots[static_cast<size_t>(ctx->index)];
+        ctx->initializing = true;
+        for (const auto& value : {std::pair<int,double>{kAnnotInspectorX1,applied.x1},
+                {kAnnotInspectorY1,applied.y1}, {kAnnotInspectorX2,applied.x2}, {kAnnotInspectorY2,applied.y2}})
+            SetDlgItemTextW(hWnd, value.first, InspectorNumberText(value.second).c_str());
+        ctx->initializing = false;
+    }
     if(after.type == Annotation::Type::Shape) {
         const bool closed=!ShapeKindIsOpen(after.shapeKind);
         HWND modeCombo=GetDlgItem(hWnd,kAnnotInspectorShapeDrawMode);
@@ -593,6 +640,15 @@ bool ApplyAnnotInspectorAll(HWND hWnd, AnnotInspectorCtx* ctx, bool showValidati
         }
     }
     (void)SyncTextBoxToolFontFromAnnotationIndex(ctx->index);
+    const auto& applied = g_annots[static_cast<size_t>(ctx->index)];
+    ctx->initializing = true;
+    SetDlgItemTextW(hWnd, kAnnotInspectorPage, std::to_wstring(static_cast<long long>(applied.pageIndex) + 1).c_str());
+    ctx->initializing = false;
+    ctx->pageEdited = false;
+    std::wstring hint = L"/ " + std::to_wstring(g_pdf.pageCount);
+    if (applied.pageIndex < 0 || applied.pageIndex >= g_pdf.pageCount)
+        hint += L" " + localization::Text(L"annotation.inspector.page_outside");
+    SetDlgItemTextW(hWnd, kAnnotInspectorPageHint, hint.c_str());
     SetAnnotInspectorTitle(hWnd, g_annots[static_cast<size_t>(ctx->index)]);
     ClearInspectorValidation(hWnd);
     return true;
@@ -632,14 +688,23 @@ LRESULT CALLBACK AnnotInspectorProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         CreateWindowExW(0, L"BUTTON", L"注釈情報", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
                         8, infoY, 496, 106, hWnd, nullptr, g_hInst, nullptr);
 
-        const std::wstring pageStr = ann.pageIndex >= 0 ? std::to_wstring(ann.pageIndex + 1) : L"?";
+        const std::wstring pageStr = ann.pageIndex >= 0 ? std::to_wstring(static_cast<long long>(ann.pageIndex) + 1) : L"?";
         std::wstring typeLabel = L"種類: " + AnnotTypeLabel(ann);
-        std::wstring pageLabel = L"ページ: " + pageStr;
+        const std::wstring pageLabel = localization::Text(L"annotation.inspector.page_label");
 
         CreateWindowExW(0, L"STATIC", typeLabel.c_str(), WS_CHILD | WS_VISIBLE,
                         20, infoY + 22, 220, 20, hWnd, nullptr, g_hInst, nullptr);
         CreateWindowExW(0, L"STATIC", pageLabel.c_str(), WS_CHILD | WS_VISIBLE,
-                        250, infoY + 22, 220, 20, hWnd, nullptr, g_hInst, nullptr);
+                        250, infoY + 22, 50, 20, hWnd, nullptr, g_hInst, nullptr);
+        HWND pageEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", pageStr.c_str(),
+                        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                        300, infoY + 18, 60, 24, hWnd, reinterpret_cast<HMENU>(kAnnotInspectorPage), g_hInst, nullptr);
+        SendMessageW(pageEdit, EM_SETLIMITTEXT, 10, 0);
+        std::wstring pageHint = L"/ " + std::to_wstring(g_pdf.pageCount);
+        if (ann.pageIndex < 0 || ann.pageIndex >= g_pdf.pageCount)
+            pageHint += L" " + localization::Text(L"annotation.inspector.page_outside");
+        CreateWindowExW(0, L"STATIC", pageHint.c_str(), WS_CHILD | WS_VISIBLE,
+                        366, infoY + 22, 130, 20, hWnd, reinterpret_cast<HMENU>(kAnnotInspectorPageHint), g_hInst, nullptr);
 
         CreateWindowExW(0, L"STATIC", L"座標 (X1, Y1) - (X2, Y2):", WS_CHILD | WS_VISIBLE,
                         20, infoY + 46, 220, 20, hWnd, nullptr, g_hInst, nullptr);
@@ -961,6 +1026,10 @@ LRESULT CALLBACK AnnotInspectorProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         const int id = LOWORD(wParam);
         const int code = HIWORD(wParam);
         if (!ctx) break;
+        if (id == kAnnotInspectorPage && code == EN_CHANGE && !ctx->initializing && ctx->editable) {
+            ctx->pageEdited = true;
+            return 0;
+        }
         if (id == kAnnotInspectorView && code == BN_CLICKED) {
             SetAnnotInspectorEditable(hWnd, ctx, false);
             return 0;
@@ -1019,6 +1088,7 @@ LRESULT CALLBACK AnnotInspectorProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         return 0;
     }
     case WM_CLOSE:
+        if (ctx && CurrentLogicalPdfPath() != ctx->documentPath) { DestroyWindow(hWnd); return 0; }
         if (ApplyAnnotInspectorAll(hWnd, ctx, true)) DestroyWindow(hWnd);
         return 0;
     case WM_NCDESTROY:
@@ -1047,6 +1117,7 @@ void EnsureAnnotInspectorClass() {
 
 struct OpenAnnotInspectorLookup {
     const std::wstring& annotationId;
+    std::wstring documentPath;
     HWND found = nullptr;
 };
 
@@ -1058,7 +1129,7 @@ BOOL CALLBACK FindOpenAnnotInspectorProc(HWND hWnd, LPARAM lParam) {
         return TRUE;
     }
     const auto* ctx = reinterpret_cast<const AnnotInspectorCtx*>(GetWindowLongPtrW(hWnd, GWLP_USERDATA));
-    if (ctx && ctx->annotationId == lookup->annotationId) {
+    if (ctx && ctx->annotationId == lookup->annotationId && ctx->documentPath == lookup->documentPath) {
         lookup->found = hWnd;
         return FALSE;
     }
@@ -1066,7 +1137,7 @@ BOOL CALLBACK FindOpenAnnotInspectorProc(HWND hWnd, LPARAM lParam) {
 }
 
 HWND FindOpenAnnotInspector(const std::wstring& annotationId) {
-    OpenAnnotInspectorLookup lookup{annotationId};
+    OpenAnnotInspectorLookup lookup{annotationId, CurrentLogicalPdfPath()};
     EnumThreadWindows(GetCurrentThreadId(), FindOpenAnnotInspectorProc,
                       reinterpret_cast<LPARAM>(&lookup));
     return lookup.found;
@@ -1226,6 +1297,7 @@ void ShowAnnotationInspector(HWND owner, int annotationIndex, bool editMode) {
     ctx->owner = owner ? owner : g_hMainWnd;
     ctx->index = annotationIndex;
     ctx->annotationId = annotation.id;
+    ctx->documentPath = CurrentLogicalPdfPath();
     ctx->editable = editMode && !IsPdfPreviewReadOnlyActive();
     constexpr int kDialogWidth = 520;
     constexpr int kDialogHeight = 530;

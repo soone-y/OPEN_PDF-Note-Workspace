@@ -1,0 +1,78 @@
+// Opt-in isolated PDF fixture only. Use the real inspector, history and CLROP
+// bridge; retain the caller's annotations and pending persistence commands.
+bool RunAnnotationPageTargetProbe(HWND owner, const std::wstring& directory,
+                                  std::wstring* trace, std::wstring* error) {
+    if (!owner || g_pdf.kind != DocKind::Pdf || g_pdf.pageCount <= 0 || !g_hAnnotList) return false;
+    struct Restore {
+        decltype(g_annots) annotations = g_annots;
+        decltype(g_annotUndo) undo = g_annotUndo, redo = g_annotRedo;
+        decltype(g_pendingAnnotStageCommands) pending = g_pendingAnnotStageCommands;
+        std::wstring target = g_pendingAnnotStageTargetPath;
+        bool valid = g_pendingAnnotStageCommandsValid, dirty = g_annotsDirty,
+            integrate = g_annotsNeedsIntegrate, historyDirty = g_annotHistoryDirty;
+        int autosave = g_config.autoSaveSeconds;
+        HWND inspector = nullptr;
+        ~Restore() {
+            if (inspector && IsWindow(inspector)) DestroyWindow(inspector);
+            g_annots = std::move(annotations); g_annotUndo = std::move(undo); g_annotRedo = std::move(redo);
+            g_pendingAnnotStageCommands = std::move(pending); g_pendingAnnotStageTargetPath = target;
+            g_pendingAnnotStageCommandsValid = valid; g_annotsDirty = dirty; g_annotsNeedsIntegrate = integrate;
+            g_annotHistoryDirty = historyDirty; g_config.autoSaveSeconds = autosave;
+            RefreshAnnotPanel(); if (g_hPdfView) InvalidateRect(g_hPdfView, nullptr, FALSE);
+        }
+    } restore;
+    const auto fail = [&](const wchar_t* text) { if (error) *error = text; return false; };
+    g_config.autoSaveSeconds = kAutoSaveModeOff;
+    Annotation original; original.id = L"page-target-orphan"; original.type = Annotation::Type::Shape;
+    original.shapeKind = ShapeKind::Rectangle; original.shapeDrawMode = ShapeDrawMode::Fill;
+    original.pageIndex = g_pdf.pageCount + 2; original.x1 = 100; original.y1 = 220; original.x2 = 200; original.y2 = 120;
+    original.color = RGB(20, 160, 40); original.width = 2; original.alpha = 1;
+    g_annots = {original}; g_annotUndo.clear(); g_annotRedo.clear(); RefreshAnnotPanel();
+    if (SendMessageW(g_hAnnotList, LB_GETCOUNT, 0, 0) != 1) return fail(L"Out-of-range annotation disappeared from the list.");
+    const auto labelLength = SendMessageW(g_hAnnotList, LB_GETTEXTLEN, 0, 0);
+    std::wstring label(static_cast<size_t>(std::max<LRESULT>(0, labelLength)) + 1, L'\0');
+    SendMessageW(g_hAnnotList, LB_GETTEXT, 0, reinterpret_cast<LPARAM>(label.data()));
+    if (label.find(localization::Text(L"annotation.inspector.page_outside")) == std::wstring::npos)
+        return fail(L"Out-of-range annotation lacks its list warning.");
+    ShowAnnotationInspector(owner, 0, false);
+    EnumThreadWindows(GetCurrentThreadId(), [](HWND window, LPARAM value) -> BOOL {
+        wchar_t name[64]{};
+        if (GetClassNameW(window, name, 64) && wcscmp(name, L"PdfNoteAnnotInspector") == 0) {
+            *reinterpret_cast<HWND*>(value) = window; return FALSE;
+        }
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&restore.inspector));
+    const HWND inspector = restore.inspector;
+    if (!inspector || !GetDlgItem(inspector, 129) || IsWindowEnabled(GetDlgItem(inspector, 129)))
+        return fail(L"Inspector page field is missing or editable in view mode.");
+    SendMessageW(inspector, WM_COMMAND, MAKEWPARAM(102, BN_CLICKED), 0);
+    if (!IsWindowEnabled(GetDlgItem(inspector, 129))) return fail(L"Inspector page editing is unavailable.");
+    SendMessageW(inspector, WM_COMMAND, MAKEWPARAM(113, BN_CLICKED), 0);
+    if (g_annots[0].pageIndex != original.pageIndex || !g_annotUndo.empty())
+        return fail(L"Applying unchanged out-of-range data moved or recorded an annotation.");
+    const std::wstring badPages[] = {L"0", L"-1", L"1.5", L"2147483649", std::to_wstring(g_pdf.pageCount + 1)};
+    for (const auto& text : badPages) {
+        SetDlgItemTextW(inspector, 129, text.c_str());
+        SendMessageW(inspector, WM_COMMAND, MAKEWPARAM(113, BN_CLICKED), 0);
+        if (g_annots[0].pageIndex != original.pageIndex || !g_annotUndo.empty() ||
+            GetWindowTextLengthW(GetDlgItem(inspector, 114)) == 0) return fail(L"Invalid page edit changed annotation state or lacked validation.");
+    }
+    SetDlgItemTextW(inspector, 129, L"1"); SendMessageW(inspector, WM_COMMAND, MAKEWPARAM(113, BN_CLICKED), 0);
+    Annotation expected = original; expected.pageIndex = 0;
+    if (!AnnotationEquals(g_annots[0], expected) || g_annotUndo.size() != 1)
+        return fail(L"Page move lost annotation data or its single history command.");
+    if (!UndoAnnotCommand(owner) || !AnnotationEquals(g_annots[0], original)) return fail(L"Undo lost the hidden source annotation.");
+    SendMessageW(inspector, WM_COMMAND, MAKEWPARAM(113, BN_CLICKED), 0);
+    if (!AnnotationEquals(g_annots[0], original) || !g_annotUndo.empty()) return fail(L"Untouched inspector page reapplied a move after Undo.");
+    if (!RedoAnnotCommand(owner) || !AnnotationEquals(g_annots[0], expected)) return fail(L"Redo lost the moved annotation.");
+    DestroyWindow(inspector); restore.inspector = nullptr;
+    const auto path = std::filesystem::path(directory) / L"annotation_page_target.clrop";
+    std::wstring saveError; std::vector<Annotation> loaded; bool mismatch = false;
+    if (!clrop_bridge::SaveAnnotations(path.wstring(), g_pdf.path, g_annots, saveError) ||
+        !clrop_bridge::LoadAnnotations(path.wstring(), g_pdf.path, loaded, mismatch, nullptr, saveError,
+            clrop_bridge::LoadAnnotationsValidation::Strong) || mismatch || loaded.size() != 1 ||
+        loaded[0].id != original.id || loaded[0].pageIndex != 0 || loaded[0].x1 != original.x1 || loaded[0].y1 != original.y1)
+        return fail(L"Page move failed its saved CLROP round trip.");
+    if (trace) *trace += L"annotation_page_target:inspector_ok hidden=1 validation=5 undo_redo=1 save_reload=1\n";
+    return true;
+}

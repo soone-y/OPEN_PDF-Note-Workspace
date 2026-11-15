@@ -1114,6 +1114,12 @@ def main():
             sibling.write_bytes(b"another plain text note\r\n")
             unknown = session / "hidden.unregistered"
             unknown.write_bytes(b"not opted in\r\n")
+            failure_session = session.parent / "session2"
+            failure_session.mkdir()
+            legacy_note = failure_session / "legacy.txt"
+            legacy_text = "再読み込みに失敗しても表示する本文"
+            legacy_bytes = b"\xff\xfe" + legacy_text.encode("utf-16-le")
+            legacy_note.write_bytes(legacy_bytes)
             post(main_window, 0x10)
             app.wait(timeout=15)
             if app.returncode != 0:
@@ -1184,14 +1190,79 @@ def main():
             current = moved_note
             send(lists[2], 0x186, 0)
             send(main_window, 0x111, 1 << 16, lists[2])
+            send(main_window, 0x111, 1043)  # Save a clockwise page rotation.
+            view_file = workspace / "__pdf_note_workspace__" / "__tmp__" / "pdf_view_positions.txt"
+
+            def saved_pdf_rotations(path):
+                for row in view_file.read_text(encoding="utf-8").splitlines():
+                    fields = row.split("\t")
+                    if os.path.normcase(json.loads(fields[0])) == os.path.normcase(str(path)):
+                        return fields[-1].removeprefix("R1:") if fields[-1].startswith("R1:") else None
+                return None
+
+            rotations = saved_pdf_rotations(pdf)
+            if not rotations or "1" not in rotations:
+                raise RuntimeError("Saved rotation fixture was not established")
             renamed_pdf = rename(3312, pdf, ["bad.txt", "without_extension", "bad.pdf.exe"], "renamed.PDF")
             if not renamed_pdf.exists():
                 raise RuntimeError("Valid PDF rename failed")
+
+            # TXT can display UTF-16, while CLRO requires UTF-8. The rename
+            # preserves bytes, so this exercises a real post-commit load failure.
+            if send(lists[1], 0x18B) != 2:
+                raise RuntimeError("Expected both file-operation fixture sessions")
+            send(lists[1], 0x186, 1)
+            send(main_window, 0x111, 1 << 16, lists[1])
+            send(lists[3], 0x186, 0)
+            send(main_window, 0x111, 1 << 16, lists[3])
+
+            def displayed_legacy_note():
+                matches = []
+
+                @callback_type
+                def editor_with_text(hwnd, _):
+                    cls = ctypes.create_unicode_buffer(128)
+                    u.GetClassNameW(hwnd, cls, len(cls))
+                    if cls.value.lower().startswith("richedit") and text(hwnd) == legacy_text:
+                        matches.append(hwnd)
+                    return True
+
+                u.EnumChildWindows(main_window, editor_with_text, 0)
+                return matches[0] if len(matches) == 1 else None
+
+            editor = wait(displayed_legacy_note)
+            send(editor, 0xB1, 1, 4)  # EM_SETSEL
+            clro = rename(3313, legacy_note, [], "legacy.clro")
+            notice = wait(lambda: find("SilentDialogClass", main_window))
+            wait(lambda: u.IsWindowVisible(notice) and u.GetDlgItem(notice, 5102))
+            expected = json.loads((repo / "locales/ja.json").read_text(encoding="utf-8-sig"))[
+                "workspace.file_ops.moved_active_note_reload_failed"]
+            if expected not in text(u.GetDlgItem(notice, 5101)):
+                raise RuntimeError("Committed rename did not report the reload failure")
+            if displayed_legacy_note() != editor or send(editor, 0xB0) != (4 << 16 | 1):
+                raise RuntimeError("Failed reload discarded the open note or its selection")
+            selected = send(lists[3], 0x188)  # LB_GETCURSEL
+            selected_name = ctypes.create_unicode_buffer(len(clro.name) + 1)
+            if selected != 0 or send(lists[3], 0x18A, selected) != len(clro.name):
+                raise RuntimeError("Failed reload did not select the committed destination")
+            send(lists[3], 0x189, selected, ctypes.addressof(selected_name))
+            if selected_name.value != clro.name:
+                raise RuntimeError("Failed reload left an outdated filename in the note list")
+            post(notice, 0x111, 5102)
+            wait(lambda: not find("SilentDialogClass"))
+            recovered = rename(3313, clro, [], legacy_note.name)
+            send(main_window, 0)  # Wait for the successful retry and list sync.
+            if recovered.read_bytes() != legacy_bytes or displayed_legacy_note() != editor:
+                raise RuntimeError("Renaming back did not reopen the retained note")
+            # The session switch has saved the live state again. It must agree
+            # with the rotation from before the rename, under the new path only.
+            if saved_pdf_rotations(renamed_pdf) != rotations or saved_pdf_rotations(pdf) is not None:
+                raise RuntimeError("Renamed PDF did not reopen with its saved rotation")
             post(main_window, 0x10)
             app.wait(timeout=15)
             if app.returncode != 0 or current.read_bytes() != original_bytes:
                 raise RuntimeError("File-operation fixture exit or source preservation failed")
-            print("File operations app smoke passed: restricted extensions rejected; confirmation Yes/No; failed setting save preserves source/config; settings edit/cancel/reject/remove/restore; persisted extension list; restart candidates; restricted direct-edit bypass rejected; TXT export; rename/move byte preservation", flush=True)
+            print("File operations app smoke passed: extension validation and persistence; TXT export; rename/move byte preservation; failed reload keeps text and selection; retry uses the committed path; PDF rotation survives reopening", flush=True)
             return
         # Quick Note first exercises cancellation of the actual output command.
         post(main_window, 0x111, 1008)

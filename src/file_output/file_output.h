@@ -24,6 +24,8 @@ namespace file_output {
     HWND owner, const std::wstring& title, const std::filesystem::path& initialDirectory,
     const std::wstring& defaultName, const std::wstring& extension);
 
+[[nodiscard]] bool DetachPdfAnnotationsToCopy(HWND owner);
+
 // 数式の処理モード (Math handling mode)
 enum class MathMode {
     Raw,          // 生: Keep original delimiters ($...$, $$...$$)
@@ -71,6 +73,15 @@ struct NoteMarkupExportOptions {
     // CLRO -> Markdown only; stored source and literal data remain unchanged.
     bool normalizeClroSyntax = true;
 };
+
+// Display hints only. Unknown applicability keeps the option prominent.
+struct NoteExportApplicability {
+    bool math = true;
+    bool normalizeClroSyntax = true;
+    bool shiftHeadingLevels = true;
+};
+
+[[nodiscard]] NoteExportApplicability GetNoteExportApplicability(const std::wstring& notePath);
 
 struct PdfCropRectPt {
     double left = 0.0;
@@ -225,15 +236,16 @@ struct PdfExportPart {
     double exportScale = 1.0;
     bool matchPdfPaneTextLayout = true;
     pdf_annotation_export::TextColorOptions textColor;
+    bool embedEditableData = true;
 };
 [[nodiscard]] bool ExportPdfParts(HWND owner, const std::vector<PdfExportPart>& parts,
                                   const std::wstring& outPath);
 bool ExportPdfWithAnnotations(HWND owner, bool includeAnnotations, bool standardTextAnnots, double exportScale,
                               bool matchPdfPaneTextLayout, std::wstring* outSavedPath = nullptr,
-                              const pdf_annotation_export::TextColorOptions& textColor = {});
+                              const pdf_annotation_export::TextColorOptions& textColor = {}, bool embedEditableData = true);
 bool ExportPdfWithAnnotations(HWND owner, bool includeAnnotations, const std::wstring& outPath,
                               bool standardTextAnnots, double exportScale, bool matchPdfPaneTextLayout,
-                              const pdf_annotation_export::TextColorOptions& textColor = {});
+                              const pdf_annotation_export::TextColorOptions& textColor = {}, bool embedEditableData = true);
 bool ExportPdfPages(HWND owner, const std::vector<PdfPageSpec>& pages);
 bool ExportPdfPages(HWND owner, const std::vector<PdfPageSpec>& pages, bool standardTextAnnots);
 bool ExportPdfPages(HWND owner, const std::vector<PdfPageSpec>& pages, const std::wstring& outPath);
@@ -242,10 +254,10 @@ bool ExportPdfPages(HWND owner, const std::vector<PdfPageSpec>& pages, bool stan
 bool ExportPdfPages(HWND owner, const std::vector<PdfPageSpec>& pages, const std::wstring& outPath, bool standardTextAnnots, double exportScale);
 bool ExportPdfPages(HWND owner, const std::vector<PdfPageSpec>& pages, bool standardTextAnnots, double exportScale,
                     bool matchPdfPaneTextLayout, std::wstring* outSavedPath = nullptr,
-                              const pdf_annotation_export::TextColorOptions& textColor = {});
+                              const pdf_annotation_export::TextColorOptions& textColor = {}, bool embedEditableData = true);
 bool ExportPdfPages(HWND owner, const std::vector<PdfPageSpec>& pages, const std::wstring& outPath,
                     bool standardTextAnnots, double exportScale, bool matchPdfPaneTextLayout,
-                              const pdf_annotation_export::TextColorOptions& textColor = {});
+                              const pdf_annotation_export::TextColorOptions& textColor = {}, bool embedEditableData = true);
 // Validate source bounds before expanding a range; failure returns no partial selection.
 [[nodiscard]] std::vector<PdfPageSpec> ParsePdfPageSpec(const std::wstring& spec, int pageCount,
                                                      bool defaultAnnot, std::wstring* err);

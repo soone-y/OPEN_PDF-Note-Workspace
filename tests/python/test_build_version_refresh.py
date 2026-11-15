@@ -88,3 +88,35 @@ function Write-BuildFailureTail {}
 ''' + fragment.group(0) + "\nSet-Content (Join-Path $PSScriptRoot 'info.txt') 'INVALID NEW METADATA'\n")
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(info.read_text(encoding="utf-8"), "original metadata")
+
+    def test_unchanged_target_relinks_for_newer_shared_source_manifest(self):
+        for driver in ("build_workspace.ps1", "build_readonly_viewer.ps1"):
+            with self.subTest(driver=driver):
+                source = (ROOT / "scripts/build" / driver).read_text(encoding="utf-8-sig")
+                start = source.index("    if ((Get-Content -Raw -LiteralPath $buildSourcesPath")
+                end = source.index("\n    if ($needLink) {", start)
+                result = self.run_ps(r'''
+$outputExe = Join-Path $PSScriptRoot 'app.exe'
+$buildSourcesPath = Join-Path $PSScriptRoot 'build_sources.json'
+$resourceObject = Join-Path $PSScriptRoot 'resource.o'
+$objFiles = @(Join-Path $PSScriptRoot 'source.o')
+foreach ($path in @($outputExe, $resourceObject) + $objFiles) { Set-Content -LiteralPath $path 'fixture' }
+Set-Content -LiteralPath $buildSourcesPath '{"target":["source.cpp"],"other":["added.cpp"]}'
+$buildSourcesJson = Get-Content -Raw -LiteralPath $buildSourcesPath -Encoding UTF8
+$stamp = [DateTime]::UtcNow.AddMinutes(-5)
+foreach ($path in @($outputExe, $resourceObject) + $objFiles) { [IO.File]::SetLastWriteTimeUtc($path, $stamp) }
+$compileCount = 0; $resourceCompiled = $false; $forceLink = $false
+function Get-LinkDecision {
+''' + source[start:end] + r'''
+    return $needLink
+}
+[IO.File]::SetLastWriteTimeUtc($buildSourcesPath, $stamp.AddSeconds(1))
+if (-not (Get-LinkDecision)) { throw 'packaging would reject executable despite up-to-date objects' }
+[IO.File]::SetLastWriteTimeUtc($outputExe, $stamp.AddSeconds(2))
+if (Get-LinkDecision) { throw 'unchanged and fresh target was scheduled for relink' }
+Set-Content -LiteralPath $buildSourcesPath '{"target":["changed.cpp"]}'
+$rejected = $false
+try { $null = Get-LinkDecision } catch { $rejected = $_.Exception.Message -like 'Build source manifest changed during compilation*' }
+if (-not $rejected) { throw 'manifest changed during the build without being rejected' }
+''')
+                self.assertEqual(result.returncode, 0, result.stdout.decode("utf-8", errors="replace"))

@@ -80,6 +80,18 @@ function Write-UiAutomationFailureEvidence {
 
 function Assert-PdfTextboxReeditFontTrace {
     param([string]$TraceText)
+    if ($TraceText -notmatch '(?m)^pdf_textbox:vertical_toolbar_ok cases=2$') {
+        throw 'Vertical toolbar toggle, focus, undo/redo and saved defaults were not verified in native and themed UI.'
+    }
+    if ($TraceText -notmatch '(?m)^pdf_textbox:vertical_edit_ok cases=4$' -or
+        [regex]::Matches($TraceText, '(?m)^pdf_textbox:vertical_case_ok turn=[0-3]$').Count -ne 4) {
+        throw 'Vertical textbox editing, caret geometry and undo/redo were not verified in all four orientations.'
+    }
+    foreach ($turn in 0..3) {
+        if ([regex]::Matches($TraceText, "(?m)^pdf_textbox:vertical_case_ok turn=$turn`$").Count -ne 1) {
+            throw "Vertical textbox orientation evidence is missing or duplicated: $turn"
+        }
+    }
     if ($TraceText -notmatch '(?m)^pdf_textbox:presets_theme_ok cases=4$') {
         throw 'Textbox A/B preset application and inactive-slot isolation were not verified across native and themed UI.'
     }
@@ -93,6 +105,22 @@ function Assert-PdfTextboxReeditFontTrace {
         [regex]::Matches($TraceText, '(?m)^pdf_textbox:reedit_font_case_ok$').Count -ne 6 -or
         [regex]::Matches($TraceText, '(?m)^pdf_textbox:reedit_font_observation .* valid=1$').Count -ne 48) {
         throw 'PDF textbox reedit did not preserve font size through every repeated edit case. Rebuild the executable before rerunning.'
+    }
+}
+
+function Assert-DialogOwnerVisibilityTrace {
+    param([string]$TraceText)
+    if ($TraceText -notmatch '(?m)^automation:dialog_owner_late_restore_rejected$') {
+        throw "Dialog-owner observer did not reject the deliberately late restore."
+    }
+    if ([regex]::Matches($TraceText, '(?m)^automation:dialog_owner_before_destroy_ok$').Count -lt 14) {
+        throw "Dialog close did not observe owner restoration before destruction for all 14 confirmation, settings and export cases. Rebuild the executable before rerunning."
+    }
+    if ($TraceText -notmatch "(?m)^automation:dialog_owner_visibility_ok$") {
+        if ($TraceText -notmatch "(?m)^automation:dialog_owner_visibility_(ok|failed)$") {
+            throw "The executable does not contain the dialog-owner visibility automation. Rebuild out\\bin\\pdf_note_workspace.exe, then run this test again."
+        }
+        throw "UI automation detected that the main window disappeared, was destroyed, or was minimized while a dialog was open."
     }
 }
 
@@ -386,12 +414,21 @@ try {
         if ($traceText -notmatch '(?m)^pdf_rotation:pdf_id_original_ok cases=4 restore_modes=3$') {
             throw 'Original PDF identity was not verified across view rotations, restored fit modes and mismatched original dimensions.'
         }
+        if ($traceText -notmatch '(?m)^annotation_page_target:inspector_ok hidden=1 validation=5 undo_redo=1 save_reload=1$') {
+            throw 'Annotation page targeting did not verify hidden-list access, property validation, undo/redo and saved CLROP reload.'
+        }
         if ($traceText -notmatch '(?m)^pdf_rotation:canonical_edit_save_undo_export_ok cases=4$' -or
             [regex]::Matches($traceText, '(?m)^pdf_rotation:case_ok turn=[0-3]$').Count -ne 4) {
             throw 'Page rotation editing, sidecar, undo/redo or PDF output checks did not complete.'
         }
         if ($traceText -notmatch '(?m)^pdf_rotation:all_pages_ok pages=(\d+)$' -or [int]$Matches[1] -lt 2) {
             throw 'All-page rotation, reset, cache rebuild or annotation preservation checks did not complete.'
+        }
+        if ($traceText -notmatch '(?m)^pdf_rotation:temporary_and_saved_ok$') {
+            throw 'Temporary and saved rotation checks did not complete.'
+        }
+        if ($traceText -notmatch '(?m)^pdf_rotation:remaining_pages_ok$') {
+            throw 'Rotation from the current page through the last page did not complete.'
         }
         if ([regex]::Matches($traceText, '(?m)^pdf_annotation_display:app_ok turn=[0-3] cache_hits=2 bytes=\d+ probe_ms=\d+$').Count -ne 4) {
             throw 'Annotation display and text coverage reuse did not complete in every rotation.'
@@ -601,6 +638,9 @@ try {
     $expectsHelpVisibility = $HelpVisibilityOnly -or $fullSuite
     if ($expectsHelpVisibility) {
         $traceText = if (Test-Path -LiteralPath $traceFile) { Get-Content -LiteralPath $traceFile -Raw } else { "" }
+        if ($traceText -notmatch '(?m)^automation:dialog_owner_before_destroy_ok$') {
+            throw "Help close did not observe its owner enabled before dialog destruction. Rebuild the executable before rerunning."
+        }
         if ($traceText -notmatch "(?m)^automation:help_visibility_ok$") {
             if ($traceText -notmatch "(?m)^automation:help_visibility_(ok|failed)$") {
                 throw "The executable does not contain the help-visibility automation. Rebuild out\\bin\\pdf_note_workspace.exe, then run this test again."
@@ -611,12 +651,7 @@ try {
     $expectsDialogOwnerVisibility = $DialogOwnerVisibilityOnly -or $fullSuite
     if ($expectsDialogOwnerVisibility) {
         $traceText = if (Test-Path -LiteralPath $traceFile) { Get-Content -LiteralPath $traceFile -Raw } else { "" }
-        if ($traceText -notmatch "(?m)^automation:dialog_owner_visibility_ok$") {
-            if ($traceText -notmatch "(?m)^automation:dialog_owner_visibility_(ok|failed)$") {
-                throw "The executable does not contain the dialog-owner visibility automation. Rebuild out\\bin\\pdf_note_workspace.exe, then run this test again."
-            }
-            throw "UI automation detected that the main window disappeared, was destroyed, or was minimized while a dialog was open."
-        }
+        Assert-DialogOwnerVisibilityTrace -TraceText $traceText
     }
 
     if ($OutputExportOnly -or $fullSuite) {

@@ -94,6 +94,13 @@ public:
         const Snapshot& snapshot,
         size_t richEditIndex) noexcept;
 
+    // Ctrl+A/EM_SETSEL(0,-1) can include RichEdit's implicit final paragraph
+    // mark. Selection/caret endpoints at that one position denote source EOF.
+    // Other out-of-range offsets stay invalid; text access uses the strict API.
+    [[nodiscard]] static std::optional<Utf16CodeUnitOffset> RichEditSelectionEndpointToCanonicalOffset(
+        const Snapshot& snapshot,
+        size_t richEditIndex) noexcept;
+
     // Coordinate snapshots participate in the same publication identity as
     // the canonical text root. Equal line lengths from an independently
     // rebuilt index are not an interchangeable final-snapshot dependency.

@@ -28,6 +28,10 @@ void PdfPreviewPanel_SetRotation(HWND hwnd, int turns);
 // Open a PDF (and optionally a CLROP) in the given PDF preview panel
 void PdfPreviewPanel_OpenPdf(HWND hwnd, const std::wstring& pdfPath, const std::wstring& clropPath = L"");
 
+// Explicit, transient candidate overlay. The dedicated preview host labels it
+// unconfirmed and does not persist sessions or expose annotation output.
+void PdfPreviewPanel_PreviewPair(HWND hwnd, const std::wstring& pdfPath, const std::wstring& clropPath);
+
 // Move an already loaded PDF to a search result location. pageIndex is zero-based;
 // when hasYPt is true, yPt is a PDF-space coordinate measured from the bottom.
 void PdfPreviewPanel_JumpToPdfLocation(HWND hwnd, int pageIndex, double yPt, bool hasYPt);

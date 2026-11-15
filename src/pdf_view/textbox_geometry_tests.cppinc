@@ -97,8 +97,21 @@ static bool RunTextBoxGeometryProbe(std::wstring* trace, std::wstring* outError)
         }
         void Clear() { std::fill_n(pixels, Width() * Height(), 0xFFFFFFFF); }
     } fitted, reference, scratch;
-    if (!fitted.pixels || !reference.pixels || !scratch.dc) {
+    if (!fitted.pixels || !reference.pixels || !scratch.pixels) {
         if (outError) *outError = L"Textbox geometry DIB allocation failed.";
+        return false;
+    }
+    // A one-pixel stroke must keep partial coverage when reduced by four.
+    fitted.Clear();
+    std::fill_n(scratch.pixels, Canvas::Width() * 8, 0);
+    std::fill_n(scratch.pixels + Canvas::Width(), 8, 0x00FFFFFF);
+    const bool strokePainted = annotation_text::BlendMask(fitted.dc, RECT{0, 0, 2, 2},
+        scratch.dc, 8, 8, RGB(0, 0, 0), 0);
+    GdiFlush();
+    const DWORD strokePixel = fitted.pixels[0] & 0x00FFFFFF;
+    if (!strokePainted || strokePixel == 0 || strokePixel == 0x00FFFFFF ||
+        (fitted.pixels[Canvas::Width()] & 0x00FFFFFF) != 0x00FFFFFF) {
+        if (outError) *outError = L"Textbox downsampling lost thin-stroke coverage.";
         return false;
     }
     const double originalScale = g_pdf.scale;

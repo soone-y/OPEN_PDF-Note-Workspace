@@ -779,8 +779,8 @@ static int GetNoteLineSelectionHitBoxWidth(HWND hWnd) {
 static NoteEditLineRange NoteEditLineRangeAt(const std::wstring& text, size_t pos) {
     NoteEditLineRange r{};
     pos = std::min(pos, text.size());
-    r.start = FindNoteLineStart(text, pos);
-    r.end = FindNoteLineEnd(text, pos);
+    r.start = note::FindNoteLineStart(text, pos);
+    r.end = note::FindNoteLineEnd(text, pos);
     r.endWithBreak = r.end;
     if (r.endWithBreak < text.size() && IsNoteLineBreakChar(text[r.endWithBreak])) {
         ++r.endWithBreak;

@@ -245,6 +245,7 @@ void Run() {
     changed = original; changed.textLines.push_back(L"other");
     ExpectRejected({changed}, legacy, AnnotNumericPrecision::Legacy12, "different lines rejected");
     changed = original; changed.writingMode = TextWritingMode::VerticalRl;
+    Check(!AnnotationEquals(original, changed), "writing direction alone is an editable annotation change");
     ExpectRejected({changed}, legacy, AnnotNumericPrecision::Legacy12, "different writing mode rejected");
     changed = original; changed.id = L"other";
     ExpectRejected({changed}, legacy, AnnotNumericPrecision::Legacy12, "different id rejected");

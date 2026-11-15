@@ -21,6 +21,16 @@ public:
     [[nodiscard]] explicit operator bool() const { return handle_ != nullptr; }
     [[nodiscard]] HMENU get() const { return handle_; }
 
+    [[nodiscard]] bool AppendSubmenu(PopupMenu& submenu, const wchar_t* label) {
+        if (!handle_ || !submenu.handle_) return false;
+        if (!AppendMenuW(handle_, MF_POPUP, reinterpret_cast<UINT_PTR>(submenu.handle_), label)) {
+            return false;
+        }
+        // DestroyMenu on the parent also destroys the attached submenu.
+        submenu.handle_ = nullptr;
+        return true;
+    }
+
     void Close() {
         if (!handle_) return;
         DestroyMenu(handle_);

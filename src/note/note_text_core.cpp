@@ -13,6 +13,13 @@ bool NoteTextCore::SetClroAsciiOnly(bool value) noexcept {
     return true;
 }
 
+bool NoteTextCore::SetQuoteLazyContinuation(bool value) noexcept {
+    if (metadata_.quote_lazy_continuation == value) return false;
+    metadata_.quote_lazy_continuation = value;
+    materialized_model_current_ = false;
+    return true;
+}
+
 bool NoteTextCore::RebindOwner(NoteId noteId, NoteMetadata metadata) {
     if (!valid() || !noteId.valid()) return false;
     note_id_ = noteId;

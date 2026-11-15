@@ -54,3 +54,7 @@ finally {
 
 # Keep checkpoint numeric precision and journal replay in the same CLROP gate.
 & (Join-Path $PSScriptRoot "run_annot_stage_replay_tests.ps1")
+& (Join-Path $PSScriptRoot "run_annotation_page_target_tests.ps1")
+
+# Keep explicit, read-only PDF/CLROP candidate discovery in the CLROP gate.
+& (Join-Path $PSScriptRoot "run_pdf_pair_discovery_tests.ps1")

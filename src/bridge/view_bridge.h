@@ -28,6 +28,8 @@ bool AddMathAnnotationFromTextAtPoint(HWND pdfWnd, const std::wstring& rawText, 
 bool AddMathAnnotationFromText(HWND pdfWnd, const std::wstring& rawText, MathKind kind);
 
 bool LoadNoteFile(HWND hWnd, const std::wstring& path);
+// The committed move has already transferred the active note's identity and lock.
+[[nodiscard]] bool ReloadMovedNoteFile(HWND owner, const std::wstring& destination);
 void ClearNoteEditorSilently(HWND hWnd, const std::wstring& nextNotePath = L"");
 void RefreshCurrentNoteBottomPane(bool synchronousPaint = true);
 [[nodiscard]] bool ShouldShowBottomNotePane();

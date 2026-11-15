@@ -15,6 +15,17 @@ SCROLLINFO Info(HWND window) {
 }
 }
 int main() {
+    empty_view_guide::StartupVisibility startup;
+    Expect(startup.ShouldShow(0) && startup.ShouldShow(1), "startup permits both visible content modes");
+    Expect(!startup.ShouldShow(2) && startup.ShouldShow(0), "hidden preference alone does not dismiss startup guidance");
+    startup.Dismiss();
+    for (int mode : {0, 1, 2, 0}) {
+        Expect(!startup.ShouldShow(mode), "closing work or changing modes cannot restore dismissed guidance");
+    }
+    startup.Dismiss();
+    Expect(!startup.ShouldShow(0), "repeated directory switches keep guidance dismissed");
+    Expect(empty_view_guide::StartupVisibility{}.ShouldShow(0), "a new application lifetime permits guidance again");
+
     const auto instance = GetModuleHandleW(nullptr);
     WNDCLASSW cls{}; cls.hInstance = instance; cls.lpszClassName = L"EmptyGuideUnitTest"; cls.lpfnWndProc = DefWindowProcW;
     Expect(RegisterClassW(&cls) != 0, "register owned hidden test class");

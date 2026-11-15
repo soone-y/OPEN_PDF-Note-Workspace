@@ -15,6 +15,15 @@
 #include <utility>
 #include <vector>
 
+void RestoreModalOwnerBeforeClose(HWND owner) {
+    if (!owner || !IsWindow(owner) || IsWindowEnabled(owner)) return;
+    EnableWindow(owner, TRUE);
+    if (IsWindowVisible(owner)) {
+        RedrawWindow(owner, nullptr, nullptr,
+                     RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+    }
+}
+
 namespace {
 static constexpr ULONGLONG kSilentMessageDialogRepeatSuppressMs = 10000;
 
@@ -2148,6 +2157,10 @@ static void CloseSilentDialog(SilentDialogState* ctx, SilentDialogResult result)
     if (!ctx) return;
     ctx->result = result;
     ctx->done = true;
+    if (ctx->ownerWasEnabled) {
+        ctx->ownerWasEnabled = false;
+        RestoreModalOwnerBeforeClose(ctx->owner);
+    }
     if (ctx->hwnd) DestroyWindow(ctx->hwnd);
 }
 
@@ -2456,8 +2469,7 @@ SilentDialogResult ShowSilentDialog(HWND owner, const SilentDialogOptions& optio
         ctx.result = SilentDialogEscapeResult(ctx.options);
     }
     if (ctx.ownerWasEnabled && ctx.owner && IsWindow(ctx.owner)) {
-        EnableWindow(ctx.owner, TRUE);
-        SetActiveWindow(ctx.owner);
+        RestoreModalOwnerBeforeClose(ctx.owner);
     }
     return ctx.result;
 }
@@ -2534,6 +2546,18 @@ bool TryParseZoomScale(const std::wstring& rawInput, double* outScale) {
 
 LRESULT CALLBACK ToolbarHostProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+    case WM_CTLCOLORBTN: {
+        // Native controls ask their immediate parent for colors. They no
+        // longer reach the main window after moving into this scroll host.
+        HDC dc = reinterpret_cast<HDC>(wParam);
+        SetTextColor(dc, g_theme.toolbarText);
+        SetBkColor(dc, g_theme.toolbarBg);
+        return reinterpret_cast<LRESULT>(g_hThemeToolbarBrush
+            ? g_hThemeToolbarBrush : GetSysColorBrush(COLOR_WINDOW));
+    }
     case WM_COMMAND:
     case WM_NOTIFY:
     case WM_DRAWITEM:

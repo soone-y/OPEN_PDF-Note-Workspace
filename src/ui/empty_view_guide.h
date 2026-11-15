@@ -6,6 +6,18 @@
 #include <vector>
 
 namespace empty_view_guide {
+// Process-local startup guidance ends when work begins, even if all documents
+// are later closed. Changing the content mode does not restart guidance.
+class StartupVisibility {
+public:
+    void Dismiss() noexcept { dismissed_ = true; }
+    [[nodiscard]] bool ShouldShow(int displayMode) const noexcept {
+        return !dismissed_ && displayMode != 2;
+    }
+private:
+    bool dismissed_ = false;
+};
+
 struct Content {
     std::wstring title;
     std::wstring usage;

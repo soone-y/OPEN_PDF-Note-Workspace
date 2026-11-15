@@ -112,7 +112,10 @@ elseif ($Edition -eq "Lite") { "bin_lite" } else { "bin" }
 $binDir = Join-Path $outRoot $binDirectoryName
 $logDir = Join-Path $outRoot "logs"
 $endTimeLogPath = Join-Path $logDir "build_end_time.log"
-$buildDetailLogPath = Join-Path $logDir ("build_detail_{0}.log" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
+$buildDetailLogPath = Join-Path $logDir ("build_detail_{0}_{1}_{2}.log" -f (Get-Date -Format "yyyyMMdd_HHmmss"), $PID, [guid]::NewGuid().ToString("N"))
+$buildDetailLogStarted = $false
+$buildSucceeded = $false
+$buildError = $null
 $versionFilePath = Join-Path $repoRoot "REPO_VERSION.txt"
 $versionSupportPath = Join-Path $repoRoot "scripts/build/build_version.ps1"
 . $versionSupportPath
@@ -158,7 +161,9 @@ function Invoke-BuildNativeCommand {
             $_
         } |
         Out-File -LiteralPath $buildDetailLogPath -Append -Encoding UTF8 -Width 4096
-        return [int]$LASTEXITCODE
+        $exitCode = [int]$LASTEXITCODE
+        if ($exitCode -ne 0) { Append-BuildDetailLog ("command failed: {0} (exit={1})" -f $FilePath, $exitCode) }
+        return $exitCode
     }
     finally {
         $ErrorActionPreference = $savedErrorActionPreference
@@ -174,8 +179,23 @@ function Write-EndTimeLog {
         [Parameter(Mandatory)][DateTime]$EndTime
     )
 
-    $durationSec = ($EndTime - $StartTime).TotalSeconds
-    $line = "{0}`telapsed_sec={1}" -f $EndTime.ToString("o"), $durationSec.ToString("F3", [System.Globalization.CultureInfo]::InvariantCulture)
+    $durationSec = ($EndTime - $StartTime).TotalSeconds.ToString("F3", [System.Globalization.CultureInfo]::InvariantCulture)
+    $line = "{0}`telapsed_sec={1}" -f $EndTime.ToString("o"), $durationSec
+    if ($buildDetailLogStarted) {
+        try {
+            $status = if ($buildSucceeded) { "PASS" } else { "FAIL" }
+            $footer = @(
+                if ($buildError) { "error: $buildError" }
+                "finished: $($EndTime.ToString('o'))"
+                "elapsed_sec: $durationSec"
+                "status: $status"
+            )
+            Append-BuildDetailLog ($footer -join [Environment]::NewLine)
+        }
+        catch {
+            Write-Warning ("Failed to write the result to build detail log '{0}': {1}" -f $buildDetailLogPath, $_.Exception.Message)
+        }
+    }
     try {
         New-Item -ItemType Directory -Path $logDir -Force | Out-Null
         Add-Content -LiteralPath $endTimeLogPath -Value $line -Encoding UTF8
@@ -486,7 +506,8 @@ try {
         Write-Host "Missing build source definition: $buildSourcesPath" -ForegroundColor Red
         exit 1
     }
-    $buildSources = Get-Content -Raw -LiteralPath $buildSourcesPath -Encoding UTF8 | ConvertFrom-Json
+    $buildSourcesJson = Get-Content -Raw -LiteralPath $buildSourcesPath -Encoding UTF8
+    $buildSources = $buildSourcesJson | ConvertFrom-Json
 
     $sourceFiles = @($buildSources.BuildSourceFiles)
     $TranslationUnitDesign = $buildSources.TranslationUnitDesign
@@ -602,16 +623,20 @@ try {
         param([string[]]$PathsToRemove)
 
         foreach ($path in $PathsToRemove) {
-            if (-not (Test-Path $path)) {
+            if (-not (Test-Path -LiteralPath $path)) {
                 continue
             }
 
-            $item = Get-Item $path
+            $item = Get-Item -LiteralPath $path -Force
+            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw "Cannot clean an artifact through a link: $path"
+            }
             if ($item.PSIsContainer) {
-                Remove-Item -Recurse -Force $path
+                if ($path -ne $objDir) { throw "Expected a build artifact file: $path" }
+                Remove-Item -LiteralPath $path -Recurse -Force
             }
             else {
-                Remove-Item -Force $path
+                Remove-Item -LiteralPath $path -Force
             }
 
             Write-Verbose ("Removed {0}" -f $path)
@@ -619,7 +644,18 @@ try {
     }
 
     if ($Clean) {
-        Remove-BuildArtifacts -PathsToRemove @($objDir, $binDir)
+        $binItem = Get-Item -LiteralPath $binDir -Force -ErrorAction SilentlyContinue
+        if ($binItem -and (-not $binItem.PSIsContainer -or ($binItem.Attributes -band [IO.FileAttributes]::ReparsePoint))) {
+            throw "Cannot clean an unexpected binary output directory: $binDir"
+        }
+        # Older builds can have been launched directly here. Preserve their
+        # settings, workspaces and unrelated files alongside the artifacts.
+        $cleanArtifacts = @($objDir, $outputExe, $buildInfoManifestPath)
+        if (-not $artifactAliasSpecified) {
+            $cleanArtifacts += @('pdfium.dll', 'zlib1.dll', 'libstdc++-6.dll', 'libgcc_s_seh-1.dll', 'libwinpthread-1.dll' |
+                ForEach-Object { Join-Path $binDir $_ })
+        }
+        Remove-BuildArtifacts -PathsToRemove $cleanArtifacts
         Write-Host "Clean finished." -ForegroundColor Green
         return
     }
@@ -638,6 +674,7 @@ try {
         New-Item -ItemType Directory -Path $logDir | Out-Null
     }
     New-Item -ItemType File -Force -Path $buildDetailLogPath | Out-Null
+    $buildDetailLogStarted = $true
     Append-BuildDetailLog ("== Build ==")
     Append-BuildDetailLog ("started: {0}" -f $scriptStart.ToString("o"))
     Append-BuildDetailLog ("cwd: {0}" -f (Get-Location).Path)
@@ -755,8 +792,8 @@ try {
             return $true
         }
 
-        $srcTime = (Get-Item -LiteralPath $Source).LastWriteTime
-        $objTime = (Get-Item -LiteralPath $Object).LastWriteTime
+        $srcTime = (Get-Item -LiteralPath $Source).LastWriteTimeUtc
+        $objTime = (Get-Item -LiteralPath $Object).LastWriteTimeUtc
 
         if ($srcTime -gt $objTime) {
             return $true
@@ -770,14 +807,17 @@ try {
         if ($dependencies.Count -eq 0 -or $Source -notin $dependencies) {
             return $true
         }
-        foreach ($dep in $dependencies) {
-            if (-not (Test-Path -LiteralPath $dep)) {
-                return $true
+        try {
+            foreach ($dep in $dependencies) {
+                # FileInfo keeps one metadata snapshot. Take a fresh one on each check.
+                $depInfo = [System.IO.FileInfo]::new([System.IO.Path]::Combine($repoRoot, $dep))
+                if (-not $depInfo.Exists -or $depInfo.LastWriteTimeUtc -gt $objTime) {
+                    return $true
+                }
             }
-
-            if ((Get-Item -LiteralPath $dep).LastWriteTime -gt $objTime) {
-                return $true
-            }
+        }
+        catch [System.ArgumentException], [System.IO.IOException], [System.NotSupportedException], [System.UnauthorizedAccessException], [System.Security.SecurityException] {
+            return $true
         }
 
         return $false
@@ -914,21 +954,30 @@ try {
         }
     }
 
+    if ((Get-Content -Raw -LiteralPath $buildSourcesPath -Encoding UTF8) -cne $buildSourcesJson) {
+        throw "Build source manifest changed during compilation. Re-run the build: $buildSourcesPath"
+    }
+
     $needLink = ($compileCount -gt 0) -or (-not (Test-Path $outputExe))
     if (-not $needLink -and $resourceCompiled) {
         $needLink = $true
     }
     if (-not $needLink -and (Test-Path $outputExe)) {
-        $exeTime = (Get-Item $outputExe).LastWriteTime
+        $exeTime = (Get-Item -LiteralPath $outputExe).LastWriteTimeUtc
+        # Packaging checks the shared manifest even when this target's source list is unchanged.
+        if ((Get-Item -LiteralPath $buildSourcesPath).LastWriteTimeUtc -gt $exeTime) {
+            Write-Host "Build source manifest is newer than the executable; relinking." -ForegroundColor Cyan
+            $needLink = $true
+        }
         foreach ($o in $objFiles) {
-            if (-not (Test-Path $o) -or (Get-Item $o).LastWriteTime -gt $exeTime) {
+            if ($needLink -or -not (Test-Path $o) -or (Get-Item $o).LastWriteTimeUtc -gt $exeTime) {
                 $needLink = $true
                 break
             }
         }
 
         if (-not $needLink -and ((-not (Test-Path -LiteralPath $resourceObject)) -or
-                ((Get-Item -LiteralPath $resourceObject).LastWriteTime -gt $exeTime))) {
+                ((Get-Item -LiteralPath $resourceObject).LastWriteTimeUtc -gt $exeTime))) {
             $needLink = $true
         }
     }
@@ -990,7 +1039,11 @@ try {
 
     Set-ContentWithRetry -Path $signatureJsonPath -Value $signatureJson -Encoding UTF8
     Set-ContentWithRetry -Path $signatureHashPath -Value $signatureHash -Encoding ASCII -NoNewline
-
+    $buildSucceeded = $true
+}
+catch {
+    $buildError = $_.Exception.Message
+    throw
 }
 finally {
     if ($null -ne $globalLockStream) {

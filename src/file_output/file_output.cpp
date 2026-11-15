@@ -3,15 +3,21 @@
 #include "file_output/file_output.h"
 #include "bridge/view_bridge.h"
 #include "core/font_list.h"
+#include "ui/vertical_text_gdi.h"
 #include "core/annotation_rotation.h"
 #include "math/math_render.h"
 #include "clrop/bridge.h"
+#include "clrop/hash.h"
+#include "clrop/json.h"
 #include "file_output/note_snapshot.h"
 #include "file_output/pdf_annotation_export.h"
+#include "file_output/pdf_annotation_detach.h"
 #include "file_output/shape_outline_pdf.h"
 #include "ui/dashed_shape_outline.h"
 #include "ui/quarter_turn_bitmap.h"
 #include "note/note_export.h"
+#include "note/note_clro_markdown.h"
+#include "note/note_parser.h"
 #include "note/note_file_policy.h"
 #include "note/note_workspace_service.h"
 #include "fpdf_save.h"
@@ -25,6 +31,7 @@
 #include "core/preview_trace.h"
 #include "core/ui_notify.h"
 #include "core/ui_prompts.h"
+#include "ui/core/main_window_api.h"
 #include <filesystem>
 #include <limits>
 #include <map>
@@ -655,6 +662,7 @@ static std::optional<ResolvedNoteExportSource> ResolveNoteExportSource(
     source.plain_text = IsPlainTextNotePath(source.snapshot.targetPath);
     note::NoteMetadata meta;
     meta.clro_ascii_only = g_config.clroAsciiOnly;
+    meta.quote_lazy_continuation = g_config.noteQuoteLazyContinuation;
     meta.file_name =
         std::filesystem::path(source.snapshot.targetPath).filename().wstring();
     meta.title = note::DeriveTitleFromFileName(meta.file_name);
@@ -670,6 +678,7 @@ static std::optional<ResolvedNoteExportSource> ResolveNoteExportSource(
     if (kernel && kernel->valid() &&
         kernel->content_kind() == contentKind &&
         kernel->text_core().clro_ascii_only() == meta.clro_ascii_only &&
+        kernel->text_core().quote_lazy_continuation() == meta.quote_lazy_continuation &&
         kernel->text_core().MatchesRaw(source.raw) &&
         (source.snapshot.identity.content_revision == 0 ||
          source.snapshot.identity.content_revision ==
@@ -1314,6 +1323,8 @@ static bool RenderTextAnnotBitmap(const Annotation& ann, double widthPt, double 
     if (fontPt <= 0.0) fontPt = 14.0 * padScale;
     lf.lfHeight = -MulDiv(static_cast<int>(std::round(fontPt)),
                           static_cast<int>(std::lround(dpi)), 72);
+    if (ann.writingMode == TextWritingMode::VerticalRl)
+        lf.lfHeight = -std::max(1, static_cast<int>(std::lround(fontPt * dpi / 72.0)));
     if (!ann.fontName.empty()) {
         wcsncpy_s(lf.lfFaceName, ann.fontName.c_str(), LF_FACESIZE - 1);
     } else {
@@ -1338,8 +1349,11 @@ static bool RenderTextAnnotBitmap(const Annotation& ann, double widthPt, double 
     GetTextMetricsW(hdc, &tm);
     int lineHeight = std::max(1, static_cast<int>(tm.tmHeight));
 
+    if (ann.writingMode == TextWritingMode::VerticalRl)
+        vertical_text::Draw(hdc, tr, ann.text, lineHeight);
     int curY = tr.top;
     for (const auto& lineText : *lines) {
+        if (ann.writingMode == TextWritingMode::VerticalRl) break;
         if (curY + tm.tmHeight > tr.bottom + tm.tmDescent + 2) break; // allow some overhang as in viewer
         if (!lineText.empty()) {
             TextOutW(hdc, tr.left, curY, lineText.c_str(), static_cast<int>(lineText.size()));
@@ -1391,7 +1405,8 @@ static void AddTextAnnotationBitmap(FPDF_DOCUMENT dest, FPDF_PAGE page, const An
     int wPx = 0, hPx = 0, stride = 0;
     std::vector<uint8_t> buf;
     constexpr double kBaseDpi = 216.0;
-    if (!RenderTextAnnotBitmap(ann, wPt, hPt, kBaseDpi * bitmapDpiScale, coordScale,
+    const double textDpi = ann.writingMode == TextWritingMode::VerticalRl ? 576.0 : kBaseDpi;
+    if (!RenderTextAnnotBitmap(ann, wPt, hPt, textDpi * bitmapDpiScale, coordScale,
                                buf, wPx, hPx, stride)) return;
 
     FPDF_PAGEOBJECT img = FPDFPageObj_NewImageObj(dest);
@@ -1426,7 +1441,7 @@ static void AddTextAnnotation(PdfTextFontCache& fonts, FPDF_DOCUMENT dest, FPDF_
     double hPt = top - bottom;
     if (wPt <= 0.1 || hPt <= 0.1) return;
 
-    if (!ShouldExportTextAsPdfText(standardTextAnnots)) {
+    if (ann.writingMode == TextWritingMode::VerticalRl || !ShouldExportTextAsPdfText(standardTextAnnots)) {
         AddTextAnnotationBitmap(dest, page, ann, bitmapDpiScale, coordScale);
         return;
     }
@@ -2238,13 +2253,13 @@ static void DrawAnnotationAppearance(const std::vector<Annotation>& annots,
                                  PdfTextFontCache& fonts, FPDF_DOCUMENT dest,
                                  FPDF_PAGE page, int pageIndex, bool standardTextAnnots,
                                  bool matchPdfPaneTextLayout, double coordScale, double bitmapDpiScale,
-                                 const pdf_annotation_export::TextColorOptions& textColor) {
+                                 const pdf_annotation_export::TextColorOptions& textColor, bool embedEditableData) {
     for (const auto& original : annots) {
         if (original.pageIndex != pageIndex) continue;
         Annotation ann = original;
         if (ann.type == Annotation::Type::TextColor) {
             if (textColor.mode != pdf_annotation_export::TextColorMode::Marker) {
-                if (!pdf_annotation_export::AddTextColorOverlay(page, ScaleAnnotationForExport(ann, coordScale), textColor)) return false;
+                if (!pdf_annotation_export::AddTextColorOverlay(page, ScaleAnnotationForExport(ann, coordScale), textColor, embedEditableData)) return false;
                 continue;
             }
             ann.type = Annotation::Type::MarkerText;
@@ -2258,7 +2273,12 @@ static void DrawAnnotationAppearance(const std::vector<Annotation>& annots,
             DrawAnnotationAppearance({ann}, fonts, dest, scratch, pageIndex, standardTextAnnots,
                                      matchPdfPaneTextLayout, coordScale, bitmapDpiScale);
             const Annotation scaled = ScaleAnnotationForExport(ann, coordScale);
-            ok = pdf_annotation_export::Add(dest, page, scratch, scaled, standardTextAnnots);
+            if (embedEditableData) {
+                const Annotation editable = ScaleAnnotationForExport(original, coordScale);
+                ok = pdf_annotation_export::Add(dest, page, scratch, scaled, standardTextAnnots, &editable);
+            } else {
+                ok = pdf_annotation_export::Add(dest, page, scratch, scaled, standardTextAnnots, nullptr, false);
+            }
         } catch (...) { /* Discard this output; source and recovery data remain. */ }
         FPDF_ClosePage(scratch);
         FPDFPage_Delete(dest, scratchIndex);
@@ -2948,7 +2968,9 @@ static bool DrawAnnotationsToBuffer(const std::vector<Annotation>& annots, int p
             TEXTMETRICW tm{};
             GetTextMetricsW(localDc, &tm);
             int lineHeight = std::max(1, static_cast<int>(tm.tmHeight));
-            if (!ann.textLines.empty()) {
+            if (ann.writingMode == TextWritingMode::VerticalRl) {
+                vertical_text::Draw(localDc, tr, ann.text, lineHeight);
+            } else if (!ann.textLines.empty()) {
                 int y = tr.top;
                 int bottomLimit = tr.bottom;
                 for (const auto& line : ann.textLines) {
@@ -3440,7 +3462,7 @@ static bool ExportPdfDocumentWithParts(FPDF_DOCUMENT srcDoc,
                     if (spec.withAnnotations) {
                         if (!AddAnnotationsToPage(annots, fontCache, dest, page, spec.pageIndex,
                                              standardTextAnnots, matchPdfPaneTextLayout,
-                                             exportScale, /*bitmapDpiScale=*/1.0, part.textColor)) {
+                                             exportScale, /*bitmapDpiScale=*/1.0, part.textColor, part.embedEditableData)) {
                             if (err) *err = localization::Text(L"file_output.pdf.annotation_failed");
                             ClosePdfTextFonts(fontCache);
                             FPDF_ClosePage(page);
@@ -3489,6 +3511,145 @@ static bool ExportPdfDocumentWithParts(FPDF_DOCUMENT srcDoc,
 } // namespace
 
 namespace file_output {
+
+bool DetachPdfAnnotationsToCopy(HWND owner) {
+    const auto title = localization::Text(L"menu.tools.detach_pdf_annotations");
+    const auto fail = [&](std::wstring_view message) {
+        ShowFileOutputMessageDialog(owner, title, localization::Text(message), SoftNoticeKind::Error);
+        return false;
+    };
+    try {
+        const auto selected = PromptExistingLocalPath(owner, DialogWorkspaceInitialFolder(),
+            localization::Text(L"file_output.detach_pdf.source"), false);
+        if (!selected) return false;
+        const std::filesystem::path source(*selected);
+        if (!IsPdfFile(source) || !write_checks::IsSafeLocalPath(source))
+            return fail(L"file_output.detach_pdf.read_failed");
+
+        pdf_annotation_detach::Result detached;
+        const auto closeDocument = [](pdf_annotation_detach::Result* result) {
+            if (!result->pdf) return;
+            std::lock_guard<std::recursive_mutex> lock(g_pdfiumMutex);
+            result->pdf.reset();
+        };
+        const std::unique_ptr<pdf_annotation_detach::Result, decltype(closeDocument)> close(&detached, closeDocument);
+        {
+            const auto closeHandle = [](HANDLE handle) { CloseHandle(handle); };
+            const auto path = ToExtendedWin32PathIfAbsoluteLocal(source);
+            const HANDLE input = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+            if (input == INVALID_HANDLE_VALUE) return fail(L"file_output.detach_pdf.read_failed");
+            const std::unique_ptr<void, decltype(closeHandle)> file(input, closeHandle);
+            BY_HANDLE_FILE_INFORMATION info{};
+            LARGE_INTEGER size{};
+            if (!GetFileInformationByHandle(input, &info) ||
+                (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) ||
+                !GetFileSizeEx(input, &size) || size.QuadPart <= 0 ||
+                size.QuadPart > std::numeric_limits<unsigned long>::max())
+                return fail(L"file_output.detach_pdf.read_failed");
+
+            FPDF_FILEACCESS access{};
+            access.m_FileLen = static_cast<unsigned long>(size.QuadPart);
+            access.m_Param = input;
+            access.m_GetBlock = [](void* fileHandle, unsigned long offset, unsigned char* bytes,
+                                  unsigned long length) -> int {
+                LARGE_INTEGER position{};
+                position.QuadPart = offset;
+                DWORD read = 0;
+                return SetFilePointerEx(fileHandle, position, nullptr, FILE_BEGIN) &&
+                    ReadFile(fileHandle, bytes, length, &read, nullptr) && read == length;
+            };
+            std::wstring_view error;
+            {
+                std::lock_guard<std::recursive_mutex> lock(g_pdfiumMutex);
+                pdf_annotation_detach::Document document(FPDF_LoadCustomDocument(&access, nullptr));
+                if (!document) {
+                    error = FPDF_GetLastError() == FPDF_ERR_PASSWORD
+                        ? L"file_output.detach_pdf.protected" : L"file_output.detach_pdf.read_failed";
+                } else if (FPDF_GetSecurityHandlerRevision(document.get()) >= 0) {
+                    error = L"file_output.detach_pdf.protected";
+                } else {
+                    std::wstring detail;
+                    if (!pdf_annotation_detach::Detach(document.get(), detached, detail))
+                        error = L"file_output.detach_pdf.invalid";
+                }
+            }
+            if (!error.empty()) return fail(error);
+        }
+        const auto retainedSummary = [&]() {
+            return localization::Format(L"file_output.detach_pdf.retained_summary",
+                {{L"unsupported", std::to_wstring(detached.unsupported)},
+                 {L"order", std::to_wstring(detached.retainedForOrder)}});
+        };
+        const bool hasRetained = detached.unsupported != 0 || detached.retainedForOrder != 0;
+        if (detached.annotations.empty()) {
+            const auto message = hasRetained
+                ? localization::Text(L"file_output.detach_pdf.none_detached") + L"\n" + retainedSummary()
+                : localization::Text(L"file_output.detach_pdf.no_annotations");
+            ShowFileOutputMessageDialog(owner, title, message, SoftNoticeKind::Info);
+            return false;
+        }
+
+        const auto destination = PromptExistingLocalPath(owner, source.parent_path(),
+            localization::Text(L"file_output.detach_pdf.destination"), true, {},
+            localization::Text(L"dialog.action.save"));
+        if (!destination) return false;
+        const std::filesystem::path parent(*destination);
+        if (!write_checks::IsSafeLocalPath(parent) || !DirectoryExistsWin32(parent))
+            return fail(L"file_output.detach_pdf.save_failed");
+
+        auto stem = source.stem().wstring();
+        if (stem.size() > 230) stem = L"document";
+        const auto published = atomic_write::MakeUniqueDestInDir(parent, stem + L" - detached");
+        const auto publishedPath = ToExtendedWin32PathIfAbsoluteLocal(published);
+        GUID id{};
+        wchar_t guid[40]{};
+        if (FAILED(CoCreateGuid(&id)) || !StringFromGUID2(id, guid, static_cast<int>(std::size(guid))))
+            return fail(L"file_output.detach_pdf.save_failed");
+        const auto pending = parent / (std::wstring(L".pnw-detach-") + guid + L".pending");
+        const auto pendingPath = ToExtendedWin32PathIfAbsoluteLocal(pending);
+        const auto pdf = pending / (stem + L".pdf");
+        const auto clrop = pending / (stem + L".clrop");
+        const auto finalPdf = published / pdf.filename();
+        const auto pdfPath = ToExtendedWin32PathIfAbsoluteLocal(pdf);
+        const auto clropPath = ToExtendedWin32PathIfAbsoluteLocal(clrop);
+
+        // Only the directory rename publishes the pair. Cancellation creates
+        // nothing, and an interruption can leave only a .pending directory.
+        if (!CreateDirectoryW(pendingPath.c_str(), nullptr)) return fail(L"file_output.detach_pdf.save_failed");
+        bool installed = false;
+        const auto removePending = [&](const void*) {
+            if (installed || !write_checks::IsSafeLocalPath(pending)) return;
+            DeleteFileW(pdfPath.c_str());
+            DeleteFileW(clropPath.c_str());
+            RemoveDirectoryW(pendingPath.c_str());
+        };
+        const std::unique_ptr<const void, decltype(removePending)> cleanup(&installed, removePending);
+        std::wstring detail;
+        clrop::Document verified;
+        std::string verifiedHash;
+        if (!SavePdfDocument(detached.pdf.get(), pdf.wstring(), &detail) ||
+            !clrop_bridge::SaveAnnotations(clrop.wstring(), pdf.wstring(), detached.annotations, detail, finalPdf.wstring()) ||
+            !clrop::LoadClropFile(clrop.wstring(), verified, detail) ||
+            verified.pdfId.path != finalPdf.wstring() ||
+            !clrop::ComputeFileSha256(pdf, &verifiedHash) || verified.pdfId.sha256 != verifiedHash ||
+            !write_checks::IsSafeLocalPath(pending)) {
+            return fail(L"file_output.detach_pdf.save_failed");
+        }
+        auto message = localization::Format(L"file_output.detach_pdf.created",
+            {{L"count", std::to_wstring(detached.annotations.size())},
+             {L"converted", std::to_wstring(detached.converted)}});
+        if (hasRetained) message += L"\n" + retainedSummary();
+        const std::vector<SilentDialogPath> paths{{L"", published.wstring()}};
+        if (!MoveFileExW(pendingPath.c_str(), publishedPath.c_str(), MOVEFILE_WRITE_THROUGH))
+            return fail(L"file_output.detach_pdf.save_failed");
+        installed = true;
+        ShowSilentMessageDialog(FileOutputNoticeOwner(owner), title, message, SoftNoticeKind::Info, paths);
+        return true;
+    } catch (...) {
+        return fail(L"file_output.detach_pdf.save_failed");
+    }
+}
 
 std::optional<std::wstring> PickExportDestination(HWND owner, const std::wstring& title,
                                                   const std::filesystem::path& initialDirectory,
@@ -3645,13 +3806,13 @@ bool ExportPdfParts(HWND owner, const std::vector<PdfExportPart>& parts,
 static bool ExportPdfPagesImpl(HWND owner, const std::vector<PdfPageSpec>& pages,
                                const std::wstring& outPath, bool standardTextAnnots,
                                double exportScale, bool matchPdfPaneTextLayout,
-                               const pdf_annotation_export::TextColorOptions& textColor) {
-    return ExportPdfParts(owner, {{pages, standardTextAnnots, exportScale, matchPdfPaneTextLayout, textColor}}, outPath);
+                               const pdf_annotation_export::TextColorOptions& textColor, bool embedEditableData) {
+    return ExportPdfParts(owner, {{pages, standardTextAnnots, exportScale, matchPdfPaneTextLayout, textColor, embedEditableData}}, outPath);
 }
 
 bool ExportPdfWithAnnotations(HWND owner, bool includeAnnotations, bool standardTextAnnots, double exportScale,
                               bool matchPdfPaneTextLayout, std::wstring* outSavedPath,
-                              const pdf_annotation_export::TextColorOptions& textColor) {
+                              const pdf_annotation_export::TextColorOptions& textColor, bool embedEditableData) {
     if (outSavedPath) outSavedPath->clear();
     if (!CurrentLogicalPdfDocument() || CurrentLogicalPdfPath().empty()) return false;
     const std::vector<PdfPageSpec> pages = BuildAllPdfPageSpecs(includeAnnotations);
@@ -3667,7 +3828,7 @@ bool ExportPdfWithAnnotations(HWND owner, bool includeAnnotations, bool standard
                                defName, initialDir, filters, 2, L"pdf");
     if (!target) return false;
     const bool ok = ExportPdfPagesImpl(owner, pages, *target,
-                                       standardTextAnnots, exportScale, matchPdfPaneTextLayout, textColor);
+                                       standardTextAnnots, exportScale, matchPdfPaneTextLayout, textColor, embedEditableData);
     if (ok && outSavedPath) *outSavedPath = *target;
     return ok;
 }
@@ -3675,11 +3836,11 @@ bool ExportPdfWithAnnotations(HWND owner, bool includeAnnotations, bool standard
 bool ExportPdfWithAnnotations(HWND owner, bool includeAnnotations, const std::wstring& outPath,
                               bool standardTextAnnots, double exportScale,
                               bool matchPdfPaneTextLayout,
-                              const pdf_annotation_export::TextColorOptions& textColor) {
+                              const pdf_annotation_export::TextColorOptions& textColor, bool embedEditableData) {
     if (!CurrentLogicalPdfDocument() || CurrentLogicalPdfPath().empty() || outPath.empty()) return false;
     const std::vector<PdfPageSpec> pages = BuildAllPdfPageSpecs(includeAnnotations);
     return ExportPdfPagesImpl(owner, pages, outPath, standardTextAnnots, exportScale,
-                              matchPdfPaneTextLayout, textColor);
+                              matchPdfPaneTextLayout, textColor, embedEditableData);
 }
 
 bool ExportPdfPages(HWND owner, const std::vector<PdfPageSpec>& pages) {
@@ -3706,7 +3867,7 @@ bool ExportPdfPages(HWND owner, const std::vector<PdfPageSpec>& pages, bool stan
 
 bool ExportPdfPages(HWND owner, const std::vector<PdfPageSpec>& pages, bool standardTextAnnots,
                     double exportScale, bool matchPdfPaneTextLayout, std::wstring* outSavedPath,
-                              const pdf_annotation_export::TextColorOptions& textColor) {
+                              const pdf_annotation_export::TextColorOptions& textColor, bool embedEditableData) {
     if (outSavedPath) outSavedPath->clear();
     if (!CurrentLogicalPdfDocument() || CurrentLogicalPdfPath().empty()) return false;
     std::wstring defName = DefaultNameFromPath(CurrentLogicalPdfPath(), L"_pages.pdf", L"document_pages.pdf");
@@ -3719,7 +3880,7 @@ bool ExportPdfPages(HWND owner, const std::vector<PdfPageSpec>& pages, bool stan
     auto target = PickSavePath(owner, dialogTitle.c_str(),
                                defName, initialDir, filters, 2, L"pdf");
     if (!target) return false;
-    const bool ok = ExportPdfPages(owner, pages, *target, standardTextAnnots, exportScale, matchPdfPaneTextLayout, textColor);
+    const bool ok = ExportPdfPages(owner, pages, *target, standardTextAnnots, exportScale, matchPdfPaneTextLayout, textColor, embedEditableData);
     if (ok && outSavedPath) *outSavedPath = *target;
     return ok;
 }
@@ -3732,9 +3893,9 @@ bool ExportPdfPages(HWND owner, const std::vector<PdfPageSpec>& pages, const std
 
 bool ExportPdfPages(HWND owner, const std::vector<PdfPageSpec>& pages, const std::wstring& outPath,
                     bool standardTextAnnots, double exportScale, bool matchPdfPaneTextLayout,
-                    const pdf_annotation_export::TextColorOptions& textColor) {
+                    const pdf_annotation_export::TextColorOptions& textColor, bool embedEditableData) {
     return ExportPdfPagesImpl(owner, pages, outPath, standardTextAnnots, exportScale,
-                              matchPdfPaneTextLayout, textColor);
+                              matchPdfPaneTextLayout, textColor, embedEditableData);
 }
 
 static bool TryParseFinitePdfNumber(const std::wstring& text, double* out) {
@@ -4095,6 +4256,30 @@ bool ExportNoteHtml(HWND owner, const NoteMarkupExportOptions& options) {
     return ExportNoteHtml(g_currentNotePath, *target, options);
 }
 
+
+NoteExportApplicability GetNoteExportApplicability(const std::wstring& notePath) {
+    NoteExportApplicability applicability;
+    applicability.normalizeClroSyntax = note::IsClroMarkdownFile(notePath);
+    const auto source = ResolveNoteExportSource(notePath);
+    if (!source) return applicability;
+    if (source->plain_text) return {false, false, false};
+
+    const auto& doc = source->index->document;
+    if (!source->index->valid || note::NoteDocumentHasFatalParseFailure(doc)) return applicability;
+    applicability.math = !doc.math_spans.empty();
+    applicability.shiftHeadingLevels = std::any_of(doc.blocks.begin(), doc.blocks.end(),
+        [](const note::BlockNode& block) { return block.kind == note::BlockKind::Heading && block.level < 6; });
+    if (applicability.normalizeClroSyntax) {
+        applicability.normalizeClroSyntax = doc.uses_clro_fullwidth_markdown;
+        if (applicability.normalizeClroSyntax) {
+            const auto& model = source->index->text_model;
+            const auto converted = note::BuildClroMarkdownExportSource(model);
+            // A failed conversion leaves the display hint unknown.
+            if (converted) applicability.normalizeClroSyntax = *converted != model.raw;
+        }
+    }
+    return applicability;
+}
 
 bool ExportNotePlainText(const std::wstring& notePath, const std::wstring& outPath, const TextExportOptions& options) {
     if (!notePath.empty() && !outPath.empty() &&

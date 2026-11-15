@@ -149,12 +149,16 @@ inline void DrawFontComboItem(const DRAWITEMSTRUCT* dis, int pt, const wchar_t* 
     std::wstring name = GetComboItemText(combo, static_cast<int>(dis->itemID));
     std::wstring face = ResolveFontFaceName(name);
     if (face.empty()) face = name;
+    const bool collapsed = (dis->itemState & ODS_COMBOBOXEDIT) != 0;
 
     LOGFONTW lf{};
     lf.lfWeight = FW_NORMAL;
     wcsncpy_s(lf.lfFaceName, face.c_str(), _TRUNCATE);
     lf.lfHeight = -MulDiv(pt, GetDeviceCaps(dis->hDC, LOGPIXELSY), 72);
-    HFONT font = CreateFontIndirectW(&lf);
+    // The closed field is a setting label; previews belong in the open list.
+    HFONT font = collapsed ? nullptr : CreateFontIndirectW(&lf);
+    HFONT displayFont = collapsed
+        ? reinterpret_cast<HFONT>(SendMessageW(combo, WM_GETFONT, 0, 0)) : font;
 
     const bool selected = (dis->itemState & ODS_SELECTED) != 0;
     COLORREF bg = selected ? theme.selectionBg : theme.panelBg;
@@ -165,23 +169,23 @@ inline void DrawFontComboItem(const DRAWITEMSTRUCT* dis, int pt, const wchar_t* 
 
     int oldBk = SetBkMode(dis->hDC, TRANSPARENT);
     COLORREF oldFg = SetTextColor(dis->hDC, fg);
-    HFONT oldFont = font ? static_cast<HFONT>(SelectObject(dis->hDC, font)) : nullptr;
+    HFONT oldFont = displayFont ? static_cast<HFONT>(SelectObject(dis->hDC, displayFont)) : nullptr;
 
     std::wstring text = name;
     const auto* entry = FindFontListEntry(name);
-    if (entry && entry->faceName && std::wstring(entry->faceName) != name) {
+    if (!collapsed && entry && entry->faceName && std::wstring(entry->faceName) != name) {
         text += L" (";
         text += entry->faceName;
         text += L")";
     }
-    if (entry) {
+    if (!collapsed && entry) {
         if (const wchar_t* label = GetFontStyleLabel(entry->style); label && *label) {
             text += L" [";
             text += label;
             text += L"]";
         }
     }
-    if (sample && *sample) {
+    if (!collapsed && sample && *sample) {
         std::wstring preview = sample;
         const bool hasJapanese = entry && FontStyleHasJapaneseGlyphs(entry->style);
         std::wstring jpName = hasJapanese ? ResolveFontDisplayName(face) : kFontNoJapanesePreviewLabel;

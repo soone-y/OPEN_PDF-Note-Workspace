@@ -13,6 +13,35 @@ lecture.clrop   annotations for this PDF
 
 Opening the PDF overlays its matching annotations. Both files are needed to display and edit them again. Copy, move or share both together. In-app rename and move commands handle related files. Before organizing with Explorer, close the displayed file in the application and preserve the matching names.
 
+## Protecting an open PDF and checking its pairing
+
+The main application and the read-only viewer prevent external applications from writing, deleting, renaming or replacing a PDF while it is open. Close every view of that PDF before editing it in another application. If an external application already holds write access, finish that operation before opening the PDF here. Ordinary read-only access remains available.
+
+A same-name `.clrop` is a candidate. The application compares file size, page count and original page dimensions. The main application offers choices on a mismatch and also checks SHA-256 before the first staging save of loaded annotations. The read-only viewer also checks content when SHA-256 is recorded; it hides mismatched annotations and displays a notice. Legacy files without SHA-256 use the available size and page information. The viewer never rewrites pairing information.
+
+Renaming only the PDF externally leaves its old `.clrop` undiscovered during normal opening. Keep their names aligned, or explicitly start the candidate search described below. Candidates are never applied automatically.
+
+## Find PDF candidates
+
+Open `Tools → Find PDF / CLROP candidates` and choose a search mode:
+
+- **Compare within a directory** examines PDFs and CLROPs immediately inside the chosen directory. It also identifies CLROPs without an adjacent same-name PDF.
+- **Find PDFs for a CLROP** takes one selected CLROP and a separately selected PDF directory. Other CLROPs in that directory are not investigated.
+
+Start the search to list candidates ranked by SHA-256, structure and size, structure, size, page count, or name. Each piece of evidence has its own column. Structure means page count and ordered page dimensions. Changed-size PDFs can remain structure candidates. Identical copies remain separate rows.
+
+Hashing is restricted to candidates with a recorded hash and compatible byte counts, or an unknown recorded size. Unchecked differs from different. Read failures, invalid data, cancellation and count, time or read limits leave explicit unchecked results. Subdirectories and stored paths never expand the search automatically.
+
+Select a candidate and choose the read-only preview. A separate window temporarily overlays its annotations, including weaker candidates, with a permanent unconfirmed-pairing banner. Inspect placement and page correspondence. A match or preview does not apply the pairing: the tool does not rename, move or update either input. Preview sessions are not saved in normal viewer settings.
+
+## Correct an annotation's page
+
+The annotation list retains entries for pages absent from the current PDF, marked with their page number and `[out of range]`. After reviewing the PDF pairing and loading the annotations, right-click the list entry, open its properties and enable editing. Change **Page** using one-based numbering. A new destination must exist in the current PDF.
+
+Apply records one undoable annotation update. IDs, content, style and PDF-space coordinates are retained. Adjust coordinates in the same properties window if the destination page has different dimensions. Leaving an existing out-of-range number unchanged lets you edit other properties while retaining that annotation. Page insertion or deletion never automatically relocates or deletes annotations.
+
+Inspect the result, then use normal saving to commit it to `.clrop`.
+
 ## What the file contains
 
 It retains text and math source, strokes and marker ranges, shapes, colors, widths, opacity, positions and orientations. It also identifies the associated PDF: renaming this data file is not a way to transfer annotations to another PDF.

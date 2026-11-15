@@ -1,7 +1,13 @@
 #include "file_output/pdf_annotation_export.h"
+#include "file_output/pdf_annotation_detach.h"
+#include "core/annot_stage_replay.h"
+#define PDF_NOTE_ANNOT_COMMAND_CODEC_ONLY
+#include "pdf_view/annotation_store.cppinc"
+#undef PDF_NOTE_ANNOT_COMMAND_CODEC_ONLY
 #include "file_output/shape_outline_pdf.h"
 #include "ui/dashed_shape_outline.h"
 #include "fpdf_annot.h"
+#include "fpdf_attachment.h"
 #include "fpdf_edit.h"
 #include "fpdf_save.h"
 #include "fpdf_transformpage.h"
@@ -12,6 +18,25 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <iomanip>
+
+std::wstring UTF8ToWide(const std::string& s) {
+    const int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s.data(),
+                                     static_cast<int>(s.size()), nullptr, 0);
+    std::wstring out(static_cast<size_t>(n), L'\0');
+    if (n) MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s.data(),
+                               static_cast<int>(s.size()), out.data(), n);
+    return out;
+}
+
+std::string WideToUTF8(const std::wstring& s) {
+    const int n = WideCharToMultiByte(CP_UTF8, 0, s.data(), static_cast<int>(s.size()),
+                                     nullptr, 0, nullptr, nullptr);
+    std::string out(static_cast<size_t>(n), '\0');
+    if (n) WideCharToMultiByte(CP_UTF8, 0, s.data(), static_cast<int>(s.size()),
+                               out.data(), n, nullptr, nullptr);
+    return out;
+}
 
 void Require(bool ok, const char* message) { if (!ok) throw std::runtime_error(message); }
 
@@ -44,7 +69,7 @@ FPDF_PAGEOBJECT Rect(FPDF_PAGE page) {
     return obj;
 }
 
-void Case(Annotation::Type type, int expected, bool freeText = true, bool japanese = false) {
+void Case(Annotation::Type type, int expected, bool freeText = true, bool japanese = false, bool embedEditableData = true) {
     auto doc = pdf_annotation_export::CreateDocument();
     Require(doc!=nullptr,"initialize output resources");
     auto page = FPDFPage_New(doc, 0, 200, 200);
@@ -53,7 +78,13 @@ void Case(Annotation::Type type, int expected, bool freeText = true, bool japane
     a.type = type; a.id = L"round-trip"; a.text = L"Hello PDF";
     a.fontPt = 16; a.color = RGB(0,100,240); a.alpha = 0.5;
     a.x1 = 40; a.y1 = 100; a.x2 = 140; a.y2 = 125;
-    if(type == Annotation::Type::MarkerText) a.quads={40,125,140,125,140,100,40,100};
+    if(type == Annotation::Type::MarkerText) {
+        a.quads={40,125,140,125,140,100,40,100};
+        if (!embedEditableData) {
+            a.text.clear();
+            a.quads={40,125,140,125,140,100,40,100};
+        }
+    }
     FPDF_FONT font = nullptr;
     if (type == Annotation::Type::TextBox) {
         if(japanese) {
@@ -83,7 +114,7 @@ void Case(Annotation::Type type, int expected, bool freeText = true, bool japane
     } else Rect(scratch);
     Require(FPDFPage_GenerateContent(scratch) != 0, "scratch content");
     const auto reference = Render(scratch, 0);
-    Require(pdf_annotation_export::Add(doc,page,scratch,a,freeText), "annotation creation");
+    Require(pdf_annotation_export::Add(doc,page,scratch,a,freeText,nullptr,embedEditableData), "annotation creation");
     Require(pdf_annotation_export::Finalize(page), "finalize annotations");
     Require(FPDFPage_CountObjects(page) == 0, "annotation must not become page content");
     auto annot = FPDFPage_GetAnnot(page,0);
@@ -121,11 +152,53 @@ void Case(Annotation::Type type, int expected, bool freeText = true, bool japane
     annot = FPDFPage_GetAnnot(page,0);
     Require(FPDFAnnot_GetSubtype(annot)==expected,"reload subtype");
     wchar_t contents[64]{};
-    Require(FPDFAnnot_GetStringValue(annot,"Contents",reinterpret_cast<FPDF_WCHAR*>(contents),sizeof(contents))>2 &&
+    Require(FPDFAnnot_GetStringValue(annot,"Contents",reinterpret_cast<FPDF_WCHAR*>(contents),sizeof(contents))>=2 &&
             std::wstring(contents)==a.text,"Unicode annotation contents");
     auto with = Render(page,FPDF_ANNOT), without = Render(page,0);
     Require(with != without,"annotation must render separately from page");
-    FPDFPage_CloseAnnot(annot); FPDF_ClosePage(page); FPDF_CloseDocument(loaded);
+    FPDFPage_CloseAnnot(annot);
+    pdf_annotation_detach::Result detached;
+    std::wstring detachError;
+    Require(pdf_annotation_detach::Detach(loaded,detached,detachError), "detach saved native annotation");
+    if (!embedEditableData) {
+        auto savedAnnot = FPDFPage_GetAnnot(page,0);
+        Require(savedAnnot && !FPDFAnnot_HasKey(savedAnnot,"PNWAnnotationV1") &&
+                !FPDFAnnot_HasKey(savedAnnot,"PNWNativeV1"),"saved annotation omits both recovery keys");
+        FPDFPage_CloseAnnot(savedAnnot);
+        auto retainedPage = FPDF_LoadPage(detached.pdf.get(),0);
+        if (expected==FPDF_ANNOT_HIGHLIGHT) {
+            Require(detached.converted==1 && detached.annotations.size()==1 && detached.unsupported==0 && detached.retainedForOrder==0 &&
+                    detached.annotations[0].type==Annotation::Type::MarkerText &&
+                    detached.annotations[0].quads==a.quads && retainedPage &&
+                    FPDFPage_GetAnnotCount(retainedPage)==0,
+                    "export without recovery data uses standard highlight conversion");
+        } else {
+            Require(detached.annotations.empty() && detached.unsupported==1 && detached.retainedForOrder==0 && retainedPage &&
+                    Render(retainedPage,FPDF_ANNOT)==with,"detach retains unsupported visible annotation");
+        }
+        FPDF_ClosePage(retainedPage);
+        FPDF_ClosePage(page); FPDF_CloseDocument(loaded);
+        return;
+    }
+    Require(detached.annotations.size()==1 && detached.unsupported==0 && detached.retainedForOrder==0, "detach count");
+    const auto& restored=detached.annotations[0];
+    Require(restored.type==a.type && restored.id==a.id && restored.text==a.text &&
+            restored.x1==a.x1 && restored.y1==a.y1 && restored.quads==a.quads &&
+            restored.fontPt==a.fontPt, "editable data survives saved PDF");
+    auto clean=FPDF_LoadPage(detached.pdf.get(),0);
+    Require(FPDFPage_GetAnnotCount(clean)==0 && Render(clean,FPDF_ANNOT)==without, "detached PDF background intact");
+    FPDF_ClosePage(clean);
+    Require(FPDFPage_GetAnnotCount(page)==1,"source untouched");
+    pdf_annotation_detach::Result twice;
+    Require(pdf_annotation_detach::Detach(detached.pdf.get(),twice,detachError) && twice.annotations.empty(),"detach twice");
+    annot=FPDFPage_GetAnnot(page,0);
+    Require(FPDFAnnot_SetStringValue(annot,"Contents",reinterpret_cast<FPDF_WIDESTRING>(L"external edit")),"external edit fixture");
+    FPDFPage_CloseAnnot(annot);
+    auto previous=detached.pdf.get();
+    Require(!pdf_annotation_detach::Detach(loaded,detached,detachError) && detached.pdf.get()==previous &&
+            detached.annotations.size()==1,"stale payload rejected without publishing partial result");
+    detached.pdf.reset(); twice.pdf.reset();
+    FPDF_ClosePage(page); FPDF_CloseDocument(loaded);
 }
 
 // Intentionally save WITHOUT rendering first: rendering constructs PDFium's
@@ -315,6 +388,23 @@ void TextColorOverlayCases(const std::filesystem::path& directory) {
         std::ofstream file(directory/("text_color_overlay_"+std::to_string(mode)+suffix+".pdf"),std::ios::binary);
         file.write(reinterpret_cast<const char*>(writer.bytes.data()),writer.bytes.size());
         Require(file.good(),"color fixture write"); file.close();
+        if (mode==1 && !japanese && !rotation && !scaled) {
+            Require(FPDFPage_RemoveAnnot(page,0) && AddTextColorOverlay(page,a,options,false) &&
+                    Finalize(page),"color overlay without recovery data");
+            Writer withoutRecovery;
+            Require(FPDF_SaveAsCopy(doc,&withoutRecovery,0),"save color overlay without recovery data");
+            auto reopened = FPDF_LoadMemDocument64(withoutRecovery.bytes.data(),withoutRecovery.bytes.size(),nullptr);
+            Require(reopened != nullptr,"reopen color overlay without recovery data");
+            auto reopenedPage = FPDF_LoadPage(reopened,0);
+            Require(reopenedPage != nullptr,"reopen color overlay page");
+            auto savedAnnot = FPDFPage_GetAnnot(reopenedPage,0);
+            Require(savedAnnot && !FPDFAnnot_HasKey(savedAnnot,"PNWAnnotationV1") &&
+                    !FPDFAnnot_HasKey(savedAnnot,"PNWNativeV1") &&
+                    Render(reopenedPage,FPDF_ANNOT)==after,"color overlay preserves pixels and omits recovery keys");
+            FPDFPage_CloseAnnot(savedAnnot);
+            FPDF_ClosePage(reopenedPage);
+            FPDF_CloseDocument(reopened);
+        }
         options.mode=static_cast<TextColorMode>(99);
         Require(!AddTextColorOverlay(page,a,options) && FPDFPage_GetAnnotCount(page)==1,"invalid color mode rollback");
         options.mode=TextColorMode::Transparent; a.quads={1,2,3};
@@ -435,6 +525,191 @@ void ShapeBoundaryCases() {
     std::cout << "Shape boundaries: black/white, fill/outline, filled dashed boundary and save/reopen passed.\n";
 }
 
+
+void StandardDetachCases() {
+    // Independent PDF dictionaries, including an appearance stream that would
+    // make the PDFium annotation color getter fail on the original handle.
+    const std::vector<std::string> objects{
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R 14 0 R] /Count 2 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Annots [4 0 R 5 0 R 6 0 R 7 0 R 8 0 R 9 0 R 10 0 R 11 0 R 12 0 R] >>",
+        "<< /Subtype /Highlight /Rect [20 100 80 112] /QuadPoints [20 112 80 112 20 100 80 100] >>",
+        "<< /Subtype /Stamp /Rect [10 10 30 30] >>",
+        "<< /Subtype /Highlight /F 2 /Rect [20 100 80 112] /QuadPoints [20 112 80 112 20 100 80 100] >>",
+        "<< /Subtype /Highlight /Rect [20 100 80 112] /QuadPoints [20 112 80 112 20 100 80 100] /C [0 1 0] /CA 0.5 /AP << /N 13 0 R >> >>",
+        "<< /Subtype /Ink /Rect [20 20 80 80] /InkList [[20 20 30 30] [40 40 50 50]] /BS << /W 3 >> /C [1 0 0] >>",
+        "<< /Subtype /Line /Rect [20 20 81 81] /L [20 20 80 80] /Border [0 0 2] >>",
+        "<< /Subtype /Square /Rect [20 20 80 80] /IC [0 0 1] /C [0 0 0] /Border [0 0 2] >>",
+        "<< /Subtype /FreeText /Rect [90 20 180 80] /Contents (PDF text) /DA (/Helv 14 Tf 0.5 g) >>",
+        "<< /Subtype /Underline /Rect [20 100 80 112] /QuadPoints [20 112 80 112 20 100 80 100] >>",
+        "<< /Type /XObject /Subtype /Form /BBox [0 0 60 12] /Length 23 >>\nstream\n0 1 0 rg 0 0 60 12 re f\nendstream",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Annots [15 0 R 16 0 R 17 0 R] >>",
+        "<< /Subtype /Stamp /Rect [20 100 80 112] /AP << /N 13 0 R >> >>",
+        "<< /Subtype /Highlight /Rect [20 100 80 112] /QuadPoints [20 112 80 112 20 100 80 100] >>",
+        "<< /Subtype /Stamp /Rect [30 50 130 150] /AP << /N 18 0 R >> >>",
+        "<< /Type /XObject /Subtype /Form /BBox [0 0 10 10] /Length 39 >>\nstream\n0.5 w 1 0 0 RG 2 2 m 8 8 l 8 2 m 2 8 l S\nendstream"
+    };
+    std::ostringstream pdf;
+    pdf << "%PDF-1.7\n";
+    std::vector<std::streamoff> offsets;
+    for (size_t i=0;i<objects.size();++i) {
+        offsets.push_back(pdf.tellp());
+        pdf << i+1 << " 0 obj\n" << objects[i] << "\nendobj\n";
+    }
+    const auto xref=pdf.tellp();
+    pdf << "xref\n0 " << offsets.size()+1 << "\n0000000000 65535 f \n";
+    for (auto offset : offsets)
+        pdf << std::setw(10) << std::setfill('0') << offset << " 00000 n \n";
+    pdf << "trailer\n<< /Root 1 0 R /Size " << offsets.size()+1
+        << " >>\nstartxref\n" << xref << "\n%%EOF\n";
+    const auto bytes=pdf.str();
+    pdf_annotation_detach::Document source(FPDF_LoadMemDocument64(bytes.data(),bytes.size(),nullptr));
+    Require(bool(source),"standard annotation fixture opens");
+    auto original=FPDF_LoadPage(source.get(),0);
+    const auto originalPixels=Render(original,FPDF_ANNOT);
+    pdf_annotation_detach::Result result;
+    std::wstring error;
+    Require(pdf_annotation_detach::Detach(source.get(),result,error),"detach standard annotations");
+    const auto& a=result.annotations;
+    Require(a.size()==10 && result.converted==10 && result.unsupported==3 && result.retainedForOrder==1,
+            "standard conversion and per-reason retained counts");
+    Require(a[0].type==Annotation::Type::MarkerText && a[0].color==RGB(0,255,0) &&
+            a[0].alpha==0.5 && a[0].quads.size()==8,"highlight reads dictionary color despite AP");
+    Require(a[1].type==Annotation::Type::Freehand && a[2].type==Annotation::Type::Freehand &&
+            a[1].path.size()==2 && a[1].width==1 && a[2].path.front().x==40 && a[1].id!=a[2].id,
+            "Ink subpaths stay separate");
+    Require(a[3].type==Annotation::Type::Line && a[3].x1==20 && a[3].y2==80 &&
+            a[3].width==2,"line endpoints and width");
+    Require(a[4].type==Annotation::Type::Shape && a[4].shapeDrawMode==ShapeDrawMode::Fill &&
+            a[4].color==RGB(0,0,255) && a[4].shapeBoundary==ShapeBoundary::Black,"filled rectangle and border");
+    Require(a[5].type==Annotation::Type::TextBox && a[5].text==L"PDF text" &&
+            a[5].fontPt==14,"FreeText source and font size");
+    Require(a[6].type==Annotation::Type::Line && a[6].y1==100,"underline baseline");
+    Require(a[7].type==Annotation::Type::MarkerText && a[7].pageIndex==1,
+            "stroke stamp permits detaching the highlight below it");
+    Require(a[8].type==Annotation::Type::Freehand && a[9].type==Annotation::Type::Freehand &&
+            a[8].pageIndex==1 && a[8].color==RGB(255,0,0) && a[8].width==5 &&
+            a[8].path.size()==2 && a[8].path[0].x==50 && a[8].path[0].y==70 &&
+            a[8].path[1].x==110 && a[8].path[1].y==130 &&
+            a[9].path.size()==2 && a[9].path[0].x==110 && a[9].path[0].y==70,
+            "stamp placement and stroke subpaths survive as editable ink");
+    Require(FPDFPage_GetAnnotCount(original)==9 && Render(original,FPDF_ANNOT)==originalPixels,
+            "original PDF annotations and pixels are untouched");
+    FPDF_ClosePage(original);
+    Writer writer;
+    Require(FPDF_SaveAsCopy(result.pdf.get(),&writer,0),"save detached standard PDF");
+    pdf_annotation_detach::Document copy(FPDF_LoadMemDocument64(writer.bytes.data(),writer.bytes.size(),nullptr));
+    Require(bool(copy),"reopen detached standard PDF");
+    auto page=FPDF_LoadPage(copy.get(),0);
+    Require(page && FPDFPage_GetAnnotCount(page)==3,"reopened copy retains unsupported and lower annotations");
+    FPDF_ClosePage(page);
+    page=FPDF_LoadPage(copy.get(),1);
+    Require(page && FPDFPage_GetAnnotCount(page)==1,"filled stamp stays in the copied PDF");
+    auto stamp=FPDFPage_GetAnnot(page,0);
+    Require(stamp && FPDFAnnot_GetSubtype(stamp)==FPDF_ANNOT_STAMP &&
+            FPDFAnnot_HasKey(stamp,"AP"),"retained stamp keeps its appearance");
+    FPDFPage_CloseAnnot(stamp);
+    FPDF_ClosePage(page);
+    std::cout << "PASS: standard annotation conversion, stacking order, and source protection\n";
+}
+
+void DetachCycles() {
+    int cases=0;
+    for (auto type : {Annotation::Type::MarkerText,Annotation::Type::TextColor,Annotation::Type::MarkerFree,
+        Annotation::Type::TextBox,Annotation::Type::Line,Annotation::Type::Arrow,Annotation::Type::Wave,
+        Annotation::Type::Freehand,Annotation::Type::LinkMarker,Annotation::Type::MathBox,Annotation::Type::Shape}) {
+        Annotation original; original.type=type; original.pageIndex=0; original.id=L"cycle";
+        original.text=L"精度と種類"; original.textLines={original.text,L"second line"};
+        original.x1=40.123456789012345; original.y1=100.98765432101234;
+        original.x2=140.23456789012345; original.y2=125.4567890123456;
+        original.fontName=L"Noto Sans JP"; original.backgroundAssistMode=TextBackgroundAssistMode::Inverted;
+        original.quads={40,125,140,125,140,100,40,100};
+        original.path={{40,100},{80.1234567890123,110},{140,125}};
+        original.dash={3.12345678901234,2}; original.linkId=L"link"; original.linkNotePath=L"notes/ノート.clro";
+        original.arrowHead=ArrowHead::Double; original.color=RGB(12,34,56); original.alpha=0.45;
+        Annotation current=original;
+        std::vector<unsigned char> previousImage;
+        pdf_annotation_detach::Document document(pdf_annotation_export::CreateDocument());
+        auto initial=FPDFPage_New(document.get(),0,200,200); FPDF_ClosePage(initial);
+        for(int cycle=0;cycle<3;++cycle) {
+            auto page=FPDF_LoadPage(document.get(),0);
+            auto scratch=FPDFPage_New(document.get(),1,200,200); Rect(scratch);
+            Annotation appearance=current;
+            if(type==Annotation::Type::TextColor) appearance.type=Annotation::Type::MarkerText;
+            Require(pdf_annotation_export::Add(document.get(),page,scratch,appearance,false),"cycle export");
+            if(type==Annotation::Type::TextColor) {
+                auto a=FPDFPage_GetAnnot(page,0);
+                Require(pdf_annotation_detach::Attach(a,current),"preserve TextColor type"); FPDFPage_CloseAnnot(a);
+            }
+            Require(pdf_annotation_export::Finalize(page),"cycle finalize");
+            FPDF_ClosePage(scratch); FPDFPage_Delete(document.get(),1); FPDF_ClosePage(page);
+            Writer writer; Require(FPDF_SaveAsCopy(document.get(),&writer,0),"cycle save");
+            pdf_annotation_detach::Document saved(FPDF_LoadMemDocument64(writer.bytes.data(),writer.bytes.size(),nullptr));
+            Require(bool(saved),"cycle reload");
+            page=FPDF_LoadPage(saved.get(),0);
+            const auto image=Render(page,FPDF_ANNOT);
+            if(cycle) Require(image==previousImage,"cycle visual equality");
+            previousImage=image; FPDF_ClosePage(page);
+            pdf_annotation_detach::Result detached; std::wstring error;
+            Require(pdf_annotation_detach::Detach(saved.get(),detached,error) && detached.annotations.size()==1,"cycle detach");
+            current=detached.annotations[0];
+            AnnotCommand expected,actual; expected.after=original; actual.after=current;
+            std::string a,b;
+            Require(SerializeAnnotCommandsJson({expected},&a) && SerializeAnnotCommandsJson({actual},&b) && a==b,
+                "cycle full editable data equality");
+            document=std::move(detached.pdf); ++cases;
+        }
+    }
+    pdf_annotation_detach::Result retained; std::wstring error;
+    pdf_annotation_detach::Document source(pdf_annotation_export::CreateDocument());
+    auto attachment=FPDFDoc_AddAttachment(source.get(),reinterpret_cast<FPDF_WIDESTRING>(L"retain.txt"));
+    Require(attachment && FPDFAttachment_SetFile(attachment,source.get(),"original attachment",19),"attachment fixture");
+    auto page=FPDFPage_New(source.get(),0,200,200);
+    auto unknown=FPDFPage_CreateAnnot(page,FPDF_ANNOT_TEXT);
+    FS_RECTF rect{20,40,40,20}; Require(FPDFAnnot_SetRect(unknown,&rect),"unsupported fixture");
+    FPDFPage_CloseAnnot(unknown); FPDF_ClosePage(page);
+    Require(pdf_annotation_detach::Detach(source.get(),retained,error) && retained.unsupported==1 && retained.retainedForOrder==0 && retained.annotations.empty(),
+        "unsupported annotation retained");
+    Require(FPDFDoc_GetAttachmentCount(retained.pdf.get())==1,"document attachment retained");
+    char bytes[19]{}; unsigned long count=0;
+    Require(FPDFAttachment_GetFile(FPDFDoc_GetAttachment(retained.pdf.get(),0),bytes,sizeof(bytes),&count) &&
+            count==19 && std::string(bytes,19)=="original attachment","attachment content retained");
+    page=FPDF_LoadPage(source.get(),0);
+    for(int i=0;i<3;++i) {
+        auto scratch=FPDFPage_New(source.get(),1,200,200); Rect(scratch);
+        Annotation a; a.pageIndex=0; a.type=Annotation::Type::MathBox; a.id=std::to_wstring(i);
+        Require(pdf_annotation_export::Add(source.get(),page,scratch,a,false),"stacking fixture");
+        FPDF_ClosePage(scratch); FPDFPage_Delete(source.get(),1);
+        if(i==1) {
+            auto foreign=FPDFPage_CreateAnnot(page,FPDF_ANNOT_TEXT);
+            Require(foreign && FPDFAnnot_SetRect(foreign,&rect),"stacking retained fixture");
+            FPDFPage_CloseAnnot(foreign);
+        }
+    }
+    Require(pdf_annotation_export::Finalize(page),"stacking finalize");
+    FPDF_ClosePage(page);
+    Require(pdf_annotation_detach::Detach(source.get(),retained,error) && retained.unsupported==2 && retained.retainedForOrder==2 &&
+            retained.annotations.size()==1 && retained.annotations[0].id==L"2","mixed stacking order preserved");
+    page=FPDF_LoadPage(source.get(),0);
+    auto top=FPDFPage_CreateAnnot(page,FPDF_ANNOT_TEXT);
+    Require(top && FPDFAnnot_SetRect(top,&rect),"unsupported top annotation");
+    FPDFPage_CloseAnnot(top);
+    FPDF_ClosePage(page);
+    pdf_annotation_detach::Result none;
+    Require(pdf_annotation_detach::Detach(source.get(),none,error) && none.annotations.empty() &&
+            none.unsupported==3 && none.retainedForOrder==3,"zero detached reports both reasons");
+    page=FPDF_LoadPage(source.get(),0);
+    auto corrupt=FPDFPage_GetAnnot(page,4);
+    Require(corrupt && FPDFAnnot_SetStringValue(corrupt,"PNWAnnotationV1",reinterpret_cast<FPDF_WIDESTRING>(L"xx")),"invalid payload fixture");
+    FPDFPage_CloseAnnot(corrupt); FPDF_ClosePage(page);
+    auto prior=retained.pdf.get();
+    Require(!pdf_annotation_detach::Detach(source.get(),retained,error) && retained.pdf.get()==prior &&
+            retained.annotations.size()==1,"invalid payload cannot publish partial result");
+    auto old=retained.pdf.get();
+    Require(!pdf_annotation_detach::Detach(nullptr,retained,error) && retained.pdf.get()==old,"failure retains previous result");
+    std::cout << "PASS: detach cycles=" << cases << " types=11; exact data/appearance; retained/invalid/source protection\n";
+}
+
 int main(int argc, char** argv) {
     FPDF_InitLibrary();
     try {
@@ -446,6 +721,8 @@ int main(int argc, char** argv) {
         Case(Annotation::Type::TextBox,FPDF_ANNOT_STAMP,false);
         Case(Annotation::Type::Shape,FPDF_ANNOT_SQUARE);
         Case(Annotation::Type::MathBox,FPDF_ANNOT_STAMP);
+        Case(Annotation::Type::MathBox,FPDF_ANNOT_STAMP,false,false,false);
+        Case(Annotation::Type::MarkerText,FPDF_ANNOT_HIGHLIGHT,false,false,false);
         Require(!pdf_annotation_export::Finalize(nullptr) &&
                 !pdf_annotation_export::CanScaleExisting(nullptr,1),"null output page must fail");
         Require(argc==2,"an explicit local fixture output directory is required");
@@ -453,6 +730,8 @@ int main(int argc, char** argv) {
         std::error_code ec;
         std::filesystem::create_directories(directory,ec);
         Require(!ec,"fixture directory creation");
+        DetachCycles();
+        StandardDetachCases();
         ArcCases();
         ShapeAngleCase();
         ShapeBoundaryCases();

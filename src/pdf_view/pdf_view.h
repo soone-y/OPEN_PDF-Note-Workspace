@@ -20,6 +20,9 @@ struct PreEditToolbarState {
 // PDF 表示・編集関連 API
 
 void ClearPdfState();
+// UI-thread only; remains dismissed until the next application start.
+void DismissPdfStartupGuide();
+[[nodiscard]] bool ApplyPdfTextBoxWritingMode(HWND pdfWnd, TextWritingMode mode);
 void BuildPageCaches(HWND pdfWnd);
 bool LoadPdfDocument(HWND pdfWnd, const std::wstring& path);
 // UI-thread only, after a successful open with stable client geometry.
@@ -55,6 +58,8 @@ void ClearPdfAnnotationHistory();
 void InvalidateAnnotHistoryForPath(const std::wstring& path);
 bool LoadAnnotationsForCurrentPdf(HWND owner);
 bool OpenPdfWithAnnotations(HWND owner, const std::wstring& path);
+[[nodiscard]] bool OpenMovedPdfWithAnnotations(HWND owner, const std::wstring& source,
+                                               const std::wstring& destination);
 bool PromptPasswordAndReopenCurrentPdf(HWND owner, const std::wstring& title,
                                        const std::wstring& blockedMessage,
                                        const std::wstring& confirmation = L"");
@@ -69,6 +74,8 @@ bool DeleteAnnotationAtIndex(HWND owner, int index);
 bool DuplicateAnnotationAtIndex(HWND owner, int index);
 bool ReorderAnnotationAtIndex(HWND owner, int index, bool bringToFront);
 bool UpdateAnnotationAtIndex(HWND owner, int index, const Annotation& after);
+[[nodiscard]] bool RunAnnotationPageTargetProbe(HWND owner, const std::wstring& outputDirectory,
+                                               std::wstring* trace, std::wstring* outError);
 // Converts a recognized freehand stroke to a shape/line using the active
 // correction policy. Returns false when the stroke should remain freehand.
 bool TryCorrectFreehandAnnotation(const Annotation& source, Annotation* corrected);
@@ -98,8 +105,16 @@ void EndInlineTextEditing(HWND pdfWnd, bool commit);
 // 成功時は本文・selectionを一つのローカル編集履歴として記録する。
 bool PasteClipboardIntoActivePdfTextBox(HWND pdfWnd);
 
-// Rotates only the current page's temporary view. No original/save mutation.
-[[nodiscard]] bool RotateCurrentPdfPageView(HWND pdfWnd, int quarterTurns, bool reset = false);
+enum class PdfPageRotationMode { Temporary, Saved };
 
-// Adds the same temporary quarter turn to every page, retaining per-page differences.
-[[nodiscard]] bool RotateAllPdfPagesView(HWND pdfWnd, int quarterTurns, bool reset = false);
+// Saved rotations use the displayed angle as their starting point.
+[[nodiscard]] bool RotateCurrentPdfPageView(HWND pdfWnd, int quarterTurns, bool reset = false,
+    PdfPageRotationMode mode = PdfPageRotationMode::Temporary);
+
+// Adds the same quarter turn to every page, retaining per-page differences.
+[[nodiscard]] bool RotateAllPdfPagesView(HWND pdfWnd, int quarterTurns, bool reset = false,
+    PdfPageRotationMode mode = PdfPageRotationMode::Temporary);
+
+// Rotates from the current page through the last page in document order.
+[[nodiscard]] bool RotateRemainingPdfPagesView(HWND pdfWnd, int quarterTurns, bool reset = false,
+    PdfPageRotationMode mode = PdfPageRotationMode::Temporary);

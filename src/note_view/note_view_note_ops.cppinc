@@ -114,7 +114,7 @@ namespace {
     if (!IsRichEditControl(hEdit)) {
         return std::min(editorOffset, core.text_length());
     }
-    const auto canonical = note::NoteSourceLineMap::RichEditIndexToCanonicalOffset(
+    const auto canonical = note::NoteSourceLineMap::RichEditSelectionEndpointToCanonicalOffset(
         core.source_line_map(), editorOffset);
     return canonical.has_value() ? std::optional<size_t>{canonical->value} : std::nullopt;
 }
@@ -1240,233 +1240,6 @@ static HWND PrepareNoteEditWindowForPath(HWND owner,
     return g_hNoteEdit;
 }
 
-static bool IsNoteBulletIndentChar(wchar_t ch) {
-    // Markdown list syntax accepts an ASCII space or tab. Treating an ideographic
-    // space as indentation made the input helper create lists which MD4C rightly
-    // continued to parse as ordinary text.
-    return ch == L' ' || ch == L'\t';
-}
-
-static bool IsMarkdownBulletMarker(wchar_t ch) {
-    return ch == L'-' || ch == L'*' || ch == L'+';
-}
-
-struct AutoBulletLineContext {
-    size_t lineStart = 0;
-    size_t lineEnd = 0;
-    size_t markerPos = 0;
-    size_t prefixEnd = 0;
-    std::wstring prefix;
-    std::wstring continuationPrefix;
-    size_t orderedPaddingInsertPos = 0;
-    size_t orderedPaddingCount = 0;
-    bool valid = false;
-    bool hasContent = false;
-    bool structuralPrefix = false;
-};
-
-static bool IsMarkdownOrderedListDigit(wchar_t ch) {
-    return ch >= L'0' && ch <= L'9';
-}
-
-static size_t FindNoteLineStart(const std::wstring& text, size_t pos) {
-    pos = std::min(pos, text.size());
-    while (pos > 0) {
-        wchar_t prev = text[pos - 1];
-        if (prev == L'\r' || prev == L'\n') break;
-        --pos;
-    }
-    return pos;
-}
-
-static size_t FindNoteLineEnd(const std::wstring& text, size_t pos) {
-    pos = std::min(pos, text.size());
-    size_t lineEnd = text.find_first_of(L"\r\n", pos);
-    return (lineEnd == std::wstring::npos) ? text.size() : lineEnd;
-}
-
-static size_t AdvanceMarkdownQuotePrefix(const std::wstring& text, size_t pos, size_t lineEnd) {
-    while (pos < lineEnd && text[pos] == L'>') {
-        ++pos;
-        while (pos < lineEnd && IsNoteBulletIndentChar(text[pos])) {
-            ++pos;
-        }
-    }
-    return pos;
-}
-
-static bool TryParseMarkdownOrderedListMarker(const std::wstring& text,
-                                              size_t pos,
-                                              size_t lineEnd,
-                                              unsigned long long* outNumber,
-                                              wchar_t* outDelimiter,
-                                              size_t* outAfterMarker) {
-    if (outNumber) *outNumber = 0;
-    if (outDelimiter) *outDelimiter = L'.';
-    if (outAfterMarker) *outAfterMarker = pos;
-    if (pos >= lineEnd || !IsMarkdownOrderedListDigit(text[pos])) return false;
-
-    size_t scan = pos;
-    unsigned long long number = 0;
-    while (scan < lineEnd && IsMarkdownOrderedListDigit(text[scan])) {
-        unsigned digit = static_cast<unsigned>(text[scan] - L'0');
-        if (number < 999999999ULL) {
-            number = std::min(999999999ULL, number * 10ULL + digit);
-        }
-        ++scan;
-    }
-    if (scan == pos || scan >= lineEnd) return false;
-    wchar_t delimiter = text[scan];
-    if (delimiter != L'.' && delimiter != L')') return false;
-    ++scan;
-    if (scan >= lineEnd || !IsNoteBulletIndentChar(text[scan])) return false;
-    while (scan < lineEnd && IsNoteBulletIndentChar(text[scan])) {
-        ++scan;
-    }
-
-    if (outNumber) *outNumber = std::max(1ULL, number);
-    if (outDelimiter) *outDelimiter = delimiter;
-    if (outAfterMarker) *outAfterMarker = scan;
-    return true;
-}
-
-static bool TryParseMarkdownChecklistMarker(const std::wstring& text,
-                                            size_t pos,
-                                            size_t lineEnd,
-                                            size_t* outAfterMarker) {
-    if (outAfterMarker) *outAfterMarker = pos;
-    if (pos + 2 >= lineEnd) return false;
-    if (text[pos] != L'[' || text[pos + 2] != L']') return false;
-    wchar_t state = text[pos + 1];
-    if (!(state == L' ' || state == L'x' || state == L'X')) return false;
-
-    size_t scan = pos + 3;
-    if (scan >= lineEnd || !IsNoteBulletIndentChar(text[scan])) return false;
-    while (scan < lineEnd && IsNoteBulletIndentChar(text[scan])) {
-        ++scan;
-    }
-    if (outAfterMarker) *outAfterMarker = scan;
-    return true;
-}
-
-static AutoBulletLineContext AnalyzeAutoBulletLine(const std::wstring& text, size_t caret) {
-    AutoBulletLineContext ctx{};
-    if (caret > text.size()) caret = text.size();
-
-    size_t lineStart = FindNoteLineStart(text, caret);
-    size_t lineEnd = FindNoteLineEnd(text, lineStart);
-    if (lineStart >= lineEnd && lineStart >= text.size()) return ctx;
-
-    size_t pos = lineStart;
-    while (pos < lineEnd && IsNoteBulletIndentChar(text[pos])) {
-        ++pos;
-    }
-    const size_t afterIndent = pos;
-    size_t afterQuotes = AdvanceMarkdownQuotePrefix(text, pos, lineEnd);
-    const bool hasQuotePrefix = afterQuotes > afterIndent;
-    std::wstring prefixBase = text.substr(lineStart, afterQuotes - lineStart);
-
-    bool valid = (afterQuotes > lineStart);
-    size_t markerPos = afterQuotes;
-    bool hasListMarker = false;
-    bool hasChecklist = false;
-    bool ordered = false;
-    unsigned long long orderedNumber = 1;
-    wchar_t orderedDelimiter = L'.';
-
-    pos = afterQuotes;
-    if (pos < lineEnd && IsMarkdownBulletMarker(text[pos])) {
-        markerPos = pos;
-        ++pos;
-        if (pos >= lineEnd || !IsNoteBulletIndentChar(text[pos])) return ctx;
-        while (pos < lineEnd && IsNoteBulletIndentChar(text[pos])) {
-            ++pos;
-        }
-        hasListMarker = true;
-        valid = true;
-        // Preserve the author-entered separator after the marker. Besides
-        // keeping nested list text aligned, this avoids collapsing a deliberate
-        // tab or multi-space indent to one ordinary space on the next item.
-        ctx.continuationPrefix = prefixBase + text.substr(markerPos, pos - markerPos);
-    } else {
-        size_t orderedAfter = pos;
-        if (TryParseMarkdownOrderedListMarker(text, pos, lineEnd,
-                                              &orderedNumber, &orderedDelimiter, &orderedAfter)) {
-            markerPos = pos;
-            pos = orderedAfter;
-            ordered = true;
-            hasListMarker = true;
-            valid = true;
-            size_t separatorStart = markerPos;
-            while (separatorStart < pos && IsMarkdownOrderedListDigit(text[separatorStart])) {
-                ++separatorStart;
-            }
-            if (separatorStart < pos &&
-                (text[separatorStart] == L'.' || text[separatorStart] == L')')) {
-                ++separatorStart;
-            }
-            const std::wstring nextNumber = std::to_wstring(orderedNumber + 1ULL);
-            const std::wstring separator = text.substr(separatorStart, pos - separatorStart);
-            const bool spaceOnlySeparator = !separator.empty() &&
-                std::all_of(separator.begin(), separator.end(), [](wchar_t ch) { return ch == L' '; });
-            if (spaceOnlySeparator) {
-                // Keep the text column aligned at a 9 -> 10 (or 99 -> 100)
-                // transition. The preceding item's separator is extended only
-                // when its marker becomes shorter than the next marker.
-                const size_t currentFieldWidth = pos - markerPos;
-                const size_t nextMarkerWidth = nextNumber.size() + 1; // number + '.' or ')'
-                const size_t targetFieldWidth = std::max(currentFieldWidth, nextMarkerWidth + 1);
-                ctx.orderedPaddingInsertPos = pos;
-                ctx.orderedPaddingCount = targetFieldWidth - currentFieldWidth;
-                ctx.continuationPrefix = prefixBase + nextNumber +
-                                         std::wstring(1, orderedDelimiter) +
-                                         std::wstring(targetFieldWidth - nextMarkerWidth, L' ');
-            } else if (ShouldPromptForPdfPassword()) {
-                // Tabs are visually width-dependent, so preserve them exactly
-                // rather than guessing an alignment column.
-                ctx.continuationPrefix = prefixBase + nextNumber +
-                                         std::wstring(1, orderedDelimiter) + separator;
-            }
-        } else {
-            ctx.continuationPrefix = prefixBase;
-        }
-    }
-
-    if (hasListMarker) {
-        size_t checklistAfter = pos;
-        if (TryParseMarkdownChecklistMarker(text, pos, lineEnd, &checklistAfter)) {
-            hasChecklist = true;
-            pos = checklistAfter;
-            ctx.continuationPrefix += L"[ ] ";
-        }
-    }
-    if (!valid) return ctx;
-
-    bool hasContent = false;
-    for (size_t scan = pos; scan < lineEnd; ++scan) {
-        if (!IsNoteBulletIndentChar(text[scan])) {
-            hasContent = true;
-            break;
-        }
-    }
-
-    ctx.lineStart = lineStart;
-    ctx.lineEnd = lineEnd;
-    ctx.markerPos = markerPos;
-    ctx.prefixEnd = pos;
-    ctx.prefix = text.substr(lineStart, pos - lineStart);
-    if (!hasListMarker && !hasChecklist && ctx.continuationPrefix.empty()) {
-        ctx.continuationPrefix = ctx.prefix;
-    }
-    if (hasListMarker && !ordered && ctx.continuationPrefix.empty()) {
-        ctx.continuationPrefix = prefixBase + text[markerPos] + L' ';
-    }
-    ctx.valid = valid;
-    ctx.hasContent = hasContent;
-    ctx.structuralPrefix = hasQuotePrefix || hasListMarker || hasChecklist;
-    return ctx;
-}
-
 static void FinalizeImmediateNoteEdit(HWND hWnd) {
     if (!hWnd) return;
     SendMessageW(hWnd, EM_SCROLLCARET, 0, 0);
@@ -1493,7 +1266,7 @@ static bool TryHandleAutoBulletEnter(HWND hWnd) {
     const size_t caret = static_cast<size_t>(std::min(selStart, selEnd));
 
     const std::wstring text = GetEditTextForIndexing(hWnd);
-    const AutoBulletLineContext ctx = AnalyzeAutoBulletLine(text, caret);
+    const note::AutoBulletLineContext ctx = note::AnalyzeAutoBulletLine(text, caret, ShouldPromptForPdfPassword());
     if (!ctx.valid) return false;
 
     if (selStart == selEnd && caret == ctx.lineStart && ctx.hasContent) {
@@ -1577,7 +1350,7 @@ static bool TryHandleAutoBulletPrefixDelete(HWND hWnd, WPARAM vkey) {
     }
 
     const std::wstring text = GetEditTextForIndexing(hWnd);
-    const AutoBulletLineContext ctx = AnalyzeAutoBulletLine(text, caret);
+    const note::AutoBulletLineContext ctx = note::AnalyzeAutoBulletLine(text, caret, ShouldPromptForPdfPassword());
     if (!ctx.valid || ctx.hasContent || !ctx.structuralPrefix) return false;
 
     const bool shouldDeletePrefix =
@@ -1992,21 +1765,9 @@ static bool BuildNoteSelectedLineRange(const std::wstring& text,
             --safeEnd;
         }
     }
-    *outBlockStart = FindNoteLineStart(text, safeStart);
-    *outBlockEnd = FindNoteLineEnd(text, safeEnd);
+    *outBlockStart = note::FindNoteLineStart(text, safeStart);
+    *outBlockEnd = note::FindNoteLineEnd(text, safeEnd);
     return *outBlockStart <= *outBlockEnd;
-}
-
-static bool IsMarkdownListLine(const std::wstring& text, size_t lineStart, size_t lineEnd) {
-    size_t marker = lineStart;
-    while (marker < lineEnd && IsNoteBulletIndentChar(text[marker])) {
-        ++marker;
-    }
-    if (marker + 1 < lineEnd && IsMarkdownBulletMarker(text[marker]) &&
-        IsNoteBulletIndentChar(text[marker + 1])) {
-        return true;
-    }
-    return TryParseMarkdownOrderedListMarker(text, marker, lineEnd, nullptr, nullptr, nullptr);
 }
 
 static bool TryIndentSelectedMarkdownLines(HWND hWnd) {
@@ -2030,11 +1791,11 @@ static bool TryIndentSelectedMarkdownLines(HWND hWnd) {
     replacement.reserve((blockEnd - blockStart) + 8);
     size_t scan = blockStart;
     while (scan <= blockEnd) {
-        size_t lineEnd = FindNoteLineEnd(text, scan);
+        size_t lineEnd = note::FindNoteLineEnd(text, scan);
         lineEnd = std::min(lineEnd, blockEnd);
         // A Markdown list item moves by one semantic level (two spaces),
         // while non-list lines retain the existing four-space block indent.
-        replacement += IsMarkdownListLine(text, scan, lineEnd) ? L"  " : L"    ";
+        replacement += note::IsMarkdownListLine(text, scan, lineEnd) ? L"  " : L"    ";
         replacement.append(text, scan, lineEnd - scan);
         if (lineEnd >= blockEnd) break;
         replacement.push_back(text[lineEnd]);
@@ -2061,21 +1822,21 @@ static bool TryHandleCurrentMarkdownListTab(HWND hWnd) {
 
     const std::wstring text = GetEditTextForIndexing(hWnd);
     const size_t caret = std::min<size_t>(selStart, text.size());
-    const size_t lineStart = FindNoteLineStart(text, caret);
-    const size_t lineEnd = FindNoteLineEnd(text, caret);
+    const size_t lineStart = note::FindNoteLineStart(text, caret);
+    const size_t lineEnd = note::FindNoteLineEnd(text, caret);
     size_t marker = lineStart;
-    while (marker < lineEnd && IsNoteBulletIndentChar(text[marker])) {
+    while (marker < lineEnd && note::IsNoteBulletIndentChar(text[marker])) {
         ++marker;
     }
     if (marker >= lineEnd) return false;
 
     size_t afterMarker = marker;
     bool incompleteMarker = false;
-    if (IsMarkdownBulletMarker(text[marker])) {
+    if (note::IsMarkdownBulletMarker(text[marker])) {
         afterMarker = marker + 1;
         incompleteMarker = (afterMarker == lineEnd && caret == afterMarker);
-    } else if (IsMarkdownOrderedListDigit(text[marker])) {
-        while (afterMarker < lineEnd && IsMarkdownOrderedListDigit(text[afterMarker])) {
+    } else if (note::IsMarkdownOrderedListDigit(text[marker])) {
+        while (afterMarker < lineEnd && note::IsMarkdownOrderedListDigit(text[afterMarker])) {
             ++afterMarker;
         }
         if (afterMarker < lineEnd && (text[afterMarker] == L'.' || text[afterMarker] == L')')) {
@@ -2088,7 +1849,7 @@ static bool TryHandleCurrentMarkdownListTab(HWND hWnd) {
         // inserting a literal tab into the list item.
         return ReplaceNoteSelectionAndSetSelection(hWnd, selStart, selEnd, L" ", 1, 1);
     }
-    if (!IsMarkdownListLine(text, lineStart, lineEnd)) return false;
+    if (!note::IsMarkdownListLine(text, lineStart, lineEnd)) return false;
 
     // Two spaces are one nesting level for a Markdown list item. Four leading spaces
     // can instead become a code block in CommonMark, so do not reuse the
@@ -2103,7 +1864,7 @@ static bool TryHandleCurrentMarkdownListTab(HWND hWnd) {
 
 static size_t CountMarkdownOutdentChars(const std::wstring& text, size_t lineStart, size_t lineEnd) {
     if (lineStart >= lineEnd) return 0;
-    if (IsMarkdownListLine(text, lineStart, lineEnd)) {
+    if (note::IsMarkdownListLine(text, lineStart, lineEnd)) {
         if (text[lineStart] == L'\t') return 1;
         size_t leadingSpaces = 0;
         while (lineStart + leadingSpaces < lineEnd &&
@@ -2135,8 +1896,8 @@ static bool TryOutdentSelectedMarkdownLines(HWND hWnd) {
     const std::wstring text = GetEditTextForIndexing(hWnd);
     if (selStart == selEnd) {
         size_t caret = std::min<size_t>(selStart, text.size());
-        size_t lineStart = FindNoteLineStart(text, caret);
-        size_t lineEnd = FindNoteLineEnd(text, caret);
+        size_t lineStart = note::FindNoteLineStart(text, caret);
+        size_t lineEnd = note::FindNoteLineEnd(text, caret);
         size_t removeCount = CountMarkdownOutdentChars(text, lineStart, lineEnd);
         if (removeCount == 0) return true;
         size_t nextCaret = (caret > lineStart + removeCount) ? (caret - removeCount) : lineStart;
@@ -2163,7 +1924,7 @@ static bool TryOutdentSelectedMarkdownLines(HWND hWnd) {
     replacement.reserve(blockEnd - blockStart);
     size_t scan = blockStart;
     while (scan <= blockEnd) {
-        size_t lineEnd = FindNoteLineEnd(text, scan);
+        size_t lineEnd = note::FindNoteLineEnd(text, scan);
         lineEnd = std::min(lineEnd, blockEnd);
         size_t removeCount = CountMarkdownOutdentChars(text, scan, lineEnd);
         replacement.append(text, scan + removeCount, lineEnd - scan - removeCount);
@@ -2677,7 +2438,8 @@ static bool IsNoteStageCreatedDuringCurrentProcess(const std::filesystem::path& 
     return !ec && writeTime >= g_noteRecoveryProcessStartTime;
 }
 
-bool LoadNoteFile(HWND hWnd, const std::wstring& path) {
+[[nodiscard]] static bool LoadNoteFile(HWND hWnd, const std::wstring& path,
+                                       bool reloadingMovedNote) {
     const ULONGLONG startTick = preview_trace::TickNow();
     const std::wstring previousNotePath = g_currentNotePath;
     preview_trace::Append(L"LoadNoteFile", L"begin path=" + path);
@@ -2791,7 +2553,10 @@ bool LoadNoteFile(HWND hWnd, const std::wstring& path) {
         : note::SnapshotIdentity{storageSnapshot.noteIdentity.note_id, 0,
               storageSnapshot.diskPersistenceRevision, storageSnapshot.diskContentFingerprint};
 
-    if (path == g_currentNotePath && loadedSnapshot.content_revision < CurrentEditRevision()) {
+    // A committed move can reload the verified disk snapshot at the new
+    // current path. A staged snapshot still has to pass the revision check.
+    if ((!reloadingMovedNote || selectedStageSnapshot) &&
+        path == g_currentNotePath && loadedSnapshot.content_revision < CurrentEditRevision()) {
         preview_trace::Append(
             L"LoadNoteFile",
             L"abort=stale_snapshot loaded_rev=" + std::to_wstring(loadedSnapshot.content_revision) +
@@ -2930,6 +2695,31 @@ bool LoadNoteFile(HWND hWnd, const std::wstring& path) {
     return true;
 }
 
+bool LoadNoteFile(HWND hWnd, const std::wstring& path) {
+    return LoadNoteFile(hWnd, path, false);
+}
+
+bool ReloadMovedNoteFile(HWND owner, const std::wstring& destination) {
+    // The move verified the original bytes at the destination. Retarget the
+    // live editor and its external-change baseline before any load callbacks.
+    // A failed load can then keep the last good text without using the old path.
+    const auto sourceKey = NormalizePathKey(g_currentNotePath);
+    g_currentNotePath = destination;
+    if (g_currentNoteFileSnapshot.pathKey == sourceKey) {
+        g_currentNoteFileSnapshot.pathKey = NormalizePathKey(destination);
+    }
+    CacheNoteEditWindowForPath(destination, g_hNoteEdit);
+    if (auto* kernel = CurrentNoteKernel(); kernel &&
+        kernel->UpdateFileMetadata(CurrentNoteTextMetadata(), CurrentNoteContentKind())) {
+        ClearLegacyRenderCache();
+    }
+    const ScopedDocumentOpenLockNoticeSuppression suppressNotice;
+    if (LoadNoteFile(owner, destination, true)) return true;
+    UpdateNoteViewMode();
+    RefreshNoteRenderForPreferenceChange();
+    return false;
+}
+
 void ClearNoteEditorSilently(HWND hWnd, const std::wstring& nextNotePath) {
     if (!g_currentNotePath.empty()) {
         ReleaseDocumentOpenLock(std::filesystem::path(g_currentNotePath));
@@ -2993,6 +2783,7 @@ bool BindDeferredNoteEditorToPath(const std::wstring& path, std::wstring* outErr
     if (!target.note_id.valid() || (outError && !outError->empty())) return false;
     note::NoteMetadata metadata;
     metadata.clro_ascii_only = g_config.clroAsciiOnly;
+    metadata.quote_lazy_continuation = g_config.noteQuoteLazyContinuation;
     metadata.file_name = std::filesystem::path(path).filename().wstring();
     metadata.title = note::DeriveTitleFromFileName(metadata.file_name);
     const auto rebound = g_noteIdentityRegistry.RebindView(before.view_id, target.note_id);
@@ -3169,6 +2960,7 @@ static std::optional<note::SemanticLinkTargetResolution> FindNoteTargetForLinkId
         }
         note::NoteMetadata metadata;
         metadata.clro_ascii_only = g_config.clroAsciiOnly;
+        metadata.quote_lazy_continuation = g_config.noteQuoteLazyContinuation;
         metadata.file_name = std::filesystem::path(snapshot->targetPath).filename().wstring();
         metadata.title = note::DeriveTitleFromFileName(metadata.file_name);
         const auto candidateIndex =
@@ -4820,6 +4612,7 @@ enum class BottomPaneCommandKind {
     ToggleAnnotations,
     ToggleRender,
     ToggleWrap,
+    ToggleQuoteLazyContinuation,
     ToggleVimControls,
     ToggleCaretLineRawText,
     ToggleClickInsert,
@@ -4830,6 +4623,7 @@ enum class BottomPaneCommandKind {
     ShowFontSizeMenu,
     ShowBottomSpaceMenu,
     ShowBackgroundMenu,
+    ShowTextColorPicker,
     JumpToHeading,
 };
 
@@ -4866,6 +4660,8 @@ static BottomPaneCommand BuildBottomPaneCommandForLine(const BottomPaneProjectio
         command.kind = BottomPaneCommandKind::ToggleAnnotations;
     } else if (lineIdx == layout.renderIdx && CurrentNoteSupportsRenderOverlay()) {
         command.kind = BottomPaneCommandKind::ToggleRender;
+    } else if (layout.quoteLazyContinuationIdx >= 0 && lineIdx == layout.quoteLazyContinuationIdx) {
+        command.kind = BottomPaneCommandKind::ToggleQuoteLazyContinuation;
     } else if (layout.wrapIdx >= 0 && lineIdx == layout.wrapIdx) {
         command.kind = BottomPaneCommandKind::ToggleWrap;
     } else if (lineIdx == layout.vimIdx) {
@@ -4886,6 +4682,8 @@ static BottomPaneCommand BuildBottomPaneCommandForLine(const BottomPaneProjectio
         command.kind = BottomPaneCommandKind::ShowRenderJapaneseFontMenu;
     } else if (lineIdx == layout.fontSizeIdx) {
         command.kind = BottomPaneCommandKind::ShowFontSizeMenu;
+    } else if (lineIdx == layout.textColorIdx) {
+        command.kind = BottomPaneCommandKind::ShowTextColorPicker;
     } else if (lineIdx == layout.bgIdx) {
         command.kind = BottomPaneCommandKind::ShowBackgroundMenu;
     }

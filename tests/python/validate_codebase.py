@@ -394,6 +394,9 @@ def find_rotated_ellipse_rotation_regressions() -> list[str]:
 def find_textbox_vertical_writing_mode_regressions() -> list[str]:
     errors: list[str] = []
     required_by_file = {
+        "src/core/annot_command_apply.h": {
+            "if (a.writingMode != b.writingMode) return false;": "writing direction alone must count as a real edit",
+        },
         "src/core/annot_types.h": {
             "enum class TextWritingMode { Horizontal, VerticalRl };": "Annotation must define a stable TextBox writing-mode enum",
             "TextWritingMode writingMode = TextWritingMode::Horizontal": "Annotation must default TextBox writing mode to horizontal for legacy data",
@@ -960,20 +963,32 @@ def find_annotation_text_quality_regressions() -> list[str]:
     required_by_file = {
         "src/pdf_view/navigation.cppinc": {
             "P3-6: annotation TextBox glyphs are rendered in their own high-DPI raster cache": "TextBox quality intent must stay documented next to the DPI constants",
-            "kTextBoxStableRasterDpi = 576.0": "TextBox annotation glyphs must keep a high-DPI raster baseline independent of page cache resolution",
+            "kTextBoxStableRasterDpi = annotation_text::kRasterDpi": "TextBox annotation glyphs must share the reader's high-DPI raster baseline",
             "kTextBoxLayoutDpi = kTextBoxStableRasterDpi": "TextBox layout must use the same stable DPI as the quality raster cache",
             "TextBoxFontHeightPx(double fontPt)": "TextBox font height conversion must be shared by measurement and raster keys",
-            "fontPt * kTextBoxLayoutDpi / 72.0": "TextBox font pixels must use the stable layout DPI, independent of page cache scale",
+            "return annotation_text::FontHeight(fontPt);": "TextBox font pixels must share the reader's measured font-height rounding",
             "kPdfRenderMinScale = 0.75": "PDF page rendering may use its own low-resolution cache policy without lowering annotation text DPI",
         },
         "src/pdf_view/pdf_view.cpp": {
             "BuildTextBoxRaster": "TextBox annotations must have an annotation-owned raster path",
-            "CreateDIBSection": "TextBox annotation text must render into a separate 32bpp bitmap before compositing",
             "k.fontPx = TextBoxFontHeightPx(fontPt);": "TextBox cache keys must preserve the measured font height without rounding points twice",
-            "lf.lfHeight = -key.fontPx;": "TextBox rasterization must use the measured font height from its cache key",
-            "lf.lfQuality = ANTIALIASED_QUALITY": "TextBox glyph rasterization must keep antialiased quality in the high-DPI cache",
-            "AlphaBlend(hdc, r.left, r.top, w, h, scratchDc": "TextBox glyphs must composite as an overlay instead of being baked into the PDF page bitmap",
-            "TextBoxLowZoomBoostAlpha": "Low zoom TextBox rendering must preserve legibility rather than relying only on downscaled page pixels",
+            "annotation_text::BuildMask(refHdc,": "TextBox annotations must use the shared glyph mask renderer",
+            "key.fontPx, key.fontName, key.renderText, key.rotation": "TextBox rasterization must pass its measured font height and saved text to the shared renderer",
+            "annotation_text::BlendMask(hdc, r, scratchDc, ras->w, ras->h,": "TextBox glyphs must composite as an overlay instead of being baked into the PDF page bitmap",
+            "ann.color, TextBoxLowZoomBoostAlpha(ann)": "Low zoom TextBox rendering must pass its color and legibility boost to the shared blend",
+        },
+        "src/ui/annotation_text_raster.h": {
+            "kRasterDpi = 576.0": "The shared annotation raster must preserve the editor's high-DPI baseline",
+            "pt * kRasterDpi / 72.0": "Shared font sizing must retain physical point units",
+            "CreateDIBSection": "Shared annotation text must use a separate 32bpp bitmap",
+            "description.lfHeight=-fontPx;": "Shared rasterization must use the measured font height",
+            "description.lfQuality=ANTIALIASED_QUALITY": "Shared annotation raster must retain grayscale antialiasing",
+        },
+        "src/readonly_viewer/annotation_text.cpp": {
+            "annotation_text::BuildMask(dc,": "The reader must use the editor's annotation raster",
+            "annotation_text::BlendMask(dc,bounds,memory,raster->width,raster->height,color,boost)": "The reader must use the editor's shared annotation blend",
+            "key.font=annotation_text::FontHeight(item.pt": "The reader must preserve physical font size",
+            "key.saved=!item.lines.empty() && !key.vertical;": "The reader must honor saved horizontal line breaks",
         },
         "src/pdf_view/interaction_overlay.cppinc": {
             "HDC scratchDc = CreateCompatibleDC(hdc);": "annotation drawing must allocate a separate scratch DC for overlay text composition",
@@ -1049,7 +1064,13 @@ def find_annotation_layer_regressions() -> list[str]:
                 errors.append(f"{rel}: {message}")
 
     file_output = (REPO_ROOT / "src/file_output/file_output.cpp").read_text(encoding="utf-8", errors="ignore")
-    if "return ExportPdfParts(owner, {{pages, standardTextAnnots, exportScale, matchPdfPaneTextLayout, textColor}}, outPath);" not in file_output:
+    if not re.search(
+        r"\bstatic\s+bool\s+ExportPdfPagesImpl\s*\([^{}]*\)\s*\{\s*"
+        r"return\s+ExportPdfParts\s*\(\s*owner\s*,\s*\{\s*\{\s*pages\s*,\s*"
+        r"standardTextAnnots\s*,\s*exportScale\s*,\s*matchPdfPaneTextLayout\s*,\s*"
+        r"textColor\s*,\s*embedEditableData\s*\}\s*\}\s*,\s*outPath\s*\)\s*;\s*\}",
+        file_output,
+    ):
         errors.append("src/file_output/file_output.cpp: Single PDF exports must use the same guarded segment writer")
     return errors
 
@@ -1219,7 +1240,8 @@ def find_existing_pdf_annotation_policy_regressions() -> list[str]:
                 if needle in text:
                     # Explicit output-copy policy: this isolated writer is used
                     # only with a newly created destination, never the source PDF.
-                    if rel == "src/file_output/pdf_annotation_export.cpp":
+                    if rel in {"src/file_output/pdf_annotation_export.cpp",
+                               "src/file_output/pdf_annotation_detach.cpp"}:
                         continue
                     errors.append(f"{rel}: native PDF annotation mutation API must not be used without an explicit read-only/import policy: {needle}")
     return errors
@@ -1557,9 +1579,13 @@ def find_note_input_latency_regressions() -> list[str]:
 def find_note_indent_delete_regressions() -> list[str]:
     errors: list[str] = []
     required_by_file = {
-        "src/note_view/note_view_note_ops.cppinc": {
+        "src/note/note_auto_bullet.h": {
             "bool structuralPrefix = false": "plain indentation must not be treated as a structural Markdown prefix",
+        },
+        "src/note/note_auto_bullet.cpp": {
             "ctx.structuralPrefix = hasQuotePrefix || hasListMarker || hasChecklist": "auto-prefix delete must be limited to quote/list/checklist structure",
+        },
+        "src/note_view/note_view_note_ops.cppinc": {
             "!ctx.structuralPrefix": "auto-prefix delete must not remove an ordinary leading-space run",
             "TryHandleLeadingTabStopBackspace": "Backspace must have a dedicated tab-stop indentation path",
             "constexpr size_t kTabStopSpaces = 4": "tab-stop indentation deletion must remain explicit and bounded",
@@ -1868,7 +1894,7 @@ def find_workspace_config_compatibility_regressions() -> list[str]:
             errors.append("tools/dev/export_public_snapshot.py: public snapshots must reject unreviewed Git-untracked files")
             break
     public_allowlist_text = (
-        REPO_ROOT / "docs/internal/public_repo_release_allowlist_2026-08-24.txt"
+        REPO_ROOT / "docs/internal/public_repo_release_allowlist_2026-11-13.txt"
     ).read_text(encoding="utf-8-sig", errors="ignore")
     for required in ("locales/", "tools/localization/", "docs/ja/", "docs/en/"):
         if required not in public_allowlist_text:
@@ -2151,6 +2177,7 @@ def find_final_render_publication_boundary_regressions() -> list[str]:
         "rich_edit_text_length() const noexcept",
         "CanonicalOffsetToRichEditIndex",
         "RichEditIndexToCanonicalOffset",
+        "RichEditSelectionEndpointToCanonicalOffset",
     ):
         if needle not in source_line_map_header:
             errors.append(
@@ -2159,6 +2186,7 @@ def find_final_render_publication_boundary_regressions() -> list[str]:
     for needle in (
         "CanonicalOffsetToRichEditIndex",
         "RichEditIndexToCanonicalOffset",
+        "RichEditSelectionEndpointToCanonicalOffset",
         "SubtreeRichEditTextLength",
     ):
         if needle not in source_line_map_impl:
@@ -2170,8 +2198,12 @@ def find_final_render_publication_boundary_regressions() -> list[str]:
         errors.append(
             "src/note_view/note_view_final_render.cppinc: final selection and hit mapping must not materialize or linearly scan complete canonical text"
         )
-    if ("NoteSourceLineMap::CanonicalOffsetToRichEditIndex" not in note_view_final or
-            "NoteSourceLineMap::RichEditIndexToCanonicalOffset" not in note_view_final):
+    selection_start = note_view_final.find("bool ReadFinalCanonicalSelection(")
+    selection_end = note_view_final.find("FinalLineAtOffset(", selection_start)
+    selection = note_view_final[selection_start:selection_end]
+    endpoint_map = "NoteSourceLineMap::RichEditSelectionEndpointToCanonicalOffset("
+    if (selection_start < 0 or selection_end < 0 or selection.count(endpoint_map) != 2 or
+            "NoteSourceLineMap::CanonicalOffsetToRichEditIndex" not in note_view_final):
         errors.append(
             "src/note_view/note_view_final_render.cppinc: final selection and hit mapping must use the persistent source-line coordinate aggregate"
         )
@@ -2490,11 +2522,13 @@ def find_final_render_publication_boundary_regressions() -> list[str]:
         errors.append(
             "src/note_view/note_view_input_proc.cppinc: final input must confine legacy raw-string coordinate scans to the non-final bridge branches"
         )
+    reverse_start = note_view_final.find("TryMapFinalRouteRichEditIndexToCanonical(")
+    reverse_end = note_view_final.find("static bool ApplyFinalNoteNativeFallbackFormatRect(", reverse_start)
+    reverse_transport = note_view_final[reverse_start:reverse_end]
     if ("TryMapFinalRouteCanonicalOffsetToRichEdit" not in note_view_final or
-            "TryMapFinalRouteRichEditIndexToCanonical" not in note_view_final or
+            reverse_start < 0 or reverse_end < 0 or endpoint_map not in reverse_transport or
             "NoteSourceLineMap::CanonicalOffsetToRichEditIndex" not in note_view_final or
-            "NoteSourceLineMap::RichEditIndexToCanonicalOffset" not in note_view_final or
-            "editor_replacement_span" not in note_view_final):
+            "editor_replacement_span" not in reverse_transport):
         errors.append(
             "src/note_view/note_view_final_render.cppinc: final input transport must resolve both directions through the persistent source-line map, including proven IME preedit boundaries"
         )
@@ -3149,6 +3183,7 @@ def find_layout_flicker_regressions() -> list[str]:
             "SetTimer(hWnd, kSplitDragTimerId, 16, nullptr)": "splitter drag must coalesce live layout updates instead of relaying every mouse move directly",
             "ApplyLayout(hWnd, LayoutPass::Live)": "splitter drag timer must apply a live layout pass",
             "ApplyLayout(hWnd, LayoutPass::Commit)": "splitter drag end must settle with a commit layout pass",
+            "if (GetCapture() == hWnd) ReleaseCapture();": "splitter cancellation must not release another window's capture",
         },
         "src/ui/layout.cpp": {
             "UINT baseFlags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW;": "layout moves must suppress per-child redraw during batched repositioning",
@@ -3159,6 +3194,7 @@ def find_layout_flicker_regressions() -> list[str]:
             "RedrawChangedLayout(hWnd, result, changedControls)": "layout must repaint changed controls and the union of changed old/new root bounds",
             "RDW_INVALIDATE | RDW_NOCHILDREN | RDW_UPDATENOW": "layout background repaint must preserve child pixels",
             "RDW_INVALIDATE | RDW_NOERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW": "changed controls must paint without broad background erasure",
+            "control == g_hAnnotList ? RDW_ERASE : RDW_NOERASE": "a resized annotation list must erase the area below its owner-drawn rows",
             "if (!boundsChanged && !visibilityChanged) continue;": "unchanged controls must not be repositioned or repainted",
             "result.bottomPaneBoundsChanged && pass == LayoutPass::Commit": "bottom pane refresh must be tied to committed bounds changes",
             "RefreshCurrentNoteBottomPane();": "bottom pane refresh must occur after committed layout changes",
@@ -3198,6 +3234,10 @@ def find_layout_flicker_regressions() -> list[str]:
                 errors.append(f"{rel}: {message}")
 
     layout_text = (REPO_ROOT / "src/ui/layout.cpp").read_text(encoding="utf-8", errors="ignore")
+    splitter_text = (REPO_ROOT / "src/ui/splitter.cpp").read_text(encoding="utf-8")
+    cancel_drag = splitter_text.partition("void CancelDrag(HWND hWnd)")[2]
+    if "RedrawLayoutTree(hWnd);" not in cancel_drag:
+        errors.append("src/ui/splitter.cpp: capture loss must repaint the last applied splitter layout")
     no_redraw_pos = layout_text.find("SWP_NOREDRAW")
     defer_pos = layout_text.find("BeginDeferWindowPos")
     redraw_pos = layout_text.find("RedrawChangedLayout(hWnd, result, changedControls)")

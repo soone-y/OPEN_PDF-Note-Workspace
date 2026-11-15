@@ -37,6 +37,9 @@ def load_module(name: str, rel_path: str):
 ReaderMigrationTests = load_module(
     "test_readonly_viewer_migration", "tests/python/test_readonly_viewer_migration.py"
 ).ReaderMigrationTests
+ReadonlyFileRangeTests = load_module(
+    "test_readonly_file_range", "tests/python/test_readonly_file_range.py"
+).ReadonlyFileRangeTests
 SearchCancelTests = load_module(
     "test_search_cancel", "tests/python/test_search_cancel.py"
 ).SearchCancelTests
@@ -315,22 +318,25 @@ class PdfRotationPersistenceContractTests(unittest.TestCase):
         self.assertIn("g_restorePdfOpeningAnchor =", queue)
         self.assertIn("ReadPdfViewRecordForPath", queue)
         self.assertNotIn('L"page")) return', queue)
-        self.assertIn("turns.size() == static_cast<size_t>(g_pdf.pageCount)", state)
+        self.assertIn("if (turns.size() == pageCount) g_pdf.savedPageRotations = turns;", state)
+        self.assertIn("g_pdf.pageViewRotations = g_pdf.savedPageRotations;", state)
         zoom = (REPO_ROOT / "src/pdf_view/zoom_flow.cppinc").read_text(encoding="utf-8")
         fit = zoom[zoom.index("static void CompleteInitialPdfFit"):zoom.index("static std::optional<double> PreferredInitialPdfScale")]
         self.assertLess(fit.index("ApplyPdfScaleDirect"), fit.index("ApplyPendingPdfRestore"))
 
     def test_rotation_is_captured_written_and_protects_unreadable_records(self) -> None:
         state = (REPO_ROOT / "src/pdf_view/view_state.cppinc").read_text(encoding="utf-8")
-        self.assertIn("out.pageRotations = g_pdf.pageViewRotations", state)
+        self.assertIn("record.pageRotations = savedTurns", state)
+        self.assertIn("TrySaveLastPdfViewInfo(g_pdf.savedPageRotations)", state)
         self.assertIn("view_rotation_record::Decode(rotations, rec.pageRotations)", state)
         self.assertIn("view_rotation_record::Encode(rec.pageRotations)", state)
-        save = state[state.index("void SaveLastPdfViewInfo()"):state.index("bool MovePdfViewInfoPath")]
+        save = state[state.index("static bool TrySaveLastPdfViewInfo"):state.index("bool MovePdfViewInfoPath")]
         self.assertLess(save.index("if (!complete)"), save.index("entries[record.path] = record"))
         self.assertIn('L"pdf.view_state.save_failed"', save)
         source = (REPO_ROOT / "src/pdf_view/pdf_view.cpp").read_text(encoding="utf-8")
         rotate = source[source.index("static bool RotatePdfPageViews"):source.index("bool RotateCurrentPdfPageView")]
-        self.assertIn("SaveLastPdfViewInfo()", rotate)
+        self.assertIn("if (!TrySaveLastPdfViewInfo(savedTurns)) return false;", rotate)
+        self.assertLess(rotate.index("TrySaveLastPdfViewInfo(savedTurns)"), rotate.index("target.viewRotation = rotation"))
         codec = (REPO_ROOT / "src/pdf_view/view_rotation_record.h").read_text(encoding="utf-8")
         self.assertIn("text[i] < '0' || text[i] > '3'", codec)
         self.assertIn("kMaxPages", codec)
@@ -339,9 +345,12 @@ class PdfRotationPersistenceContractTests(unittest.TestCase):
     def test_persistent_menu_and_native_regressions_are_defined(self) -> None:
         for locale in ("ja", "en"):
             catalog = json.loads((REPO_ROOT / f"locales/{locale}.json").read_text(encoding="utf-8"))
-            self.assertNotIn("一時", catalog["menu.view.rotation"])
-            self.assertNotIn("temporary", catalog["menu.view.rotation"])
+            self.assertEqual(catalog["menu.view.rotation"], catalog["menu.edit.rotation"])
+            self.assertNotEqual(catalog["menu.rotate.reset"], catalog["menu.rotate.reset_temporary"])
             self.assertTrue(catalog["pdf.view_state.save_failed"])
+        menu = (REPO_ROOT / "src/ui/menus/menu_build.cpp").read_text(encoding="utf-8")
+        self.assertIn("AppendMenuW(editRotation, pdfViewFlags, ID_EDIT_ROTATE_PAGE_RIGHT,", menu)
+        self.assertIn("AppendMenuW(rotation, pdfViewFlags, ID_VIEW_ROTATE_PAGE_RIGHT,", menu)
         native = (REPO_ROOT / "src/pdf_view/page_rotation_tests.cppinc").read_text(encoding="utf-8")
         self.assertIn("stored.pageRotations != persistedTurns", native)
         self.assertIn('{L"width", L"page", L"previous"}', native)
@@ -1131,7 +1140,8 @@ class AnnotationToolPolicyTests(unittest.TestCase):
             "ID_FILE_EXPORT_NOTE_TEXT_QUICK": "menu.export.quick_note",
             "ID_FILE_EXPORT_COMBINED": "menu.export.dialog",
             "ID_OP_OPEN_READONLY_VIEWER_FILE": "menu.viewer.open_file",
-            "ID_OP_OPEN_READONLY_VIEWER": "menu.tools.open_in_viewer",
+            "ID_OP_CONVERT_IMAGE_TO_PDF": "menu.tools.convert_image",
+            "ID_TOOLS_DETACH_PDF_ANNOTATIONS": "menu.tools.detach_pdf_annotations",
             "ID_SETTINGS_GENERAL": "menu.settings.dialog",
             "ID_HELP_GUIDE": "menu.help.dialog",
             "ID_HELP_NOTE_INFO": "menu.help.note_info",
@@ -1151,9 +1161,28 @@ class AnnotationToolPolicyTests(unittest.TestCase):
         self.assertIn("BottomPane, Palette, Files", navigation)
         self.assertIn("page == kSettingsNavPalette) target = EnsureUnifiedPalettePage", shell)
 
-        self.assertIn("OpenReadOnlyViewerCurrentOrPickFile", main)
-        self.assertIn("LaunchReadOnlyViewerForFile(owner, *selected)", main)
-        self.assertIn("LaunchReadOnlyViewerForPdf(owner, *selected)", main)
+        viewer_picker = main.split("static bool PickFileForReadOnlyViewer(", 1)[1].split(
+            "static bool LaunchReadOnlyViewerForFolder(", 1
+        )[0]
+        self.assertIn("PickFileUnder(owner,", viewer_picker)
+        self.assertIn("LaunchReadOnlyViewerForFile(owner, *selected)", viewer_picker)
+        self.assertIn("LaunchReadOnlyViewerForPdf(owner, *selected)", viewer_picker)
+        self.assertNotIn("CurrentLogicalPdfPath", viewer_picker)
+        image_command = dispatch.split("case ID_OP_CONVERT_IMAGE_TO_PDF:", 1)[1].split("case ", 1)[0]
+        self.assertIn("PromptExistingLocalPath(hWnd,", image_command)
+        self.assertIn("useCurrentImage = IsImageFile(currentFile)", image_command)
+        self.assertIn("useCurrentImage ? currentFile.parent_path() : DialogContextInitialFolder()", image_command)
+        self.assertIn("useCurrentImage ? currentFile : std::filesystem::path{}", image_command)
+        self.assertIn("if (!source) break;", image_command)
+        self.assertIn("ConvertImageToPdf(hWnd, *source)", image_command)
+
+        tools_menu = menu.split("HMENU tools = CreatePopupMenu();", 1)[1].split('text(L"menu.bar.tools")', 1)[0]
+        tools_order = (
+            "ID_OP_CREATE_BLANK_PDF", "ID_OP_CONVERT_IMAGE_TO_PDF", "ID_OP_CONVERT_OFFICE_TO_PDF",
+            "ID_TOOLS_DETACH_PDF_ANNOTATIONS", "pair_finder.title", "menu.tools.viewer", "ID_WORKSPACE_MEMO",
+        )
+        positions = [tools_menu.index(item) for item in tools_order]
+        self.assertEqual(positions, sorted(positions))
 
         menu_commands = set(re.findall(r"\bID_[A-Z0-9_]+\b", menu))
         non_action_commands = {"ID_STATUS_DISPLAY"}
@@ -1314,7 +1343,8 @@ def repo_tempdir():
     path = TEST_TMP_ROOT / f"case_{uuid.uuid4().hex}"
     path.mkdir(parents=True, exist_ok=False)
     try:
-        yield path
+        # Match tools that resolve their inputs when Windows TEMP uses a short path.
+        yield path.resolve(strict=True)
     finally:
         shutil.rmtree(path, ignore_errors=True)
 
@@ -1947,6 +1977,14 @@ class ValidateCodebaseTests(unittest.TestCase):
         input_path = validate_codebase.REPO_ROOT / "src/note_view/note_view_input_proc.cppinc"
         read_text = Path.read_text
         cases = (
+            (final_path, "const auto start = IsRichEditControl(hWnd)", "const auto end = IsRichEditControl(hWnd)",
+             "NoteSourceLineMap::RichEditSelectionEndpointToCanonicalOffset(",
+             "NoteSourceLineMap::RichEditIndexToCanonicalOffset(",
+             "final selection and hit mapping must use the persistent source-line coordinate aggregate"),
+            (final_path, "TryMapFinalRouteRichEditIndexToCanonical(", "static bool ApplyFinalNoteNativeFallbackFormatRect(",
+             "NoteSourceLineMap::RichEditSelectionEndpointToCanonicalOffset(",
+             "NoteSourceLineMap::RichEditIndexToCanonicalOffset(",
+             "final input transport must resolve both directions through the persistent source-line map"),
             (final_path, "bool FinalFrameCanUseCustomPaint(", "bool FinalRenderRouteEnabled(",
              "if (!context.finalRenderState.has_frame()) return false;", "",
              "require a published frame"),
@@ -3846,6 +3884,29 @@ class RenderHumanDocsTests(unittest.TestCase):
         self.assertIn('class="flowchart-branch">optional label</span>', rendered)
         self.assertIn(">End</span>", rendered)
 
+    def test_setup_flowchart_shows_each_step_once_with_options_at_extraction(self) -> None:
+        source = (REPO_ROOT / "docs/ja/Getting_Started.md").read_text(encoding="utf-8")
+        diagram = re.search(r"```mermaid\n(.*?)\n```", source, re.DOTALL).group(1)
+        rendered = render_human_docs.render_mermaid_flowchart(diagram.splitlines())
+        self.assertIn('<ol class="flowchart-steps">', rendered)
+        self.assertEqual(rendered.count('2. 書き込み可能な場所へ展開'), 1)
+        self.assertEqual(rendered.count('class="flowchart-node"'), 5)
+        self.assertEqual(rendered.count('class="flowchart-next"'), 2)
+        self.assertIn('<ul class="flowchart-options">', rendered)
+        self.assertLess(rendered.index('2. 書き込み可能な場所へ展開'), rendered.index('ショートカットを作成'))
+        self.assertLess(rendered.index('プログラムから開く'), rendered.index('3. pdf_note_workspace.exe'))
+
+    def test_nonsequential_flowcharts_keep_their_branch_connections(self) -> None:
+        for edges in (
+            ['A[Start] --> B[One]', 'A --> C[Two]'],
+            ['A[Start] --> B[One]', 'B --> A'],
+            ['A[Start] --> B[One]', 'A -. retry .-> B'],
+        ):
+            with self.subTest(edges=edges):
+                rendered = render_human_docs.render_mermaid_flowchart(['flowchart LR', *edges])
+                self.assertIn('class="flowchart-edge"', rendered)
+                self.assertNotIn('class="flowchart-steps"', rendered)
+
     def test_renders_source_readable_note_and_details_containers(self) -> None:
         rendered = render_human_docs.simple_markdown_to_html(
             "::: note\nKeep this visible.\n:::\n\n"
@@ -3955,7 +4016,7 @@ class RenderHumanDocsTests(unittest.TestCase):
 class PublicDocumentationStructureTests(unittest.TestCase):
     def test_introduction_tree_is_in_the_public_snapshot_allowlist(self) -> None:
         allowlist = (
-            REPO_ROOT / "docs/internal/public_repo_release_allowlist_2026-08-24.txt"
+            REPO_ROOT / "docs/internal/public_repo_release_allowlist_2026-11-13.txt"
         ).read_text(encoding="utf-8-sig")
 
         self.assertIn("\nintroduction/\n", f"\n{allowlist}")
@@ -3963,7 +4024,7 @@ class PublicDocumentationStructureTests(unittest.TestCase):
 
     def test_locale_build_inputs_are_in_the_public_snapshot_allowlist(self) -> None:
         allowlist = (
-            REPO_ROOT / "docs/internal/public_repo_release_allowlist_2026-08-24.txt"
+            REPO_ROOT / "docs/internal/public_repo_release_allowlist_2026-11-13.txt"
         ).read_text(encoding="utf-8-sig")
 
         for required in ("locales/", "tools/localization/", "docs/ja/", "docs/en/"):
@@ -4976,6 +5037,16 @@ class ReleaseSetIntegrityGateTests(unittest.TestCase):
 
 
 class ReleaseStartupSmokeGateTests(unittest.TestCase):
+    def test_cleanup_retries_a_transient_dll_lock(self) -> None:
+        root = Path("smoke-copy")
+        with mock.patch.object(release_startup_smoke_gate.shutil, "rmtree",
+                               side_effect=[PermissionError("DLL still in use"), None]) as remove, \
+                mock.patch.object(release_startup_smoke_gate.time, "sleep") as wait:
+            release_startup_smoke_gate.remove_smoke_copy(root)
+
+        self.assertEqual(remove.call_args_list, [mock.call(root), mock.call(root)])
+        wait.assert_called_once()
+
     def test_control_must_be_ready_before_release_validation(self) -> None:
         with mock.patch.object(release_startup_smoke_gate, "protect_entry_point", side_effect=SystemExit(130)) as protect, \
                 mock.patch.object(release_startup_smoke_gate, "validate_release_set") as validate:

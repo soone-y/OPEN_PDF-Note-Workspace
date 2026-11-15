@@ -140,6 +140,7 @@ void UpdateToolbarUI(HWND hWnd) {
     if (g_hRadioTextReadableBackgroundNormal) EnableWindow(g_hRadioTextReadableBackgroundNormal, showTextBoxOptions && !saveBusy);
     if (g_hRadioTextReadableBackgroundInverted) EnableWindow(g_hRadioTextReadableBackgroundInverted, showTextBoxOptions && !saveBusy);
     if (g_hChkTextAutoWrap) EnableWindow(g_hChkTextAutoWrap, showTextBoxOptions && !saveBusy);
+    if (g_hChkTextVertical) EnableWindow(g_hChkTextVertical, showTextBoxOptions && !saveBusy);
     if (g_hChkPanMouseWheelZoom) EnableWindow(g_hChkPanMouseWheelZoom, showPanOptions && !saveBusy);
     if (g_hComboWidth) EnableWindow(g_hComboWidth, showWidth && !saveBusy);
     if (g_hComboMarkerAlpha) EnableWindow(g_hComboMarkerAlpha, showMarkerAlpha && !saveBusy);
@@ -167,6 +168,7 @@ void UpdateToolbarUI(HWND hWnd) {
     setVisibleIfChanged(g_hRadioTextReadableBackgroundNormal, showTextBoxOptions);
     setVisibleIfChanged(g_hRadioTextReadableBackgroundInverted, showTextBoxOptions);
     setVisibleIfChanged(g_hChkTextAutoWrap, showTextBoxOptions);
+    setVisibleIfChanged(g_hChkTextVertical, showTextBoxOptions);
     setVisibleIfChanged(g_hChkPanMouseWheelZoom, showPanOptions);
     setVisibleIfChanged(g_hComboWidth, showWidth);
     setVisibleIfChanged(g_hComboMarkerAlpha, showMarkerAlpha);

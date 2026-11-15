@@ -104,8 +104,8 @@ static void CreateChildren(HWND hWnd) {
                                  WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | WS_HSCROLL,
                                  0, 0, 100, 100, hWnd, nullptr, g_hInst, nullptr);
     const auto& ui = GetUiText();
-    g_hAnnotShow = CreateWindowExW(0, L"BUTTON", ui.btnToggleAnn.c_str(),
-                                   WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+    g_hAnnotShow = CreateWindowExW(0, L"BUTTON", localization::Text(L"annotation.toolbar.show").c_str(),
+                                   WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                                    0, 0, 100, 24, g_hPdfToolbar,
                                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_ANNOT_PANEL_SHOW)),
                                    g_hInst, nullptr);
@@ -243,7 +243,7 @@ static void CreateChildren(HWND hWnd) {
                                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_VIEW_LEFT_PANE_TOGGLE)),
                                            g_hInst, nullptr);
     g_hBtnToggleAnn = CreateWindowExW(0, L"BUTTON", ui.btnToggleAnn.c_str(),
-                                       WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                       WS_CHILD | BS_PUSHBUTTON,
                                        0, 0, 150, 26, g_hPdfToolbar,
                                        reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_TOGGLE_ANNOTS)),
                                        g_hInst, nullptr);
@@ -425,6 +425,12 @@ static void CreateChildren(HWND hWnd) {
                  g_textBoxReadableBackgroundInverted ? BST_UNCHECKED : BST_CHECKED, 0);
     SendMessageW(g_hRadioTextReadableBackgroundInverted, BM_SETCHECK,
                  g_textBoxReadableBackgroundInverted ? BST_CHECKED : BST_UNCHECKED, 0);
+    g_hChkTextVertical = CreateWindowExW(0, L"BUTTON",
+        localization::Text(L"annotation.inspector.vertical").c_str(),
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+        0, 0, 160, 24, g_hPdfToolbar,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOOL_TEXT_VERTICAL)), g_hInst, nullptr);
+    SyncToolbarTextWritingMode();
     g_hChkTextAutoWrap = CreateWindowExW(0, L"BUTTON",
                                          localization::Text(L"ui.layout.d06972780232").c_str(),
                                          WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
@@ -825,6 +831,7 @@ static void CreateChildren(HWND hWnd) {
     SetUIFont(g_hRadioTextReadableBackgroundNormal);
     SetUIFont(g_hRadioTextReadableBackgroundInverted);
     SetUIFont(g_hChkTextAutoWrap);
+    SetUIFont(g_hChkTextVertical);
     SetUIFont(g_hChkPanMouseWheelZoom);
     SetUIFont(g_hComboWidth);
     SetUIFont(g_hComboMarkerAlpha);

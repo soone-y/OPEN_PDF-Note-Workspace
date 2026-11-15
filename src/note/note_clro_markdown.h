@@ -31,10 +31,11 @@ namespace note {
     return ascii;
 }
 
-// Only style-tag names use this mapping; prose and attribute data keep their
-// original letters. Like punctuation folding, it preserves UTF-16 offsets.
-[[nodiscard]] inline wchar_t FoldClroMarkupNameLetter(wchar_t ch) noexcept {
-    if ((ch >= L'\uFF21' && ch <= L'\uFF3A') || (ch >= L'\uFF41' && ch <= L'\uFF5A')) return ch - 0xFEE0;
+// Only tag names use this mapping; prose and attribute data keep their
+// original letters/digits. Like punctuation folding, it preserves offsets.
+[[nodiscard]] inline wchar_t FoldClroMarkupNameCharacter(wchar_t ch) noexcept {
+    if ((ch >= L'\uFF21' && ch <= L'\uFF3A') || (ch >= L'\uFF41' && ch <= L'\uFF5A') ||
+        (ch >= L'\uFF10' && ch <= L'\uFF19')) return ch - 0xFEE0;
     return ch;
 }
 
@@ -99,7 +100,7 @@ namespace note {
             if (iswspace(ch) || ch == L',') part = TagPart::Name;
         } else if (ch == L'=') {
             part = TagPart::BeforeValue;
-        } else if (FoldClroMarkupNameLetter(ch) != ch) {
+        } else if (FoldClroMarkupNameCharacter(ch) != ch) {
             return true;
         }
     }

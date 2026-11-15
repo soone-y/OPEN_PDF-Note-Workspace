@@ -341,7 +341,8 @@ static bool IsTextBoxOptionFocusTarget(HWND target) {
         target == g_hRadioBlendNormal || target == g_hRadioBlendMultiply) return true;
     for (HWND button : g_colorButtons) if (target == button) return true;
     if (target == g_hChkTextReadableBackground || target == g_hRadioTextReadableBackgroundNormal ||
-        target == g_hRadioTextReadableBackgroundInverted || target == g_hChkTextAutoWrap) return true;
+        target == g_hRadioTextReadableBackgroundInverted || target == g_hChkTextAutoWrap ||
+        target == g_hChkTextVertical) return true;
 
     auto isComboTarget = [&](HWND combo) {
         if (!combo || !IsWindow(combo)) return false;
@@ -881,7 +882,10 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         return text_input_accessibility::Expose(hwnd, wParam, g_pdfTextInputGeneration,
                                                 ReadPdfTextInput, ModifyPdfTextInput);
     }
-    if (msg == WM_DESTROY) EndPdfTextInputAccessibility(hwnd);
+    if (msg == WM_DESTROY) {
+        if (g_pdfBitmapRetentionTimerHwnd == hwnd) StopPdfBitmapRetentionTimer();
+        EndPdfTextInputAccessibility(hwnd);
+    }
     // Keyup can be blocked by a save transaction, so cancellation precedes that gate.
     if (msg == WM_KEYUP && pdf_keyboard_scroll::Motion::KeyIndex(static_cast<unsigned>(wParam)) >= 0) {
         g_pdfKeyboardMotion.SetKey(static_cast<unsigned>(wParam), false);
@@ -1012,7 +1016,7 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             return 0;
         }
         if (ForwardWheelToDroppedCombo(WM_MOUSEWHEEL, wParam, lParam)) return 0;
-        if (g_pdf.kind == DocKind::None && g_currentNotePath.empty() && g_config.emptyViewGuideMode != 2 &&
+        if (ShouldShowEmptyViewGuide() &&
             empty_view_guide::Scroll(hwnd, msg, wParam)) return 0;
         int delta = GET_WHEEL_DELTA_WPARAM(wParam);
         if (delta == 0) return 0;
@@ -1102,7 +1106,7 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         return 0;
     }
     case WM_VSCROLL: {
-        if (g_pdf.kind == DocKind::None && g_currentNotePath.empty() && g_config.emptyViewGuideMode != 2 &&
+        if (ShouldShowEmptyViewGuide() &&
             empty_view_guide::Scroll(hwnd, msg, wParam)) return 0;
         RECT rc;
         GetClientRect(hwnd, &rc);
@@ -1366,14 +1370,14 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         else if(ShapeRotationPointerDown(hwnd,pt,ctrlDown))return 0;
         int hitPageIndex = -1;
         double hitPx = 0.0, hitPy = 0.0, hitPageTop = 0.0;
-        bool hitPage = HitTestPagePoint(pt, hitPageIndex, hitPx, hitPy, hitPageTop);
+        const bool hitPage = HitTestPagePoint(pt, hitPageIndex, hitPx, hitPy, hitPageTop);
         auto beginTextSelection = [&](int pageIndex, const POINT& startPt) {
             g_pdf.selectingText = true;
             g_pdf.hasSelection = true;
             g_pdf.selectionStartPage = pageIndex;
             g_pdf.selectionEndPage = pageIndex;
-            g_pdf.selStart = startPt;
-            g_pdf.selEnd = startPt;
+            g_pdf.selectionAnchorPt = PdfRectSelectionPoint(startPt);
+            g_pdf.selectionFocusPt = g_pdf.selectionAnchorPt;
             g_pdf.selectionByText = false;
             g_pdf.selCharAnchor = -1;
             g_pdf.selCharFocus = -1;
@@ -1489,6 +1493,7 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             // composition. CommitTextEditing completes that composition first.
             // Keeping the edit open here made touchpad taps move the box rather
             // than confirm it.
+            // Alt-click keeps the paper position already resolved for this click.
             CommitTextEditing(hwnd, true);
             if (!(newTextBox && hitPage)) return 0;
             // Reediting from another tool restores that tool on confirmation.
@@ -1498,9 +1503,6 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 g_activeColor = ToolColorForMode(g_toolMode);
                 UpdateToolbarUI(GetParent(hwnd));
             }
-            // Confirmation can change the viewport; place the new box at the
-            // clicked position in the resulting view, keeping the old text.
-            hitPage = HitTestPagePoint(pt, hitPageIndex, hitPx, hitPy, hitPageTop);
         }
         if (ctrlDown) {
             int idx = -1;
@@ -1537,12 +1539,10 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             // Alt explicitly starts a new box even on top of existing text.
             if (newTextBox) g_pdfTextBoxAltClickConsumed = true;
             ResetEditOriginal();
-            AdaptiveTextPreset preset = ComputeAdaptiveTextPresetForPage(hitPageIndex, g_textFontPt);
-            double fontPt = preset.fontPt;
-            double anchorX = hitPx - (kTextClickLeftOffsetPx * 72.0 / kDpi / g_pdf.scale);
-            double anchorY = NewTextBoxTopFromClickY(hitPy, fontPt, g_textFontName, g_pdf.scale);
-            BeginTextEdit(hwnd, hitPageIndex, anchorX, anchorY, preset.widthPt, preset.heightPt,
-                          L"", g_textFontName, fontPt);
+            const auto placement = NewTextBoxPlacement(hitPageIndex, hitPx, hitPy);
+            BeginTextEdit(hwnd, hitPageIndex, placement.left, placement.top,
+                          placement.preset.widthPt, placement.preset.heightPt,
+                          L"", g_textFontName, placement.preset.fontPt, 0, placement.mode);
             return 0;
         }
         if (g_toolMode == ToolMode::Magnifier) {
@@ -1671,15 +1671,13 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             }
             InvalidateRect(hwnd, nullptr, FALSE);
         } else if (g_pdf.selectingText) {
-            POINT selectionPt = ApplyPdfPointerOffset(cur);
-            g_pdf.selEnd.x = selectionPt.x;
-            g_pdf.selEnd.y = selectionPt.y;
-            
             // Auto-scroll logic
-            RECT rcClient;
+            RECT rcClient{};
             GetClientRect(hwnd, &rcClient);
-            int ch = rcClient.bottom - rcClient.top;
-            if (cur.y < 0 || cur.y > ch) {
+            const bool vertical = FlowIsVertical(CurrentFlowMode());
+            const LONG pointer = vertical ? cur.y : cur.x;
+            const LONG viewEnd = vertical ? rcClient.bottom : rcClient.right;
+            if (pointer < 0 || pointer > viewEnd) {
                 SetTimer(hwnd, kAutoScrollTimerId, 30, nullptr);
             } else {
                 KillTimer(hwnd, kAutoScrollTimerId);
@@ -1687,6 +1685,8 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
             if (g_pdf.selectionByText) {
                 UpdatePdfTextSelectionFocusAtClientPoint(cur);
+            } else {
+                UpdatePdfRectSelectionFocus(cur);
             }
             InvalidateRect(hwnd, nullptr, FALSE);
         } else if (g_pdf.panning) {
@@ -1932,6 +1932,7 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     ResetEditOriginal();
                     AdaptiveTextPreset preset = ComputeAdaptiveTextPresetForPage(pageIndex, g_textFontPt);
                     g_pdf.editingText = true;
+                    g_pdf.editWritingMode = g_textBoxVertical ? TextWritingMode::VerticalRl : TextWritingMode::Horizontal;
                     g_pdf.editPage = pageIndex;
                     g_pdf.editX1 = sx;
                     g_pdf.editY1 = sy;
@@ -2058,12 +2059,15 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             bool selectionByText = g_pdf.selectionByText;
             int selCharStart = g_pdf.selCharAnchor;
             int selCharEnd = g_pdf.selCharFocus;
+            if (!selectionByText) {
+                UpdatePdfRectSelectionFocus({GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)});
+            }
             g_pdf.selectingText = false;
             g_pdf.selectionByText = commitMarker ? false : selectionByText;
             ReleaseCapture();
             KillTimer(hwnd, kAutoScrollTimerId);
-            double selLeft = 0.0, selRight = 0.0, selTop = 0.0, selBottom = 0.0;
-            bool haveRect = false;
+            PdfViewState::RectD selection{};
+            const bool haveRect = commitMarker && !selectionByText && PdfRectSelectionInsideStartPage(selection);
             const bool textColorMarker = MarkerTextModeUsesTextColor(g_toolMode);
             const ULONGLONG markerTraceId =
                 (!textColorMarker && preview_trace::IsEnabled()) ? ++g_markerTextTraceSequence : 0;
@@ -2079,18 +2083,6 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     L" scale=" + std::to_wstring(g_pdf.scale) +
                     L" pointer_offset=[" + std::to_wstring(std::clamp(g_config.pointerOffsetX, -20, 20)) +
                         L"," + std::to_wstring(std::clamp(g_config.pointerOffsetY, -20, 20)) + L"]");
-            }
-            if (!selectionByText) {
-                double sx = 0.0, sy = 0.0;
-                double ex = 0.0, ey = 0.0;
-                if (ClientToPdfOnPage(pageIndex, g_pdf.selStart, sx, sy) &&
-                    ClientToPdfOnPage(pageIndex, g_pdf.selEnd,   ex, ey)) {
-                    selLeft   = std::min(sx, ex);
-                    selRight  = std::max(sx, ex);
-                    selTop    = std::max(sy, ey);
-                    selBottom = std::min(sy, ey);
-                    haveRect = true;
-                }
             }
             if (commitMarker && pageIndex >= 0 && pageIndex < static_cast<int>(g_pdf.pages.size())) {
                 const int startPage = g_pdf.selectionStartPage;
@@ -2119,7 +2111,8 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                         }
                         BuildLineSpansFromCharRange(page, pageCharStart, pageCharEnd, padPt, underlineMarker, horizontalPad, lines);
                     } else if (haveRect) {
-                        BuildLineSpansFromRect(page, selLeft, selRight, selTop, selBottom, padPt, underlineMarker, horizontalPad, lines);
+                        BuildLineSpansFromRect(page, selection.left, selection.right,
+                            selection.top, selection.bottom, padPt, underlineMarker, horizontalPad, lines);
                     }
                     std::vector<double> quads;
                     double overallMinX = 1e9, overallMaxX = -1e9, overallTop = -1e9, overallBottom = 1e9;
@@ -2160,10 +2153,10 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                             ann.y1 = overallTop;
                             ann.y2 = overallBottom;
                         } else {
-                            ann.x1 = std::min(overallMinX, selLeft);
-                            ann.x2 = std::max(overallMaxX, selRight);
-                            ann.y1 = std::max(overallTop, selTop);
-                            ann.y2 = std::min(overallBottom, selBottom);
+                            ann.x1 = std::min(overallMinX, selection.left);
+                            ann.x2 = std::max(overallMaxX, selection.right);
+                            ann.y1 = std::max(overallTop, selection.top);
+                            ann.y2 = std::min(overallBottom, selection.bottom);
                         }
                         ann.quads = std::move(quads);
                         g_annots.push_back(std::move(ann));
@@ -2304,7 +2297,7 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             wParam == VK_HOME || wParam == VK_END) {
             if (ForwardWheelToDroppedCombo(WM_KEYDOWN, wParam, lParam)) return 0;
         }
-        if (g_pdf.kind == DocKind::None && g_currentNotePath.empty() && g_config.emptyViewGuideMode != 2 &&
+        if (ShouldShowEmptyViewGuide() &&
             (GetKeyState(VK_CONTROL) & 0x8000) == 0 && (GetKeyState(VK_MENU) & 0x8000) == 0 &&
             empty_view_guide::Scroll(hwnd, msg, wParam)) return 0;
 
@@ -2604,7 +2597,14 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             }
             LeftRightLineMoveAction lrAction =
                 ParseLeftRightLineMoveAction(g_config.leftRightLineMoveAction);
-            switch (wParam) {
+            WPARAM caretKey = wParam;
+            if (g_pdf.editWritingMode == TextWritingMode::VerticalRl) {
+                if (wParam == VK_UP) caretKey = VK_LEFT;
+                else if (wParam == VK_DOWN) caretKey = VK_RIGHT;
+                else if (wParam == VK_LEFT) caretKey = VK_DOWN;
+                else if (wParam == VK_RIGHT) caretKey = VK_UP;
+            }
+            switch (caretKey) {
             case VK_LEFT:
                 if (!shiftDown && HasEditSelection()) {
                     size_t start = std::min(g_pdf.editSelStart, g_pdf.editSelEnd);
@@ -2789,6 +2789,15 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         break;
     }
     case WM_TIMER: {
+        if (wParam == kPdfBitmapRetentionTimerId) {
+            if (g_pdfBitmapRetentionTimerHwnd == hwnd &&
+                preview_trace::TickNow() >= g_pdfBitmapRetentionDeadline) {
+                StopPdfBitmapRetentionTimer();
+                const auto update = UpdatePdfVirtualScrollCaches(hwnd, PdfVirtualUpdateMode::Paint);
+                if (update.repaint) InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            return 0;
+        }
         if (wParam == kPdfKeyboardScrollTimerId) {
             TickPdfKeyboardScroll(hwnd);
             return 0;
@@ -2861,6 +2870,7 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 if (g_pdf.selectionByText) {
                     UpdatePdfTextSelectionFocusAtClientPoint(pt);
                 } else {
+                    UpdatePdfRectSelectionFocus(pt);
                     int hitPage = -1;
                     double dummyX = 0.0, dummyY = 0.0, dummyTop = 0.0;
                     if (HitTestPagePoint(pt, hitPage, dummyX, dummyY, dummyTop)) {

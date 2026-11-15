@@ -1,5 +1,8 @@
 #pragma once
 
+#include "workspace/session_order.h"
+#include "core/annot_tool_definition.h"
+
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -12,10 +15,12 @@
 #include "fpdfview.h"
 #include "fpdf_text.h"
 #include "core/constants.h"
+#include "core/vertical_text.h"
 #include "core/marker_display_mode.h"
 #include "core/annotation_blend_mode.h"
 #include "core/shape_boundary.h"
 #include "core/shape_rotation.h"
+#include "core/page_rotation.h"
 #include "core/text_selection_geometry.h"
 
 enum class NodeType { Root, Folder, Pdf, Note };
@@ -42,18 +47,6 @@ enum class TextWritingMode { Horizontal, VerticalRl };
 // Inherit is reserved for annotations created by older versions that did not
 // record their own background-assist choice.
 enum class TextBackgroundAssistMode { Inherit, Off, Auto, Inverted };
-enum class ShapeKind {
-    Square,
-    Rectangle,
-    Diamond,
-    EquilateralTriangle,
-    Triangle,
-    Ellipse,
-    Circle,
-    RotatedEllipse,
-    Arc, // open parenthesis-like curve, v2
-    Star
-};
 
 inline std::wstring ShapeKindToString(ShapeKind kind) {
     switch (kind) {
@@ -89,12 +82,6 @@ inline ShapeKind ParseShapeKind(const std::wstring& s) {
 }
 
 inline constexpr double kDefaultRotatedEllipseAngleRad = 0.78539816339744830962; // 45 degrees for legacy rotated_ellipse data
-
-enum class ShapeDrawMode {
-    Fill,
-    Outline,
-    Line // five straight segments of a pentagram (Star only)
-};
 
 enum class ArrowHead {
     Single,
@@ -229,7 +216,9 @@ struct PageCache {
     int bmpH = 0;
     int stride = 0;
     uint64_t pixelsGeneration = 0;
+    ULONGLONG bitmapRetainUntilTick = 0;
     bool bitmapCoarse = false;
+    bool bitmapWasVisible = false;
     uint64_t bitmapFailedGeneration = 0;
     int bitmapFailedW = 0;
     int bitmapFailedH = 0;
@@ -290,6 +279,8 @@ struct TextLineLayout {
 struct TextLayoutResult {
     TEXTMETRICW tm{};
     std::vector<TextLineLayout> lines;
+    bool vertical = false;
+    vertical_text::Layout verticalLayout;
 };
 
 struct Annotation {
@@ -378,7 +369,8 @@ struct PdfViewState {
     std::wstring path;
     std::string openPasswordUtf8; // memory-only; never persisted
     int pageCount = 0;
-    std::vector<int> pageViewRotations; // per-page clockwise quarter turns, persisted with the PDF view record
+    std::vector<int> pageViewRotations; // displayed clockwise quarter turns, including temporary rotations
+    std::vector<int> savedPageRotations; // clockwise quarter turns in the PDF view record
     double scale = 1.0;
     double renderScale = 1.0;
     double scrollY = 0.0;
@@ -423,8 +415,9 @@ struct PdfViewState {
     bool hasSelection = false;
     int selectionStartPage = -1;
     int selectionEndPage = -1;
-    POINT selStart{};
-    POINT selEnd{};
+    // Rectangle endpoints in the displayed PDF coordinates of selectionStartPage.
+    page_rotation::Point selectionAnchorPt{};
+    page_rotation::Point selectionFocusPt{};
     bool selectionByText = false;
     int selCharAnchor = -1;
     int selCharFocus = -1;
@@ -432,6 +425,7 @@ struct PdfViewState {
     // inline text editing (TextBox)
     bool editingText = false;
     int editContentRotation = 0;
+    TextWritingMode editWritingMode = TextWritingMode::Horizontal;
     int editPage = -1;
     double editX1 = 0.0, editY1 = 0.0, editX2 = 0.0, editY2 = 0.0; // pt
     std::wstring editText;
@@ -497,9 +491,4 @@ struct PdfViewState {
 struct FileEntry {
     std::wstring path;
     bool isPdf;
-};
-
-struct SessionEntry {
-    std::wstring displayName;
-    std::wstring path;
 };

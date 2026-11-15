@@ -64,7 +64,7 @@ $zlibImportHits = @($imports | Select-String -SimpleMatch "DLL Name: zlib1.dll")
 if ($zlibImportHits.Count -eq 0) {
     throw "pdf_note_workspace.exe does not import zlib1.dll"
 }
-# zlib 1.3.2 is vendored and pinned. Keep this restricted import check as
+# The zlib runtime is vendored and pinned. Keep this restricted import check as
 # defense in depth because the application does not need crc32_combine* APIs.
 $forbiddenZlibImports = @(
     "crc32_combine",

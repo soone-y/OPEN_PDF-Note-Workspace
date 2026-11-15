@@ -439,16 +439,19 @@ static LRESULT CALLBACK AnnotShortcutEditorProc(HWND hWnd, UINT msg, WPARAM wPar
             }
             if (g_hMainWnd) RefreshMainMenuBar(g_hMainWnd);
             ctx->ok = true;
+            RestoreOwnerAfterModal(ctx->owner);
             DestroyWindow(hWnd);
             return 0;
         }
         if (id == IDCANCEL) {
+            RestoreOwnerAfterModal(ctx->owner);
             DestroyWindow(hWnd);
             return 0;
         }
         break;
     }
     case WM_CLOSE:
+        if (ctx) RestoreOwnerAfterModal(ctx->owner);
         DestroyWindow(hWnd);
         return 0;
     case WM_ACTIVATE:

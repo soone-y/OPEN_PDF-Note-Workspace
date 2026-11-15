@@ -167,7 +167,6 @@ static bool BuildCurrentPdfViewRecord(PdfViewRestorePoint& out) {
     out.path = NormalizePathKey(std::filesystem::path(g_pdf.path));
     if (out.path.empty()) return false;
     out.scale = g_pdf.scale;
-    out.pageRotations = g_pdf.pageViewRotations;
 
     PdfFlowMode mode = CurrentFlowMode();
     RECT rc{};
@@ -262,7 +261,7 @@ static bool ApplyPdfViewAnchor(HWND pdfWnd, int pageIndex, double xPt, double yP
     double docY = rect.top + localY;
     g_pdf.scrollX = docX + padX - refClientX;
     g_pdf.scrollY = docY + padY - refClientY;
-    ClampPdfScroll(viewH, viewW);
+    ClampPdfScroll(viewH, viewW, false);
     return true;
 }
 
@@ -280,11 +279,13 @@ static void QueuePendingPdfRestoreForPath(const std::wstring& path, bool useOpen
 // Metadata is applied before BuildPageCaches, so both fit modes and saved
 // scale/position restoration see the final rotated page geometry.
 static void RestorePendingPdfPageRotations() {
-    g_pdf.pageViewRotations.clear();
-    if (g_pdf.kind != DocKind::Pdf || !g_pendingPdfRestore || g_pdf.pageCount <= 0 ||
-        NormalizePathKey(g_pdf.path) != NormalizePathKey(g_pendingPdfRestore->path)) return;
-    const auto& turns = g_pendingPdfRestore->pageRotations;
-    if (turns.size() == static_cast<size_t>(g_pdf.pageCount)) g_pdf.pageViewRotations = turns;
+    const auto pageCount = static_cast<size_t>(std::max(0, g_pdf.pageCount));
+    g_pdf.savedPageRotations.assign(pageCount, 0);
+    if (g_pendingPdfRestore && NormalizePathKey(g_pdf.path) == NormalizePathKey(g_pendingPdfRestore->path)) {
+        const auto& turns = g_pendingPdfRestore->pageRotations;
+        if (turns.size() == pageCount) g_pdf.savedPageRotations = turns;
+    }
+    g_pdf.pageViewRotations = g_pdf.savedPageRotations;
 }
 
 static bool ApplyPendingPdfRestore(HWND pdfWnd) {
@@ -312,8 +313,13 @@ static bool ApplyPendingPdfRestore(HWND pdfWnd) {
         UpdateScrollDirectionMenuChecks();
     }
 
-    if (!ApplyPdfViewAnchor(pdfWnd, g_pendingPdfRestore->pageIndex,
-                            g_pendingPdfRestore->xPt, g_pendingPdfRestore->yPt)) {
+    const int index = std::clamp(g_pendingPdfRestore->pageIndex, 0, static_cast<int>(g_pdf.pages.size()) - 1);
+    const auto& page = g_pdf.pages[static_cast<size_t>(index)];
+    const auto& turns = g_pendingPdfRestore->pageRotations;
+    const int recordedTurn = turns.size() == static_cast<size_t>(g_pdf.pageCount) ? turns[index] : 0;
+    const auto anchor = page_rotation::Between({g_pendingPdfRestore->xPt, g_pendingPdfRestore->yPt},
+        page.canonicalWidthPt, page.canonicalHeightPt, recordedTurn, page.viewRotation);
+    if (!ApplyPdfViewAnchor(pdfWnd, index, anchor.x, anchor.y)) {
         g_pendingPdfRestore.reset();
         return false;
     }
@@ -323,21 +329,30 @@ static bool ApplyPendingPdfRestore(HWND pdfWnd) {
     return true;
 }
 
-void SaveLastPdfViewInfo() {
+[[nodiscard]] static bool TrySaveLastPdfViewInfo(const std::vector<int>& savedTurns) {
     const ULONGLONG startTick = preview_trace::TickNow();
     SaveOperationGuard guard;
     PdfViewRestorePoint record;
-    if (!BuildCurrentPdfViewRecord(record)) {
+    if (!BuildCurrentPdfViewRecord(record) || savedTurns.size() != g_pdf.pages.size()) {
         preview_trace::Append(
             L"SaveLastPdfViewInfo",
             L"skip=no_record elapsed_ms=" + preview_trace::ElapsedMs(startTick));
-        return;
+        return false;
     }
+    // Store the position in the saved orientation, including when the live
+    // view still has temporary rotation or an edit is about to change it.
+    const size_t index = static_cast<size_t>(record.pageIndex);
+    const auto& page = g_pdf.pages[index];
+    const auto anchor = page_rotation::Between({record.xPt, record.yPt},
+        page.canonicalWidthPt, page.canonicalHeightPt, page.viewRotation, savedTurns[index]);
+    record.xPt = anchor.x;
+    record.yPt = anchor.y;
+    record.pageRotations = savedTurns;
     bool complete = false;
     auto entries = LoadPdfViewRecordMap(&complete);
     if (!complete) {
         ShowSoftNotice(g_hPdfView, localization::Text(L"pdf.view_state.save_failed"), SoftNoticeKind::Warning);
-        return;
+        return false;
     }
     entries[record.path] = record;
     const bool saved = WritePdfViewRecordMap(entries);
@@ -347,6 +362,11 @@ void SaveLastPdfViewInfo() {
         L"SaveLastPdfViewInfo",
         L"end saved=" + std::to_wstring(saved ? 1 : 0) + L" path=" + record.path +
         L" elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+    return saved;
+}
+
+void SaveLastPdfViewInfo() {
+    (void)TrySaveLastPdfViewInfo(g_pdf.savedPageRotations);
 }
 
 bool MovePdfViewInfoPath(const std::wstring& oldPath, const std::wstring& newPath) {
@@ -393,10 +413,12 @@ static COLORREF SelectionFillColor() {
 // NOTE: Timer IDs must be unique per HWND to avoid collisions in PdfViewProc.
 // Keep this in sync with the PdfViewProc timer registry in core/constants.h.
 static constexpr UINT_PTR kZoomTimerId = 0x2005;
-static_assert(AllUniqueValues(std::array<UINT_PTR, 5>{
+static constexpr UINT_PTR kPdfBitmapRetentionTimerId = 0x2004;
+static_assert(AllUniqueValues(std::array<UINT_PTR, 6>{
     kScrollTimerId,
     kPdfVirtualRenderTimerId,
     kPdfKeyboardScrollTimerId,
+    kPdfBitmapRetentionTimerId,
     kZoomTimerId,
     kAutoScrollTimerId,
 }));
@@ -668,6 +690,32 @@ static double NewTextBoxTopFromClickY(double clickYpt, double fontPt, const std:
     int offsetPx = padPx + lineHeightPx - kTextClickDownOffsetPx - kTextInputDownBiasPx;
     double offsetPt = offsetPx * 72.0 / kDpi / scale;
     return clickYpt + offsetPt;
+}
+
+struct TextBoxClickPlacement {
+    AdaptiveTextPreset preset;
+    double left = 0.0, top = 0.0;
+    TextWritingMode mode = TextWritingMode::Horizontal;
+};
+
+[[nodiscard]] static TextBoxClickPlacement NewTextBoxPlacement(int pageIndex, double x, double y) {
+    TextBoxClickPlacement result;
+    result.preset = ComputeAdaptiveTextPresetForPage(pageIndex, g_textFontPt);
+    const double scale = g_pdf.scale > 0.0 ? g_pdf.scale : 1.0;
+    result.left = x - kTextClickLeftOffsetPx * 72.0 / kDpi / scale;
+    result.top = NewTextBoxTopFromClickY(y, result.preset.fontPt, g_textFontName, scale);
+    if (g_textBoxVertical) {
+        result.mode = TextWritingMode::VerticalRl;
+        Annotation metric;
+        metric.fontPt = result.preset.fontPt;
+        metric.fontName = g_textFontName;
+        const double pad = kTextPadPx * 72.0 / kDpi;
+        const double cell = TextBoxReeditLineHeightPt(metric);
+        result.preset.widthPt = result.preset.heightPt = cell + pad * 2;
+        result.left = x - pad;
+        result.top = y + pad - kTextInputDownBiasPx * 72.0 / kDpi / scale;
+    }
+    return result;
 }
 
 static double PanAxisAngleTan() {

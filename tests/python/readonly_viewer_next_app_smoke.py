@@ -165,10 +165,14 @@ def main():
                        help='Check the formal PDF menu, grayscale pixels, and process-only setting.')
     scope.add_argument('--pdf-rotation-only', action='store_true',
                        help='Check all view/intrinsic angles, tab isolation, selection and transient rotation.')
+    scope.add_argument('--file-range-only', action='store_true',
+                       help='Check precise bounded binary/text reads and canceled or invalid range changes.')
+    scope.add_argument('--focus-only', action='store_true',
+                       help='Check full reading space and the menu commands that replace the toolbar.')
     scope.add_argument('--search-overview-only', action='store_true',
                        help='Check search-hit scrollbar marks and view/tab cancellation in an isolated copy.')
     args = parser.parse_args()
-    protect_entry_point(interactive=True)
+    protect_entry_point(interactive=not (args.pdf_rotation_only or args.file_range_only or args.focus_only))
     exe = args.exe.resolve(strict=True)
     global WINDOW_CLASS
     WINDOW_CLASS = 'PdfReadonlyViewerWindow' if args.variant == 'standard' else 'PdfReadonlyViewerNextWindow'
@@ -240,6 +244,18 @@ def main():
         send(hwnd, 0x8000 + 4, 401, 0)
         require('検索対象 alpha' in text(editor), 'original reading survives license navigation')
 
+    def range_dialog(root):
+        found = []
+        @enum_callback
+        def visit(hwnd, _):
+            name = ct.create_unicode_buffer(128)
+            u.GetClassNameW(hwnd, name, len(name))
+            if name.value == 'PdfNoteLargeTextRangeDialog' and u.GetParent(hwnd) == root:
+                found.append(hwnd)
+            return True
+        u.EnumWindows(visit, 0)
+        return found[0] if found else None
+
     def run(path, check, executable=exe, restore_session=False, extra_arguments=()):
         startup = subprocess.STARTUPINFO(); startup.dwFlags = subprocess.STARTF_USESHOWWINDOW; startup.wShowWindow = 4
         arguments = [str(executable)] if restore_session else ([str(executable), str(path)] if path else [str(executable), '--folder', str(output)])
@@ -249,7 +265,7 @@ def main():
         try:
             wait_for(lambda: find_window(process.pid), 'prototype root')
             hwnd = find_window(process.pid)
-            wait_for(lambda: u.IsWindowVisible(hwnd), 'displayed prototype')
+            wait_for(lambda: u.IsWindowVisible(hwnd) or (args.file_range_only and range_dialog(hwnd)), 'displayed prototype or initial range chooser')
             time.sleep(0.3)
             check(hwnd)
             evidence.append(path.name if path else 'empty')
@@ -261,6 +277,219 @@ def main():
                 process.terminate(); process.wait(timeout=5)
                 raise RuntimeError('Owned test process did not close')
             require(process.returncode == 0, f'prototype exit {process.returncode}')
+
+    if args.focus_only:
+        class CopyData(ct.Structure):
+            _fields_ = [('tag', ct.c_size_t), ('size', wt.DWORD), ('data', ct.c_void_p)]
+
+        def focus_check(hwnd):
+            def visible(control):
+                return bool(u.IsWindowVisible(u.GetDlgItem(hwnd, control)))
+
+            def fills_client(control, gutter=0):
+                root = wt.RECT(); child = wt.RECT()
+                require(u.GetClientRect(hwnd, ct.byref(root)), 'viewer client dimensions')
+                require(u.GetWindowRect(u.GetDlgItem(hwnd, control), ct.byref(child)), 'reader viewport dimensions')
+                require(0 <= root.right - (child.right - child.left) <= gutter and child.bottom - child.top == root.bottom,
+                        'reading viewport fills client area')
+
+            bar = u.GetMenu(hwnd)
+            view, tabs = u.GetSubMenu(bar, 1), u.GetSubMenu(bar, 5)
+            require(view and tabs, 'view and tab menus are available')
+            send(hwnd, 0x0111, 116)
+            for control in (101, 103, 106, 107, 109, 110, 112, 116, 810, 811, 812, 813, 817, 818):
+                require(not visible(control), f'concentration hides control {control}')
+            fills_client(104, u.GetDpiForWindow(hwnd) // 8 + 1)
+            u.GetWindowLongPtrW.argtypes = [wt.HWND, ct.c_int]
+            u.GetWindowLongPtrW.restype = ct.c_ssize_t
+            u.GetMenuStringW.argtypes = [wt.HMENU, wt.UINT, wt.LPWSTR, ct.c_int, wt.UINT]
+            u.GetMenuItemCount.argtypes = [wt.HMENU]
+            u.GetMenuItemRect.argtypes = [wt.HWND, wt.HMENU, wt.UINT, ct.POINTER(wt.RECT)]
+            window_rect, item_rect = wt.RECT(), wt.RECT()
+            require(u.GetWindowRect(hwnd, ct.byref(window_rect)), 'window bounds for menu placement')
+            require(u.GetMenuItemRect(hwnd, bar, u.GetMenuItemCount(bar) - 1, ct.byref(item_rect)), 'last menu bounds')
+            require(0 <= window_rect.right - item_rect.right <= u.GetDpiForWindow(hwnd) // 4,
+                    'topmost command is right aligned')
+
+            def pin_state(pinned):
+                require(bool(u.GetWindowLongPtrW(hwnd, -20) & 8) == pinned, 'viewer topmost state')
+                label = ct.create_unicode_buffer(64)
+                require(u.GetMenuStringW(bar, 126, label, len(label), 0), 'topmost command on menu bar')
+                expected = ('最前面を解除' if pinned else '最前面に固定') if locale == 'ja' else ('Unpin from Top' if pinned else 'Pin on Top')
+                require(label.value == expected, 'topmost command displays the next action')
+
+            pin_state(False)
+            send(hwnd, 0x0111, 126)
+            pin_state(True)
+            screenshot(hwnd, output / 'focus-pinned.png')
+            send(hwnd, 0x0111, 126)
+            pin_state(False)
+            fills_client(104, u.GetDpiForWindow(hwnd) // 8 + 1)
+            send(hwnd, 0x0117, view)
+            require(u.GetMenuState(view, 116, 0) & 8, 'focus menu is checked')
+            send(hwnd, 0x0111, 107)
+            require(text(u.GetDlgItem(hwnd, 104)).startswith('# '), 'view command works with hidden toolbar')
+            send(hwnd, 0x0111, 125)
+            require(visible(810), 'find menu opens a temporary search field')
+            set_text(u.GetDlgItem(hwnd, 810), 'alpha')
+            send(hwnd, 0x0111, 811)
+            require(not visible(810), 'running a search returns space to the document')
+            fills_client(104, u.GetDpiForWindow(hwnd) // 8 + 1)
+            buffer = ct.create_unicode_buffer(str(pdf))
+            incoming = CopyData(0x504E5254, ct.sizeof(buffer), ct.addressof(buffer))
+            require(send(hwnd, 0x004A, hwnd, ct.addressof(incoming)), 'open a second, PDF tab')
+            require(visible(1002), 'PDF tab is shown in concentration mode')
+            fills_client(1002)
+            send(hwnd, 0x0117, tabs)
+            send(hwnd, 0x0126, 0, tabs)
+            require(visible(104) and not visible(1002), 'tab menu switches back to the text tab')
+            screenshot(hwnd, output / 'full-focus.png')
+            send(hwnd, 0x0111, 116)
+            for control in (101, 103, 107, 810, 813, 817, 818):
+                require(visible(control), f'normal mode restores control {control}')
+
+        run(md, focus_check)
+        print('PASS: full focus viewport, menu switching, temporary search and restored controls')
+        print(f'Evidence: {output}')
+        return
+
+    if args.file_range_only:
+        import msvcrt
+        kernel = ct.WinDLL('kernel32', use_last_error=True)
+        kernel.DeviceIoControl.argtypes = [wt.HANDLE, wt.DWORD, wt.LPVOID, wt.DWORD,
+                                          wt.LPVOID, wt.DWORD, ct.POINTER(wt.DWORD), wt.LPVOID]
+        kernel.DeviceIoControl.restype = wt.BOOL
+        kernel.SetFilePointerEx.argtypes = [wt.HANDLE, ct.c_longlong, wt.LPVOID, wt.DWORD]
+        kernel.SetFilePointerEx.restype = wt.BOOL
+        kernel.SetEndOfFile.argtypes = [wt.HANDLE]
+        kernel.SetEndOfFile.restype = wt.BOOL
+        huge = output / 'sparse-terabyte.bin'
+        target = (1 << 39) + 123
+        payload = b'\x00' + bytes(range(65, 96))
+        with huge.open('w+b') as file:
+            returned = wt.DWORD()
+            require(kernel.DeviceIoControl(wt.HANDLE(msvcrt.get_osfhandle(file.fileno())), 0x900C4,
+                    None, 0, None, 0, ct.byref(returned), None), 'mark owned fixture sparse before extending')
+            # CRT truncate can explicitly zero-fill on Windows, even for a sparse file.
+            # Extend through Win32 after enabling sparse holes; never write a terabyte.
+            handle = wt.HANDLE(msvcrt.get_osfhandle(file.fileno()))
+            require(kernel.SetFilePointerEx(handle, 1 << 40, None, 0) and kernel.SetEndOfFile(handle),
+                    'extend sparse fixture without zero-filling')
+            file.seek(target); file.write(payload)
+            file.seek(target + 65536); file.write(b'A' * 32)
+            file.seek((1 << 40) - 16); file.write(b'END OF FILE DATA')
+        def choose(hwnd):
+            u.PostMessageW(hwnd, 0x0111, 112, 0)
+            wait_for(lambda: range_dialog(hwnd), 'range chooser')
+            return range_dialog(hwnd)
+
+        def apply(hwnd, dialog, offset, count):
+            set_text(u.GetDlgItem(dialog, 608), offset)
+            set_text(u.GetDlgItem(dialog, 609), count)
+            require(u.IsWindowEnabled(u.GetDlgItem(dialog, 605)), 'valid byte range is enabled')
+            send(dialog, 0x0111, 605)
+            wait_for(lambda: range_dialog(hwnd) is None, 'confirmed range closes chooser')
+            wait_for(lambda: text(u.GetDlgItem(hwnd, 104)), 'selected content')
+
+        def exact_binary(hwnd):
+            dialog = range_dialog(hwnd)
+            require(dialog is not None, 'large binary prompts before allocation')
+            require(text(u.GetDlgItem(dialog, 609)) == '65536', '64 KiB default even for 1 TiB')
+            offset_edit = u.GetDlgItem(dialog, 608)
+            set_text(offset_edit, '0' * 32)
+            send(offset_edit, 0x0102, ord('1'))
+            require(text(offset_edit) == '0' * 32, 'overlong keyboard input is rejected before the native limit path')
+            send(offset_edit, 0x0102, 2)
+            require(text(offset_edit) == '0' * 32, 'unsupported control character is suppressed')
+            send(offset_edit, 0x0102, 1)
+            send(offset_edit, 0x0102, ord('0'))
+            require(text(offset_edit) == '0', 'select-all allows replacing a full input field')
+            for offset, count in [('0', '0'), ('-1', '1'), ('0xg', '32'),
+                                  ('18446744073709551616', '1'), (str(1 << 40), '1'),
+                                  ('0', str(256*1024*1024+1)), (str((1 << 40)-8), '16')]:
+                set_text(u.GetDlgItem(dialog, 608), offset)
+                set_text(u.GetDlgItem(dialog, 609), count)
+                require(not u.IsWindowEnabled(u.GetDlgItem(dialog, 605)), 'invalid range disables reading')
+                send(dialog, 0x0111, 605)
+                require(range_dialog(hwnd) == dialog, 'posted invalid confirmation is rejected')
+            apply(hwnd, dialog, hex(target), '0x20')
+            wait_for(lambda: u.IsWindowVisible(hwnd), 'root shown after initial range')
+            editor = u.GetDlgItem(hwnd, 104)
+            shown = text(editor)
+            require(f'{target:08x}  00 41 42 43' in shown, 'exact unaligned source address and bytes; no newline skip')
+            require('51 52 53 54' in shown and '60 ' not in shown, 'exact 32-byte read')
+            require(u.IsWindowVisible(u.GetDlgItem(hwnd, 112)), 'binary range action is available')
+            screenshot(hwnd, output / 'exact-binary-range.png')
+            require(text(u.GetDlgItem(hwnd, 108)) == ('16進数' if locale == 'ja' else 'Hex'), 'hex button clearly names its format')
+            require(text(u.GetDlgItem(hwnd, 124)) == ('バイナリ' if locale == 'ja' else 'Binary'), 'separate binary button')
+            send(hwnd, 0x0111, 124)
+            bits = text(editor)
+            require(f'{target:08x}  00000000 01000001 01000010' in bits and '|.ABCDEFG|' in bits,
+                    'binary view shows MSB-first eight-bit bytes with ASCII')
+            require(f'{target+8:08x}  01001000' in bits, 'binary rows advance by eight source bytes')
+            screenshot(hwnd, output / 'binary-bits-view.png')
+            class CopyData(ct.Structure):
+                _fields_ = [('tag', ct.c_size_t), ('size', wt.DWORD), ('data', ct.c_void_p)]
+            buffer = ct.create_unicode_buffer(str(md))
+            incoming = CopyData(0x504E5254, ct.sizeof(buffer), ct.addressof(buffer))
+            require(send(hwnd, 0x004A, hwnd, ct.addressof(incoming)), 'open owned second tab')
+            require('検索対象 alpha' in text(editor), 'second tab keeps its ordinary document view')
+            send(hwnd, 0x8000 + 4, 401, 0)
+            require(text(editor) == bits, 'binary view and range belong to the original tab')
+            send(hwnd, 0x0111, 108)
+            require(text(editor) == shown, 'hex view can be restored without changing source bytes')
+            dialog = choose(hwnd)
+            require(text(u.GetDlgItem(dialog, 608)) == str(target), 'reopening preserves exact offset below slider resolution')
+            send(dialog, 0x0111, 611)
+            require(text(u.GetDlgItem(dialog, 608)) == str(target + 32), 'next moves by current byte count')
+            send(dialog, 0x0111, 610)
+            require(text(u.GetDlgItem(dialog, 608)) == str(target), 'previous returns to exact byte offset')
+            screenshot(dialog, output / 'byte-range-chooser.png')
+            set_text(u.GetDlgItem(dialog, 608), '0')
+            send(dialog, 0x0111, 606)
+            require(text(editor) == shown, 'cancel leaves displayed bytes unchanged')
+            send(hwnd, 0x0111, 124)
+            dialog = choose(hwnd)
+            apply(hwnd, dialog, str(target + 65536), '32')
+            wait_for(lambda: f'{target+65536:08x}  01000001 01000001' in text(editor), 'binary mode survives read-range changes')
+            send(hwnd, 0x0111, 108)
+            wait_for(lambda: f'{target+65536:08x}  41 41 41' in text(editor), 'ASCII-only slice retains binary format and absolute address')
+            dialog = choose(hwnd)
+            apply(hwnd, dialog, str((1 << 40)-16), '16')
+            wait_for(lambda: 'END OF FILE DATA' in text(editor), 'last byte is included without reading past EOF')
+            require(not u.IsWindowEnabled(u.GetDlgItem(choose(hwnd), 611)), 'no next range past EOF')
+            send(range_dialog(hwnd), 0x0111, 606)
+
+        run(huge, exact_binary)
+        # A single long text line used to lose up to 64 KiB at every range start.
+        long_line = output / 'single-long-line.txt'
+        long_line.write_bytes(b'x' * 100000 + b'EXACT_TEXT_RANGE' + b'y' * 100000)
+        digest = hashlib.sha256(long_line.read_bytes()).hexdigest()
+        def text_range(hwnd):
+            editor = u.GetDlgItem(hwnd, 104)
+            require(u.IsWindowVisible(u.GetDlgItem(hwnd, 112)), 'ordinary text can select a range too')
+            apply(hwnd, choose(hwnd), '100000', '16')
+            wait_for(lambda: text(editor) == 'EXACT_TEXT_RANGE', 'long-line range starts at selected byte without skipping')
+            send(hwnd, 0x0111, 108)
+            apply(hwnd, choose(hwnd), '100001', '15')
+            wait_for(lambda: '000186a1  58 41 43 54' in text(editor), 'explicit hex mode survives range changes in ordinary text')
+            shown = text(editor)
+            dialog = choose(hwnd)
+            # Change the source after choosing, before confirming: do not publish a short read.
+            with long_line.open('r+b') as file: file.truncate(100001)
+            send(dialog, 0x0111, 605)
+            failure = '読込範囲が無効' if locale == 'ja' else 'The range is invalid'
+            wait_for(lambda: failure in text(u.GetDlgItem(hwnd, 817)), 'external shrink reports read failure')
+            require(text(editor) == shown, 'file shrink failure retains previous display')
+        run(long_line, text_range)
+        # This fixture is deliberately shortened by the test, not by the viewer.
+        require(hashlib.sha256(long_line.read_bytes()).hexdigest() != digest, 'external-shrink fixture executed')
+        with huge.open('rb') as file:
+            file.seek(target); require(file.read(32) == payload, 'original sparse bytes preserved')
+        require(huge.stat().st_size == 1 << 40, 'original sparse file length preserved')
+        print('PASS: hex/binary/ASCII views and tab isolation; exact huge-file ranges, 7 invalid inputs, cancel and external shrink')
+        print(f'Evidence: {output}')
+        return
 
     if args.pdf_rotation_only:
         import math
@@ -278,7 +507,7 @@ def main():
                 page.set_rotation(intrinsic * 90)
             document.save(path); document.close()
             sidecar = path.with_suffix('.clrop')
-            sidecar.write_text(json.dumps({'version': 1,
+            sidecar.write_text(json.dumps({'version': 2,
                 'pdf_id': {'path': path.name, 'size': path.stat().st_size, 'page_count': 2}, 'pages': [
                 {'page': index, 'items': [{'type': 'shape', 'id': f'box-{index}',
                  'created': '2026-10-25T00:00:00Z', 'updated': '2026-10-25T00:00:00Z', 'alpha': 1,
@@ -286,7 +515,14 @@ def main():
                  'shape_kind': 'rectangle', 'shape_draw_mode': 'fill'},
                  {'type': 'text', 'id': f'text-{index}', 'created': '2026-10-25T00:00:00Z',
                   'updated': '2026-10-25T00:00:00Z', 'bbox': [150, 440, 180, 40],
-                  'color': '#FF8000', 'content': 'CLROP TEXT', 'pt': 20}]} for index in range(2)]}), encoding='utf-8')
+                  'color': '#FF8000', 'content': 'CLROP TEXT', 'lines': ['CLROP TEXT'], 'font': 'Arial', 'pt': 20},
+                 *[{'type': 'shape', 'id': f'star-{mode}-{index}',
+                    'created': '2026-11-06T00:00:00Z', 'updated': '2026-11-06T00:00:00Z',
+                    'bbox': [left, 300, 80, 80], 'color': color, 'alpha': 1,
+                    'width': 2, 'shape_kind': 'star', 'shape_draw_mode': mode,
+                    'shape_angle': 0.37 if mode != 'fill' else 0.0}
+                   for mode, left, color in (('fill', 60, '#C000C0'), ('outline', 190, '#00C0C0'), ('line', 320, '#C0C000'))]
+                 ]} for index in range(2)]}), encoding='utf-8')
             originals[path] = hashlib.sha256(path.read_bytes()).hexdigest()
             originals[sidecar] = hashlib.sha256(sidecar.read_bytes()).hexdigest()
             fixtures.append(path)
@@ -344,6 +580,31 @@ def main():
             require(orange, 'CLROP text remains visible')
             require((orange[2]-orange[0] < orange[3]-orange[1]) == bool((intrinsic+turns) % 2),
                     'CLROP text content rotates with the paper')
+            text_extent = sorted(((orange[2]-orange[0])/scale, (orange[3]-orange[1])/scale))
+            require(12 <= text_extent[0] <= 22 and 100 <= text_extent[1] <= 145,
+                    f'current editor 20-point Arial text retains physical size: {text_extent}')
+            def paper_pixel(x, y):
+                w, h = 580, 780
+                for _ in range((intrinsic+turns) % 4): x, y, w, h = h-y, x, h, w
+                return (round(origin[0]+x*scale), round(origin[1]+y*scale))
+            def colored_near(x, y, expected=None):
+                px, py = paper_pixel(x, y)
+                return any((max(abs(a-b) for a, b in zip(actual.getpixel((xx, yy))[:3], expected)) < 45
+                            if expected else min(actual.getpixel((xx, yy))[:3]) < 220)
+                           for xx in range(px-2, px+3) for yy in range(py-2, py+3))
+            # Pentagram diagonals differ from the ten-edge outline. Test a
+            # point on a diagonal, away from both the outer edge and centre.
+            radius = 80/(2*math.sin(2*math.pi/5))
+            cy = 40+radius*(1-math.cos(math.pi/5))/2
+            diagonal_x = 40+radius*math.sin(math.pi/5)/2
+            diagonal_y = cy+radius*(math.cos(math.pi/5)-1)/2
+            dx, dy = diagonal_x-40, diagonal_y-40
+            diagonal_x = 40+dx*math.cos(0.37)-dy*math.sin(0.37)
+            diagonal_y = 40+dx*math.sin(0.37)+dy*math.cos(0.37)
+            require(colored_near(60-20+40, 510+cy, (192,0,192)), 'filled star retains its coloured centre')
+            require(not colored_near(190-20+40, 510+cy), 'star outline retains its empty centre')
+            require(colored_near(320-20+diagonal_x, 510+diagonal_y, (192,192,0)), 'rotated line star retains the pentagram diagonal')
+            require(not colored_near(190-20+diagonal_x, 510+diagonal_y), 'outline star excludes pentagram diagonals')
             # Native CLROP bbox projected independently, including the CropBox offset.
             x, y, w, h = 260, 240, 580, 780  # center relative to cropped page, top-left origin
             for _ in range((intrinsic + turns) % 4): x, y, w, h = h-y, x, h, w

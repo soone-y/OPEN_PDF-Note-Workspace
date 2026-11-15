@@ -495,6 +495,7 @@ function Invoke-RipgrepScan {
         [Parameter(Mandatory)][string]$Label,
         [Parameter(Mandatory)][string]$Pattern,
         [string[]]$AllowLinePatterns = @(),
+        [switch]$Multiline,
         [string[]]$IncludeGlobs = @(
             "*.c", "*.cc", "*.cpp", "*.cxx", "*.c++",
             "*.h", "*.hh", "*.hpp", "*.hxx", "*.ipp", "*.inl",
@@ -506,6 +507,7 @@ function Invoke-RipgrepScan {
         "-n",
         "-S"
     )
+    if ($Multiline) { $args += "--multiline" }
     foreach ($glob in $IncludeGlobs) {
         $args += @("--glob", $glob)
     }
@@ -632,6 +634,12 @@ function Invoke-SafetyScans {
         '\\src\\file_output\\file_output\.cpp:\d+:.*\b(?:IFileSaveDialog|CLSID_FileSaveDialog)\b'
     )
 
+    $applicationSourceGlobs = @(
+        "src/**/*.c", "src/**/*.cc", "src/**/*.cpp", "src/**/*.cxx", "src/**/*.c++",
+        "src/**/*.h", "src/**/*.hh", "src/**/*.hpp", "src/**/*.hxx", "src/**/*.ipp",
+        "src/**/*.inl", "src/**/*.inc", "src/**/*.cppinc"
+    )
+
     $scanRules = @(
         [pscustomobject]@{
             Label = "Network API scan"
@@ -690,15 +698,95 @@ function Invoke-SafetyScans {
             # These tests replace socket creation with a mandatory exception.
             # The complete mock line is allowed, never an actual socket call.
             AllowLinePatterns = @('^\.[\\/]tests[\\/]python[\\/]test_site_validation\.py:\d+:\s*with mock\.patch\("socket\.socket", side_effect=AssertionError\("network forbidden"\)\):\s*$')
+        },
+        [pscustomobject]@{
+            Label = "Unsafe process-launch shortcut scan"
+            IncludeGlobs = $applicationSourceGlobs
+            Multiline = $true
+            Pattern = '\b(?:WinExec|_?wsystem|_?popen|_wpopen|_(?:w?spawn)[a-z]*|CreateProcessAsUser[AW]?|CreateProcessWithLogonW|CreateProcessWithTokenW|ShellExecuteEx[AW]?)\s*\(|\bsystem\s*\('
+            AllowLinePatterns = @()
+        },
+        [pscustomobject]@{
+            Label = "Unsafe DLL search-path scan"
+            IncludeGlobs = $applicationSourceGlobs
+            Multiline = $true
+            Pattern = '\b(?:LoadLibrary[AW]?|LoadLibraryEx[AW]?|SetDllDirectory[AW]?|SetDefaultDllDirectories|AddDllDirectory)\s*\('
+            AllowLinePatterns = @(
+                '^\.[\\/]src[\\/]core[\\/]app_core\.cpp:\d+:\s*s_uxtheme = LoadLibraryExW\(L"uxtheme\.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32\);\s*$',
+                '^\.[\\/]src[\\/]recovery[\\/]stage_recovery_window\.cpp:\d+:\s*LoadLibraryExW\(L"Msftedit\.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32\);\s*$',
+                '^\.[\\/]src[\\/]ui[\\/]window_corners\.h:\d+:\s*const HMODULE module = LoadLibraryExW\(L"dwmapi\.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32\);\s*$',
+                '^\.[\\/]src[\\/]features[\\/]automation[\\/]main_ui_automation\.cppinc:\d+:\s*HMODULE module = LoadLibraryExW\(L"(?:oleaut32|oleacc)\.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32\);\s*$',
+                '^\.[\\/]src[\\/]ui[\\/]core[\\/]main_view_layout\.cppinc:\d+:\s*(?:s_msftedit = LoadLibraryExW\(L"Msftedit\.dll"|s_riched20 = LoadLibraryExW\(L"Riched20\.dll"), nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32\);\s*$',
+                '^\.[\\/]src[\\/]readonly_viewer[\\/]main\.cpp:\d+:\s*(?:HMODULE dwmapi = LoadLibraryExW\(L"dwmapi\.dll"|g_richEditModule = LoadLibraryExW\(L"Msftedit\.dll"), nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32\);\s*$'
+            )
+        },
+        [pscustomobject]@{
+            Label = "Autostart and service persistence scan"
+            IncludeGlobs = $applicationSourceGlobs
+            Multiline = $true
+            Pattern = '\b(?:RegCreateKey(?:Ex)?[AW]?|RegSetKeyValue[AW]?|RegSetValue(?:Ex)?[AW]?|SHSetValue[AW]?|CreateService[AW]?|ChangeServiceConfig[AW]?|OpenSCManager[AW]?|StartService[AW]?|SHSetKnownFolderPath[AW]?)\s*\(|(?i:Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\(?:Run|RunOnce))|\b(?:CLSID_TaskScheduler|Schedule\.Service|FOLDERID_(?:Startup|CommonStartup)|CSIDL_(?:STARTUP|COMMON_STARTUP))\b'
+            AllowLinePatterns = @()
+        },
+        [pscustomobject]@{
+            Label = "Credential access API scan"
+            IncludeGlobs = $applicationSourceGlobs
+            Multiline = $true
+            Pattern = '\b(?:Cred(?:Read|Write|Enumerate|Delete)[AW]?|Lsa(?:Retrieve|Store)PrivateData|CryptUnprotectData)\s*\('
+            AllowLinePatterns = @()
+        },
+        [pscustomobject]@{
+            Label = "Ambient environment API scan"
+            IncludeGlobs = $applicationSourceGlobs
+            Multiline = $true
+            Pattern = '\b(?:(?:Get|Set)Environment(?:Variable|Strings)[AW]?|_?w?getenv(?:_s)?|_w?dupenv_s|_?w?putenv(?:_s)?)\s*\('
+            # Existing reads, test controls, and child-environment block preparation are narrowly allowlisted.
+            AllowLinePatterns = @(
+                '^\.[\\/]src[\\/]ui[\\/]dialogs[\\/]dialogs\.cpp:\d+:\s*const DWORD chars = GetEnvironmentVariableW\(L"USERPROFILE", nullptr, 0\);\s*$',
+                '^\.[\\/]src[\\/]ui[\\/]dialogs[\\/]dialogs\.cpp:\d+:\s*const DWORD copied = GetEnvironmentVariableW\(L"USERPROFILE", value\.data\(\), chars\);\s*$',
+                '^\.[\\/]src[\\/]core[\\/]fault_injection\.h:\d+:\s*DWORD len = GetEnvironmentVariableW\(name, nullptr, 0\);\s*$',
+                '^\.[\\/]src[\\/]core[\\/]fault_injection\.h:\d+:\s*DWORD got = GetEnvironmentVariableW\(name, out->data\(\), len\);\s*$',
+                '^\.[\\/]src[\\/]features[\\/]automation[\\/]main_ui_automation\.cppinc:\d+:\s*if \(GetEnvironmentVariableW\(L"PDF_NOTE_SMALL_UIA_CARET_PROBE", enableUia, 2\) != 1 \|\| enableUia\[0\] != L''1''\) \{\s*$',
+                '^\.[\\/]src[\\/]features[\\/]automation[\\/]main_ui_automation\.cppinc:\d+:\s*if \(!SetEnvironmentVariableW\(L"PDF_NOTE_SMALL_ENABLE_FAULT_INJECTION", L"1"\)\) return false;\s*$',
+                '^\.[\\/]src[\\/]features[\\/]automation[\\/]main_ui_automation\.cppinc:\d+:\s*return SetEnvironmentVariableW\(L"PDF_NOTE_SMALL_THROW_POINT", point \? point : L""\);\s*$',
+                '^\.[\\/]src[\\/]features[\\/]automation[\\/]main_ui_automation\.cppinc:\d+:\s*SetEnvironmentVariableW\(L"PDF_NOTE_SMALL_ENABLE_FAULT_INJECTION", nullptr\);\s*$',
+                '^\.[\\/]src[\\/]features[\\/]automation[\\/]main_ui_automation\.cppinc:\d+:\s*SetEnvironmentVariableW\(L"PDF_NOTE_SMALL_THROW_POINT", nullptr\);\s*$',
+                '^\.[\\/]src[\\/]office[\\/]work_paths\.h:\d+:\s*LPWCH raw = GetEnvironmentStringsW\(\);\s*$',
+                '^\.[\\/]src[\\/]recovery[\\/]stage_recovery_process\.cpp:\d+:\s*LPWCH block = GetEnvironmentStringsW\(\);\s*$'
+            )
+        },
+        [pscustomobject]@{
+            Label = "Explicit child temp/profile environment mapping scan"
+            IncludeGlobs = $applicationSourceGlobs
+            Multiline = $true
+            # Hex escapes preserve literal quotes when Windows PowerShell calls rg.exe.
+            Pattern = '\bvalues\b.*\b(?:TEMP|TMP|APPDATA|LOCALAPPDATA|USERPROFILE|HOME)\b|\[\s*L?\x22(?:TEMP|TMP|APPDATA|LOCALAPPDATA|USERPROFILE|HOME)\x22\s*\]\s*=(?:[^=]|$)|\{L\x22TEMP\x22, L\x22TMP\x22, L\x22APPDATA\x22, L\x22LOCALAPPDATA\x22, L\x22USERPROFILE\x22, L\x22HOME\x22\}'
+            AllowLinePatterns = @(
+                '^\.[\\/]src[\\/]office[\\/]work_paths\.h:\d+:\s*values\[L"USERPROFILE"\] = local\.wstring\(\);\s*$',
+                '^\.[\\/]src[\\/]office[\\/]work_paths\.h:\d+:\s*values\[L"HOME"\] = local\.wstring\(\);\s*$',
+                '^\.[\\/]src[\\/]office[\\/]work_paths\.h:\d+:\s*values\[L"APPDATA"\] = \(local / L"appdata"\)\.wstring\(\);\s*$',
+                '^\.[\\/]src[\\/]office[\\/]work_paths\.h:\d+:\s*values\[L"LOCALAPPDATA"\] = \(local / L"localappdata"\)\.wstring\(\);\s*$',
+                '^\.[\\/]src[\\/]office[\\/]work_paths\.h:\d+:\s*values\[L"TEMP"\] = \(local / L"temp"\)\.wstring\(\);\s*$',
+                '^\.[\\/]src[\\/]office[\\/]work_paths\.h:\d+:\s*values\[L"TMP"\] = \(local / L"temp"\)\.wstring\(\);\s*$',
+                '^\.[\\/]src[\\/]recovery[\\/]stage_recovery_process\.cpp:\d+:\s*\{L"TEMP", L"TMP", L"APPDATA", L"LOCALAPPDATA", L"USERPROFILE", L"HOME"\}\)\s*$'
+            )
+        },
+        [pscustomobject]@{
+            Label = "Implicit OS temp/profile path scan"
+            IncludeGlobs = $applicationSourceGlobs
+            Multiline = $true
+            Pattern = '\b(?:GetTempPath(?:2)?[AW]?|GetTempFileName[AW]?|temp_directory_path)\s*\(|\b(?:FOLDERID_(?:Local|Roaming)AppData|CSIDL_(?:LOCAL_APPDATA|APPDATA))\b'
+            AllowLinePatterns = @()
         }
     )
 
     foreach ($rule in $scanRules) {
+        $multiline = $null -ne $rule.PSObject.Properties["Multiline"] -and $rule.Multiline
         Invoke-RipgrepScan `
             -Label $rule.Label `
             -IncludeGlobs $rule.IncludeGlobs `
             -Pattern $rule.Pattern `
-            -AllowLinePatterns $rule.AllowLinePatterns
+            -AllowLinePatterns $rule.AllowLinePatterns `
+            -Multiline:$multiline
     }
     Assert-FileOutputSystemDialogPolicy
 }
@@ -920,6 +1008,19 @@ try {
     }
 
     if (-not $SkipUiAutomation) {
+        Invoke-Step -Name "Search Auxiliary Window Close Tests" -Action {
+            Invoke-LoggedCommand -FilePath $pythonExe -Arguments @(
+                "-B", (Join-Path $repoRoot "tools/dev/isolated_app_test.py"),
+                "--timeout", "90", "--label", "Search auxiliary window close tests", "--",
+                $pythonExe, "-B", (Join-Path $repoRoot "tests/python/search_cancel_app_smoke.py"),
+                "--locale", "ja", "--exe", (Join-Path $binaryOutputDir "pdf_note_workspace.exe"),
+                "--scope-close-only"
+            )
+            $closeTrace = [System.IO.File]::ReadAllText($script:CurrentStepLogPath)
+            if ($closeTrace -notmatch '(?m)^Search auxiliary close contract PASS: windows=3 routes=4 cases=14\r?$') {
+                throw "Missing complete auxiliary-window close evidence (3 windows, 4 routes, 14 cases)."
+            }
+        }
         Invoke-Step -Name "UI Automation Rollback Tests" -Action {
             # The complete suite measured over 120 seconds before shutdown.
             # Use an explicit bounded budget; focused runs keep their default,

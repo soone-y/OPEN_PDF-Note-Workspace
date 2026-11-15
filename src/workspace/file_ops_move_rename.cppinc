@@ -2360,39 +2360,63 @@ static bool EnsureOperationReadyForPath(HWND owner,
     return true;
 }
 
-static void AfterOperationReopenCurrentTarget(HWND owner,
-                                              const std::filesystem::path& source,
-                                              const std::filesystem::path& dest,
-                                              bool isPdf,
-                                              const OperationNoteChange* noteChange = nullptr) {
-    const bool reopenPairedNote =
-        isPdf && noteChange && noteChange->enabled &&
-        !g_currentNotePath.empty() &&
-        AreSameLocalPath(std::filesystem::path(g_currentNotePath), noteChange->src);
-    const bool currentNoteMoved = !isPdf && !g_currentNotePath.empty() &&
-        AreSameLocalPath(std::filesystem::path(g_currentNotePath), source);
-    // The committed alias already points to the destination. Retire the old
-    // view path before reopening anything: load/capture callbacks must not
-    // allocate a second identity for the now-missing source path.
-    if (currentNoteMoved || reopenPairedNote)
-        ClearNoteEditorSilently(owner, reopenPairedNote ? noteChange->dest.wstring() : dest.wstring());
+struct OperationActiveNoteMove {
+    std::filesystem::path source;
+    std::wstring destination;
+    std::optional<DocumentOpenLockCandidate> destinationLock;
+
+    // Reserve the new path while the transaction can still be rolled back.
+    // Keep the source lock until the on-disk operation is durable.
+    [[nodiscard]] bool Prepare(const OperationTransaction& transaction, std::wstring* error) {
+        if (g_currentNotePath.empty()) return true;
+        for (const auto& alias : transaction.noteAliases) {
+            if (!AreSameLocalPath(g_currentNotePath, alias.src)) continue;
+            source = alias.src;
+            destination = alias.dest.wstring();
+            destinationLock.emplace(alias.dest, error);
+            return destinationLock->acquired();
+        }
+        return true;
+    }
+};
+
+[[nodiscard]] static bool AfterOperationReopenCurrentTarget(HWND owner,
+                                                            const std::filesystem::path& source,
+                                                            const std::filesystem::path& dest,
+                                                            bool isPdf,
+                                                            OperationActiveNoteMove& activeNote) {
+    const bool movedActiveNote = activeNote.destinationLock.has_value();
+    bool noteOpened = true;
+    if (movedActiveNote) {
+        activeNote.destinationLock->CommitReplacing(activeNote.source);
+        noteOpened = ReloadMovedNoteFile(owner, activeNote.destination);
+    } else if (!isPdf) {
+        const ScopedDocumentOpenLockNoticeSuppression suppressNotice;
+        noteOpened = LoadNoteFile(owner, dest.wstring());
+    }
+    if ((movedActiveNote || !isPdf) && noteOpened) SyncBottomPaneAfterNoteLoad(owner);
+
+    bool pdfOpened = true;
     if (isPdf) {
         EndIntegratedPdfPreviewMode(owner, true);
-        OpenPdfWithAnnotations(owner, dest.wstring());
-    } else {
-        if (LoadNoteFile(owner, dest.wstring())) {
-            SyncBottomPaneAfterNoteLoad(owner);
-        }
-    }
-    if (reopenPairedNote) {
-        if (LoadNoteFile(owner, noteChange->dest.wstring())) {
-            SyncBottomPaneAfterNoteLoad(owner);
-        }
+        pdfOpened = OpenMovedPdfWithAnnotations(owner, source.wstring(), dest.wstring());
     }
     RefreshCurrentSessionFiles();
     SyncLeftPaneSelection();
     RefreshMainWindowUiState(owner);
     RememberCurrentSessionFiles();
+    if (!noteOpened) {
+        const auto message = localization::Text(movedActiveNote
+            ? L"workspace.file_ops.moved_active_note_reload_failed"
+            : L"workspace.file_ops.committed_view_failed");
+        ShowSilentMessageDialog(owner, OperationMenuTitle(), message, SoftNoticeKind::Warning,
+                                {{L"", movedActiveNote ? activeNote.destination : dest.wstring()}});
+    }
+    if (!pdfOpened) {
+        ShowSoftNotice(owner, localization::Text(L"workspace.file_ops.committed_view_failed"),
+                       SoftNoticeKind::Warning);
+    }
+    return noteOpened && pdfOpened;
 }
 
 static void RecordCommittedWorkspaceOperation(const OperationTransaction& transaction) {
@@ -2604,38 +2628,28 @@ static bool ApplyWorkspaceOperationDirection(HWND owner,
                                                 &inverse, state, L"", true);
         }
     };
+    const auto& mainMove = operation.moves.front();
+    const std::filesystem::path reopenedTarget = undo ? mainMove.src : mainMove.dest;
+    const std::filesystem::path previousTarget = undo ? mainMove.dest : mainMove.src;
+    const bool isPdf = IsPdfFile(reopenedTarget) || IsImageFile(reopenedTarget);
+    if (isPdf && AreSameLocalPath(previousTarget, CurrentLogicalPdfPath())) SaveLastPdfViewInfo();
+    OperationActiveNoteMove activeNote;
     if (!WriteOperationTransactionManifest(inverse, "applying", outErr) ||
         !ApplyWorkspaceOperationInverseRewrites(operation, rewriteSource, undo, &inverse, outErr) ||
         !ApplyOperationTransactionMoves(&inverse, outErr) ||
         !ApplyOperationTransactionNoteAliases(&inverse, outErr) ||
         !ApplyOperationTransactionResourceAliases(&inverse, outErr) ||
+        (owner && !activeNote.Prepare(inverse, outErr)) ||
         !WriteOperationTransactionManifest(inverse, "applied", outErr) ||
         !WriteOperationTransactionManifest(inverse, "committed", outErr)) {
         recoverOrBlock("applying");
         return false;
     }
 
-    const auto& mainMove = operation.moves.front();
-    const std::filesystem::path reopenedTarget = undo ? mainMove.src : mainMove.dest;
-    const std::filesystem::path previousTarget = undo ? mainMove.dest : mainMove.src;
-    const bool isPdf = IsPdfFile(reopenedTarget);
-    OperationNoteChange pairedNote;
-    if (isPdf) {
-        for (const auto& alias : operation.noteAliases) {
-            const std::filesystem::path currentNote = undo ? alias.dest : alias.src;
-            if (!g_currentNotePath.empty() &&
-                AreSameLocalPath(std::filesystem::path(g_currentNotePath), currentNote)) {
-                pairedNote.enabled = true;
-                pairedNote.src = currentNote;
-                pairedNote.dest = undo ? alias.src : alias.dest;
-                break;
-            }
-        }
-    }
     if (owner) {
-        AfterOperationReopenCurrentTarget(owner, previousTarget, reopenedTarget, isPdf,
-                                          pairedNote.enabled ? &pairedNote : nullptr);
-        if (isPdf) MovePdfViewInfoPath(previousTarget.wstring(), reopenedTarget.wstring());
+        if (isPdf) (void)MovePdfViewInfoPath(previousTarget.wstring(), reopenedTarget.wstring());
+        // The filesystem history must advance even when a committed file cannot be opened.
+        (void)AfterOperationReopenCurrentTarget(owner, previousTarget, reopenedTarget, isPdf, activeNote);
     }
     if (outApplied) *outApplied = std::move(inverse);
     return true;
@@ -2959,15 +2973,14 @@ static bool RenameOrMoveOperationTarget(HWND owner, bool isPdf, bool renameOnly,
         }
         return false;
     }
-    if (!WriteOperationTransactionManifest(transaction, "applied", &err) ||
+    OperationActiveNoteMove activeNote;
+    if (!activeNote.Prepare(transaction, &err) ||
+        !WriteOperationTransactionManifest(transaction, "applied", &err) ||
         !WriteOperationTransactionManifest(transaction, "committed", &err)) {
         std::wstring recoveryErr;
         bool recovered = RecoverOperationTransactionToOriginalState(&transaction,
                                                                     std::filesystem::path(g_currentSessionPath),
                                                                     &recoveryErr);
-        if (isPdf && recovered) {
-            MovePdfViewInfoPath(dest.wstring(), src.wstring());
-        }
         if (recovered) {
             RestoreCurrentNoteLinkRewriteMemoryState(&noteRewritePlan);
             ShowSilentMessageDialog(
@@ -2987,12 +3000,10 @@ static bool RenameOrMoveOperationTarget(HWND owner, bool isPdf, bool renameOnly,
 
     fault_injection::MaybePauseForCrashTest(L"operation_committed");
     RecordCommittedWorkspaceOperation(transaction);
-    if (!organizing || isCurrentTarget) {
-        AfterOperationReopenCurrentTarget(owner, src, dest, isPdf, noteChange.enabled ? &noteChange : nullptr);
-    }
-    if (isPdf) {
-        MovePdfViewInfoPath(src.wstring(), dest.wstring());
-    }
+    if (isPdf) (void)MovePdfViewInfoPath(src.wstring(), dest.wstring());
+    const bool viewUpdated = (!organizing || isCurrentTarget || activeNote.destinationLock.has_value())
+        ? AfterOperationReopenCurrentTarget(owner, src, dest, isPdf, activeNote)
+        : true;
     if (noteRewritePlan.HasWork()) {
         InvalidateHistoriesAfterNoteRewriteSuccess(noteRewritePlan, isPdf, src, dest);
     }
@@ -3005,7 +3016,7 @@ static bool RenameOrMoveOperationTarget(HWND owner, bool isPdf, bool renameOnly,
     } else if (!isPdf && noteRewritePlan.HasWork()) {
         done += localization::Text(L"workspace.file_ops.4d707f6ff451");
     }
-    if (!organizing) ShowSoftNotice(owner, done);
+    if (!organizing && viewUpdated) ShowSoftNotice(owner, done);
     return true;
 }
 

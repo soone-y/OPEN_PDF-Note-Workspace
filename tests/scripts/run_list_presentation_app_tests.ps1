@@ -49,6 +49,7 @@ try {
     if ($testOutput -notmatch '(?m)^List blank-area PASS:') { throw "Required blank-area pixel cases were not observed: $outputDir" }
     if ($testOutput -notmatch '(?m)^List scroll PASS:') { throw "Required precision-scroll and viewport cases were not observed: $outputDir" }
     if ($testOutput -notmatch '(?m)^List context reload PASS:') { throw "Required directory reload cases were not observed: $outputDir" }
+    if ($testOutput -notmatch '(?m)^Nested sessions PASS:') { throw "Required nested session cases were not observed: $outputDir" }
     Write-Output $testOutput.TrimEnd()
     Write-Host "Retained fixture and logs: $outputDir"
     Write-Host 'Real control/data/owner-draw paths were checked; physical scrolling, DPI changes and audio were not observed.'

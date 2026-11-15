@@ -652,8 +652,6 @@ static void RegisterExpectedCurrentNoteSelectionReplacement(HWND hEdit,
                                                             DWORD afterSelEnd,
                                                             bool allowCoalesce = false);
 static void PaintNativeNoteClient(HWND hWnd, HDC hdc, HRGN clipRegion = nullptr);
-static bool IsNoteBulletIndentChar(wchar_t ch);
-static bool IsMarkdownBulletMarker(wchar_t ch);
 
 struct LineCache;
 struct Segment;
@@ -745,6 +743,7 @@ static void ShowNoteAssistFontMenu(HWND hWnd, NoteAssistFontTarget target);
 static void ShowNoteAssistFontSizeMenu(HWND hWnd);
 static void ShowNoteAssistBottomSpaceMenu(HWND hWnd);
 static void ShowNoteAssistNoteBackgroundMenu(HWND hWnd);
+static void ShowNoteAssistTextColorPicker(HWND hWnd);
 using RenderBoundary = note::EditorLineBoundary;
 static std::wstring ToLowerAscii(const std::wstring& s);
 static int ComputeHeadingExtraPx(int headingLevel, int baseFontHeight);
@@ -1439,6 +1438,7 @@ static uint64_t NextNoteTextCoreRevision() {
 static note::NoteMetadata CurrentNoteTextMetadata() {
     note::NoteMetadata meta;
     meta.clro_ascii_only = g_config.clroAsciiOnly;
+    meta.quote_lazy_continuation = g_config.noteQuoteLazyContinuation;
     meta.file_name = CurrentNoteFileNameForParse();
     meta.title = note::DeriveTitleFromFileName(meta.file_name);
     return meta;
@@ -1554,6 +1554,7 @@ static std::wstring NoteInlineKindLabel(note::InlineKind kind, bool englishUi) {
     case note::InlineKind::Code: return englishUi ? L"Code" : L"コード";
     case note::InlineKind::Emphasis: return englishUi ? L"Emphasis" : L"強調";
     case note::InlineKind::Strong: return englishUi ? L"Strong" : L"太字";
+    case note::InlineKind::Underline: return localization::Text(L"settings.markup.underline");
     case note::InlineKind::Strike: return englishUi ? L"Strike" : L"取り消し";
     case note::InlineKind::Link: return englishUi ? L"Link" : L"リンク";
     case note::InlineKind::Image: return englishUi ? L"Image" : L"画像";
@@ -1696,6 +1697,7 @@ struct BottomAssistLineLayout {
     int noteDisplayIdx = -1;
     int renderIdx = -1;
     int wrapIdx = -1;
+    int quoteLazyContinuationIdx = -1;
     int vimIdx = -1;
     int vimCaretLineRawTextIdx = -1;
     int vimClickInsertIdx = -1;
@@ -1704,6 +1706,7 @@ struct BottomAssistLineLayout {
     int renderJpFontIdx = -1;
     int fontSizeIdx = -1;
     int bgIdx = -1;
+    int textColorIdx = -1;
     int inlineMathVerticalAlignmentIdx = -1;
     int bottomSpaceIdx = -1;
 };
@@ -1941,6 +1944,10 @@ static std::wstring BuildBottomAssistText(BottomAssistLineLayout* outLayout) {
         : localization::Text(L"note.assist.unavailable"), &layout.renderIdx);
     appendValue(L"note.assist.current_display", noteDisplayLabel, &layout.noteDisplayIdx);
     if (showWrapToggle) appendValue(L"note.assist.wrap", wrapLabel, &layout.wrapIdx);
+    if (renderSupportedRoute && !CurrentNoteUsesTeXMathOnlyRender()) {
+        appendValue(L"note.assist.quote_lazy_continuation", onOff(g_config.noteQuoteLazyContinuation),
+                    &layout.quoteLazyContinuationIdx);
+    }
     appendRow(L"");
     if (showRawFont) appendValue(L"note.assist.raw_font", rawName, &layout.rawFontIdx);
     if (showRenderFont) appendValue(GetNoteFontCustomizationMode() == 1
@@ -1955,6 +1962,7 @@ static std::wstring BuildBottomAssistText(BottomAssistLineLayout* outLayout) {
     appendValue(L"settings.note.bottom_space", localization::Text(spaceLabels[spaceMode]) +
         L" " + std::to_wstring(spaceValue) + (spaceMode == 0 ? L" px" : L"%"), &layout.bottomSpaceIdx);
     appendValue(L"note.assist.background", englishUi ? noteBgLabelEn : noteBgLabelJa, &layout.bgIdx);
+    appendValue(L"settings.note.text_color", ColorToHexW(g_config.noteFgColor), &layout.textColorIdx);
     appendValue(L"note.assist.grid", gridLabel);
     appendValue(L"note.assist.grid_pitch", gridPitchLabel);
     appendValue(L"note.assist.math_margin", mathMarginLabel);
@@ -2231,6 +2239,22 @@ static void SyncNoteWrapMenuState(HWND owner) {
     DrawMenuBar(owner);
 }
 
+static void ToggleNoteQuoteLazyContinuationSetting() {
+    if (IsNoteImeCanonicalChangeDeferred(g_hNoteEdit) || IsNoteImeComposing()) {
+        ShowSoftNotice(g_hMainWnd, localization::Text(L"note.assist.finish_ime_first"), SoftNoticeKind::Info);
+        return;
+    }
+    const bool previous = g_config.noteQuoteLazyContinuation;
+    g_config.noteQuoteLazyContinuation = !previous;
+    if (!TryPersistConfig()) {
+        g_config.noteQuoteLazyContinuation = previous;
+        ShowSoftNotice(g_hMainWnd, localization::Text(L"settings.note.quote_lazy_save_failed"), SoftNoticeKind::Warning);
+        return;
+    }
+    ApplyCurrentNoteViewConfiguration();
+    if (g_hBottomNote) InvalidateRect(g_hBottomNote, nullptr, FALSE);
+}
+
 void ToggleNoteWrapSetting() {
     if (!IsNoteWrapToggleAvailable()) {
         HWND owner = g_hMainWnd ? g_hMainWnd : (g_hNoteEdit ? GetParent(g_hNoteEdit) : nullptr);
@@ -2417,6 +2441,23 @@ static void ShowNoteAssistBottomSpaceMenu(HWND hWnd) {
     if (g_hNoteEdit) UpdateNoteFormatRect(g_hNoteEdit);
     RefreshNoteRenderForPreferenceChange();
     if (g_hBottomNote) InvalidateRect(g_hBottomNote, nullptr, FALSE);
+}
+
+static void ShowNoteAssistTextColorPicker(HWND hWnd) {
+    COLORREF picked = g_config.noteFgColor;
+    if (!PickColorDialog(hWnd, picked, &picked) || picked == g_config.noteFgColor) return;
+    const COLORREF previous = g_config.noteFgColor;
+    const COLORREF previousRuntime = g_noteFgColor;
+    g_config.noteFgColor = picked;
+    g_noteFgColor = picked;
+    if (!TryPersistConfig()) {
+        g_config.noteFgColor = previous;
+        g_noteFgColor = previousRuntime;
+        ShowSoftNotice(g_hMainWnd, localization::Text(L"settings.note.text_color_save_failed"), SoftNoticeKind::Warning);
+        return;
+    }
+    RefreshNoteRenderForPreferenceChange();
+    ApplyThemeToUI(g_hMainWnd);
 }
 
 static void ShowNoteAssistNoteBackgroundMenu(HWND hWnd) {
@@ -9648,6 +9689,9 @@ static size_t HideMarkdownOpeningMarkerEnd(const std::wstring& text,
                 markerStart = MarkdownOpeningRunStart(text, lineStart, sliceEnd, L'_', 2);
             }
             break;
+        case note::InlineKind::Underline:
+            markerStart = MarkdownOpeningRunStart(text, lineStart, sliceEnd, L'_', 2);
+            break;
         case note::InlineKind::Strike:
             markerStart = MarkdownOpeningRunStart(text, lineStart, sliceEnd, L'~', 2);
             break;
@@ -10330,6 +10374,9 @@ static LineCache BuildMarkdownRenderCacheLine(const std::wstring& text,
                     case note::InlineKind::Strong:
                         seg.style.bold = true;
                         break;
+                    case note::InlineKind::Underline:
+                        seg.style.underline = true;
+                        break;
                     case note::InlineKind::Strike:
                         seg.style.strike = true;
                         break;
@@ -10702,7 +10749,12 @@ void ApplyCurrentNoteViewConfiguration() {
     for (const auto& entry : g_noteViewStateByWindow) {
         auto& workspace = note::RuntimeNoteWorkspaceService();
         auto* kernel = workspace.FindKernel(entry.second.identity.note_id);
-        if (kernel && kernel->SetClroAsciiOnly(g_config.clroAsciiOnly)) {
+        bool parsingChanged = false;
+        if (kernel) {
+            parsingChanged = kernel->SetClroAsciiOnly(g_config.clroAsciiOnly);
+            parsingChanged = kernel->SetQuoteLazyContinuation(g_config.noteQuoteLazyContinuation) || parsingChanged;
+        }
+        if (parsingChanged) {
             workspace.InvalidateIndexes(entry.second.identity.note_id);
             for (const auto& view : g_noteViewStateByWindow) {
                 if (view.second.identity.note_id != entry.second.identity.note_id) continue;

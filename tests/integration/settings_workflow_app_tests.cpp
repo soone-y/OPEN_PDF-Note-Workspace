@@ -5,6 +5,7 @@
 #include "core/json_string.h"
 #include "core/sha256.h"
 #include "settings/settings_navigation.h"
+#include "settings/settings_scroll_prepaint.h"
 #include "clrop/json.h"
 #include <array>
 #include <map>
@@ -191,6 +192,7 @@ static void CloseSettings(HWND settings, int action, const char* context = "work
 struct Draft {
     int layout = 0, noteFont = 0, headingFont = 0, lens = 0;
     bool clroAsciiOnly = false;
+    bool quoteLazyContinuation = false;
     int bottomSpaceMode = 0;
     std::wstring bottomSpaceFixed, bottomSpaceFont, bottomSpaceViewport;
     std::wstring hex;
@@ -202,6 +204,8 @@ static void Seed(const fs::path& workspace, bool flat, const fs::path& lectureRo
     Page(settings, 1); draft.noteFont = static_cast<int>(Send(DescendantId(settings, 4114), CB_GETCURSEL));
     Require(DescendantId(settings, 4227) != nullptr, "CLRO ASCII-only setting exists");
     draft.clroAsciiOnly = Send(DescendantId(settings, 4227), BM_GETCHECK) == BST_CHECKED;
+    Require(DescendantId(settings, 4228) != nullptr, "quote lazy-continuation setting exists");
+    draft.quoteLazyContinuation = Send(DescendantId(settings, 4228), BM_GETCHECK) == BST_CHECKED;
     Require(DescendantId(settings, 4250) && DescendantId(settings, 4251) &&
         DescendantId(settings, 4252) && DescendantId(settings, 4253), "bottom space controls exist");
     draft.bottomSpaceMode = static_cast<int>(Send(DescendantId(settings, 4250), CB_GETCURSEL));
@@ -225,7 +229,8 @@ static void Expect(HWND settings, const Draft& expected) {
     }
     Require(actual.layout == expected.layout && actual.noteFont == expected.noteFont &&
         actual.headingFont == expected.headingFont && actual.lens == expected.lens && actual.hex == expected.hex &&
-        actual.clroAsciiOnly == expected.clroAsciiOnly && actual.bottomSpaceMode == expected.bottomSpaceMode &&
+        actual.clroAsciiOnly == expected.clroAsciiOnly && actual.quoteLazyContinuation == expected.quoteLazyContinuation &&
+        actual.bottomSpaceMode == expected.bottomSpaceMode &&
         actual.bottomSpaceFixed == expected.bottomSpaceFixed && actual.bottomSpaceFont == expected.bottomSpaceFont &&
         actual.bottomSpaceViewport == expected.bottomSpaceViewport,
         "all five settings tabs have the expected saved or draft values");
@@ -236,6 +241,7 @@ static void Expect(HWND settings, const Draft& expected) {
     Page(settings, 8); Send(DescendantId(settings, 4214), CB_SETCURSEL, changed.layout);
     Page(settings, 1);
     changed.clroAsciiOnly = !old.clroAsciiOnly;
+    changed.quoteLazyContinuation = !old.quoteLazyContinuation;
     changed.bottomSpaceMode = (old.bottomSpaceMode + 1) % 3;
     changed.bottomSpaceFixed = old.bottomSpaceFixed == L"144" ? L"96" : L"144";
     changed.bottomSpaceFont = old.bottomSpaceFont == L"600" ? L"400" : L"600";
@@ -245,6 +251,7 @@ static void Expect(HWND settings, const Draft& expected) {
     Type(DescendantId(settings, 4252), changed.bottomSpaceFont.c_str());
     Type(DescendantId(settings, 4253), changed.bottomSpaceViewport.c_str());
     Send(DescendantId(settings, 4227), BM_SETCHECK, changed.clroAsciiOnly ? BST_CHECKED : BST_UNCHECKED);
+    Send(DescendantId(settings, 4228), BM_SETCHECK, changed.quoteLazyContinuation ? BST_CHECKED : BST_UNCHECKED);
     HWND font = DescendantId(settings, 4114); const int count = static_cast<int>(Send(font, CB_GETCOUNT));
     Require(count > 1, "note font has multiple choices"); changed.noteFont = (old.noteFont + 1) % count;
     Send(font, CB_SETCURSEL, changed.noteFont);
@@ -273,6 +280,7 @@ static void SettingsMatrix(const fs::path& executable, const fs::path& workspace
     // Revert only the selected note page; drafts in other pages remain intact.
     Page(settings, 1); Send(settings, WM_COMMAND, 7102);
     Draft reverted = changed; reverted.noteFont = baseline.noteFont; reverted.clroAsciiOnly = baseline.clroAsciiOnly;
+    reverted.quoteLazyContinuation = baseline.quoteLazyContinuation;
     reverted.bottomSpaceMode = baseline.bottomSpaceMode;
     reverted.bottomSpaceFixed = baseline.bottomSpaceFixed; reverted.bottomSpaceFont = baseline.bottomSpaceFont;
     reverted.bottomSpaceViewport = baseline.bottomSpaceViewport; Expect(settings, reverted);
@@ -654,11 +662,25 @@ static void CentralGuideMatrix(const fs::path& executable, const fs::path& works
     HWND documentPane = view();
     SelectSession(app.main);
     Require(Until([&] { return WindowText(documentPane).empty(); }), "opening a PDF invalidates and removes the guide");
+    Send(app.main, WM_COMMAND, ID_FILE_CLOSE);
+    Require(guide().empty(), "closing all documents does not restore startup guidance");
     Require(Read(source) == Pdf(), "guide and navigation preserve PDF bytes");
     app.Stop();
-    Write(config, "{\"classesDir\":\".\",\"restoreLastSession\":false,\"emptyViewGuideMode\":99}");
+    fs::create_directories(workspace / L"講義 空白" / L"第02回");
+    Write(config, "{\"classesDir\":\".\",\"restoreLastSession\":false,\"startupSelectFirstSession\":false,\"emptyViewGuideMode\":99}");
     app.Start(executable, workspace);
     Require(guide().find(L"1.") != std::wstring::npos, "unknown guide preference falls back to full guide");
+    auto lists = Lists(app.main);
+    Select(app.main, lists[0], 0);
+    Require(guide().empty(), "selecting a lecture dismisses startup guidance before opening documents");
+    Require(Send(lists[1], LB_GETCOUNT) == 2, "two owned sessions expose repeated switch coverage");
+    for (int index : {1, 0, 1}) {
+        Select(app.main, lists[1], index);
+        Require(guide().empty(), "switching between occupied and empty sessions keeps guidance dismissed");
+    }
+    Send(view(), WM_KEYDOWN, VK_NEXT);
+    Send(view(), WM_MOUSEWHEEL, MAKEWPARAM(0, WHEEL_DELTA));
+    Require(guide().empty(), "guide navigation input does not restore dismissed guidance");
     app.Stop();
     const auto noteWorkspace = workspace.parent_path() / L"central_guide_note_only";
     Seed(noteWorkspace, false);
@@ -713,7 +735,161 @@ static void MarkerDisplayDefaultsMatrix(const fs::path& executable, const fs::pa
     std::cout<<"[PASS] marker display defaults / cancel / failed save / restart / old data preserved\n";
 }
 
+static settings_scroll_prepaint::Colors prepaintColors{RGB(250,250,250), RGB(20,20,20)};
+static HWND prepaintReentryLabel = nullptr;
+static bool prepaintDestroyOwner = false;
+static LRESULT CALLBACK PrepaintTestProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    if (message == WM_CTLCOLORSTATIC) {
+        if (prepaintReentryLabel == reinterpret_cast<HWND>(lParam)) {
+            prepaintReentryLabel = nullptr;
+            if (prepaintDestroyOwner) {
+                prepaintDestroyOwner = false;
+                DestroyWindow(window);
+                return 0;
+            }
+            SetWindowTextW(reinterpret_cast<HWND>(lParam), L"Changed while preparing");
+        }
+        HDC dc = reinterpret_cast<HDC>(wParam);
+        SetTextColor(dc, prepaintColors.text);
+        SetBkColor(dc, prepaintColors.background);
+        SetDCBrushColor(dc, prepaintColors.background);
+        return reinterpret_cast<LRESULT>(GetStockObject(DC_BRUSH));
+    }
+    return DefWindowProcW(window, message, wParam, lParam);
+}
+static void SettingsPrepaintMatrix() {
+    using namespace settings_scroll_prepaint;
+    WNDCLASSW type{};
+    type.lpfnWndProc = PrepaintTestProc;
+    type.hInstance = GetModuleHandleW(nullptr);
+    type.lpszClassName = L"SettingsPrepaintTest";
+    Require(RegisterClassW(&type) != 0, "register isolated prepaint test window");
+    struct WindowOwner { HWND window; ~WindowOwner() { if (window) DestroyWindow(window); } } owner{
+        CreateWindowExW(0, type.lpszClassName, L"", WS_POPUP | WS_VISIBLE, 0, 0, 640, 220,
+            nullptr, nullptr, type.hInstance, nullptr)};
+    Require(owner.window != nullptr, "create isolated prepaint viewport");
+    const auto add = [&](const wchar_t* kind, int y, int width = 400, int height = 24) {
+        HWND child = CreateWindowExW(0, kind, L"A label for preparation", WS_CHILD | WS_VISIBLE,
+            0, y, width, height, owner.window, nullptr, type.hInstance, nullptr);
+        Require(child != nullptr, "create real native prepaint control");
+        return child;
+    };
+    const HWND visible = add(L"STATIC", 20), second = add(L"STATIC", 60);
+    const HWND upcoming = add(L"STATIC", 250), distant = add(L"STATIC", 600);
+    const HWND edit = add(L"EDIT", 100);
+    const auto editProc = GetWindowLongPtrW(edit, GWLP_WNDPROC);
+    Require(Attach(owner.window, owner.window, [] { return prepaintColors; }), "attach optional prepaint owner");
+    auto* pageState = static_cast<settings_scroll_prepaint::Page*>(GetPropW(owner.window, pageProperty));
+    Require(pageState != nullptr, "prepaint owner state exists");
+    Require(Attach(owner.window, owner.window, [] { return prepaintColors; }) &&
+        GetPropW(owner.window, pageProperty) == pageState, "reattaching preserves the prepaint owner state");
+    auto& page = *pageState;
+    const auto label = [&](HWND control) -> Label& {
+        const auto entry = std::find_if(page.labels.begin(), page.labels.end(),
+            [control](const auto& item) { return item->window == control; });
+        Require(entry != page.labels.end(), "plain label has a cache entry");
+        return **entry;
+    };
+    Require(page.labels.size() == 4 && GetWindowLongPtrW(edit, GWLP_WNDPROC) == editProc,
+        "interactive controls retain native input and painting");
+    SetCapture(owner.window);
+    SendMessageW(owner.window, WM_TIMER, timerId, 0);
+    Require(page.bytes == 0, "active drag postpones preparation");
+    ReleaseCapture();
+    SetFocus(edit);
+    const HWND focused = GetFocus();
+    for (int tick = 0; tick < 8; ++tick) {
+        size_t before = 0;
+        for (const auto& item : page.labels) before += item->bitmap != nullptr;
+        SendMessageW(owner.window, WM_TIMER, timerId, 0);
+        size_t after = 0;
+        for (const auto& item : page.labels) after += item->bitmap != nullptr;
+        Require(after <= before + 2, "each idle slice prepares at most two labels");
+    }
+    Require(label(visible).Matches() && label(second).Matches() && label(upcoming).Matches() &&
+        !label(distant).bitmap && !page.timer, "nearby offscreen labels are prepared and idle work stops");
+    Require(GetFocus() == focused && WindowText(edit) == L"A label for preparation", "preparation preserves focus and edit text");
+    const auto bitmapHash = [](HBITMAP bitmap) {
+        Require(GdiFlush(), "finish native drawing before inspecting bitmap bytes");
+        DIBSECTION dib{};
+        Require(GetObjectW(bitmap, sizeof(dib), &dib) == static_cast<int>(sizeof(dib)), "cache has readable DIB pixels");
+        const auto* pixels = static_cast<const unsigned char*>(dib.dsBm.bmBits);
+        uint64_t hash = 1469598103934665603ULL;
+        const size_t count = static_cast<size_t>(dib.dsBm.bmWidthBytes) * dib.dsBm.bmHeight;
+        for (size_t i = 0; i < count; ++i) hash = (hash ^ pixels[i]) * 1099511628211ULL;
+        return hash;
+    };
+    const auto original = bitmapHash(label(visible).bitmap);
+    RedrawWindow(visible, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
+    Require(!GetUpdateRect(visible, nullptr, FALSE), "prepared label finishes its damaged-region paint synchronously");
+    SetWindowTextW(visible, L"Changed label");
+    Require(!label(visible).bitmap, "text mutation drops the old bitmap immediately");
+    for (int tick = 0; tick < 4; ++tick) SendMessageW(owner.window, WM_TIMER, timerId, 0);
+    Require(label(visible).Matches() && original != bitmapHash(label(visible).bitmap), "rebuilt native label contains changed text");
+    SendMessageW(visible, WM_SETFONT, reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)), TRUE);
+    Require(!label(visible).bitmap, "font mutation drops the old bitmap");
+    for (int tick = 0; tick < 4; ++tick) SendMessageW(owner.window, WM_TIMER, timerId, 0);
+    prepaintColors.text = RGB(190,30,30);
+    Require(!label(visible).Matches(), "theme stamp rejects stale colors before repaint");
+    Wake(owner.window);
+    for (int tick = 0; tick < 8; ++tick) SendMessageW(owner.window, WM_TIMER, timerId, 0);
+    Require(label(visible).Matches(), "theme change regenerates prepared pixels");
+    SetWindowTextW(visible, L"Before reentrant text update");
+    prepaintReentryLabel = visible;
+    SendMessageW(owner.window, WM_TIMER, timerId, 0);
+    Require(!label(visible).bitmap && page.timer && WindowText(visible) == L"Changed while preparing",
+        "reentrant text update discards candidate and retains an idle retry");
+    for (int tick = 0; tick < 4; ++tick) SendMessageW(owner.window, WM_TIMER, timerId, 0);
+    Require(label(visible).Matches() && !page.timer, "idle retry prepares current text after reentrant update");
+    const HBITMAP upcomingBitmap = label(upcoming).bitmap;
+    Require(ScrollWindow(owner.window, 0, -200, nullptr, nullptr), "scroll native controls including offscreen labels");
+    RECT upcomingRect{}, ownerRect{};
+    Require(GetWindowRect(upcoming, &upcomingRect) && GetWindowRect(owner.window, &ownerRect) &&
+        upcomingRect.top - ownerRect.top == 50, "fully offscreen controls move into the viewport");
+    Wake(owner.window);
+    for (int tick = 0; tick < 8; ++tick) SendMessageW(owner.window, WM_TIMER, timerId, 0);
+    Require(label(upcoming).bitmap == upcomingBitmap && label(upcoming).Matches() && !label(visible).bitmap,
+        "scroll reuses upcoming pixels and evicts distant labels");
+    ShowWindow(owner.window, SW_HIDE);
+    Require(page.bytes == 0 && !page.timer, "hidden settings page releases buffers and timer");
+    DestroyWindow(owner.window);
+    owner.window = CreateWindowExW(0, type.lpszClassName, L"", WS_POPUP | WS_VISIBLE,
+        0, 0, 640, 220, nullptr, nullptr, type.hInstance, nullptr);
+    Require(owner.window != nullptr, "create bounded-cache viewport");
+    for (int i = 0; i < 20; ++i) (void)add(L"STATIC", 20, 600, 100);
+    Require(Attach(owner.window, owner.window, [] { return prepaintColors; }), "attach bounded-cache owner");
+    auto* boundedState = static_cast<settings_scroll_prepaint::Page*>(GetPropW(owner.window, pageProperty));
+    Require(boundedState != nullptr, "bounded cache state exists");
+    auto& bounded = *boundedState;
+    for (int tick = 0; tick < 24; ++tick) SendMessageW(owner.window, WM_TIMER, timerId, 0);
+    size_t prepared = 0;
+    for (const auto& item : bounded.labels) prepared += item->bitmap != nullptr;
+    Require(bounded.bytes <= maximumBytes && prepared > 0 && prepared < 20 && !bounded.timer,
+        "memory cap leaves excess labels native and does not keep retrying");
+    std::vector<HBITMAP> allocated;
+    for (const auto& item : bounded.labels) if (item->bitmap) allocated.push_back(item->bitmap);
+    DestroyWindow(owner.window); owner.window = nullptr;
+    for (const auto bitmap : allocated) {
+        BITMAP info{};
+        Require(GetObjectW(bitmap, sizeof(info), &info) == 0, "destroyed page releases prepared GDI bitmaps");
+    }
+    owner.window = CreateWindowExW(0, type.lpszClassName, L"", WS_POPUP | WS_VISIBLE,
+        0, 0, 640, 220, nullptr, nullptr, type.hInstance, nullptr);
+    Require(owner.window != nullptr, "create reentrant-close viewport");
+    const HWND closingLabel = add(L"STATIC", 20);
+    Require(Attach(owner.window, owner.window, [] { return prepaintColors; }), "attach reentrant-close owner");
+    prepaintReentryLabel = closingLabel;
+    prepaintDestroyOwner = true;
+    SendMessageW(owner.window, WM_TIMER, timerId, 0);
+    Require(!IsWindow(owner.window) && !IsWindow(closingLabel) && !prepaintReentryLabel && !prepaintDestroyOwner,
+        "owner can close synchronously during preparation without publishing a stale candidate");
+    owner.window = nullptr;
+    Require(UnregisterClassW(type.lpszClassName, type.hInstance), "release isolated prepaint test class");
+    std::cout << "[PASS] settings prepaint / idle budget / offscreen labels / invalidation / memory / lifetime\n";
+}
+
 static void RegroupedSettingsMatrix(const fs::path& executable, const fs::path& workspace) {
+    SettingsPrepaintMatrix();
     MarkerDisplayDefaultsMatrix(executable,workspace.parent_path()/(workspace.filename().wstring()+L"_marker_defaults"));
     CentralGuideMatrix(executable, workspace.parent_path() / (workspace.filename().wstring() + L"_central_guide"));
     Seed(workspace, false);

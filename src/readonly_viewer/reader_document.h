@@ -4,6 +4,7 @@
 #include <string_view>
 #include <vector>
 #include "readonly_viewer/mermaid_subset_model.h"
+#include "readonly_viewer/file_range.h"
 enum TextStyle : unsigned int {
     TextStyleNone = 0,
     TextStyleBold = 1 << 0,
@@ -36,11 +37,6 @@ struct InlineDiagram {
 };
 
 std::wstring_view TrimMarkdownLine(std::wstring_view line);
-
-struct ByteRange {
-    uintmax_t start = 0;
-    uintmax_t end = 0;
-};
 
 // Pure, UI-thread-owned preparation. No I/O, external objects or HTML execution.
 void AppendStyledText(RenderedDocument& document, std::wstring_view text, unsigned int style, int headingLevel);

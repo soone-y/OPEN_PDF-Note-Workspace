@@ -255,10 +255,22 @@ Add-Content (Join-Path $root 'build_calls.txt') $Locale
 '''
         for child in ("scripts/build/build_workspace.ps1", "scripts/build/build_readonly_viewer.ps1"):
             self.write_script(child, stub)
+        for name in ("local_run.ps1", "sample_workspace.ps1"):
+            shutil.copyfile(REPO_ROOT / "scripts/build" / name, self.root / "scripts/build" / name)
+        runs = [self.root / "out" / name for name in ("run", "run_lite", "run_en", "run_lite_en")]
+        for run in runs:
+            (run / "sample_workspace").mkdir(parents=True)
+            (run / "sample_workspace/edit.txt").touch()
+            (run / "pdf_note_workspace_setup.json").write_text("{}", encoding="utf-8")
         result = subprocess.run([POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
-                                 str(self.root / "build.ps1"), "-AllLocales", "-Clean"], cwd=self.root,
+                                 str(self.root / "build.ps1"), "-AllLocales", "-HardClean"], cwd=self.root,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
-        self.assertEqual(result.returncode, 0, result.stdout.decode("utf-8", errors="replace"))
+        output = result.stdout.decode("utf-8", errors="replace")
+        self.assertEqual(result.returncode, 0, output)
+        for run in runs:
+            self.assertIn(f"Sample workspace reset target: {run / 'sample_workspace'}", output)
+            self.assertFalse((run / "sample_workspace").exists())
+            self.assertEqual((run / "pdf_note_workspace_setup.json").read_bytes(), b"{}")
         logs = list((self.root / "out/logs/build").glob("build_20261030_000000_*.log"))
         self.assertEqual(len(logs), 3, "Parent, JA and EN must each retain a primary transcript")
         self.assertTrue(all(path.stat().st_size > 0 for path in logs))

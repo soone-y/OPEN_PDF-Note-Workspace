@@ -20,67 +20,67 @@
   },
   "current": {
     "release": {
-      "version": "0.9.556",
+      "version": "0.9.560",
       "published_at": null,
       "public_url": null,
       "tag": null
     },
     "measurement": {
       "profile_key": "a1057b22e8bf78e5acf00e0adde040daf0533123c79d7231908dfcd9f6a48483",
-      "measured_at": "2026-11-04T17:05:11.809792+00:00",
+      "measured_at": "2026-11-15T10:49:19.819320+00:00",
       "source_kind": "release-candidate",
-      "input_sha256": "fbd7d7a83af2078035b75af96df4c586787b36b94b56e910012e4dbed4eb87cd",
-      "allowlist_sha256": "5252cf9699718c7dd25466c67e39cc32a4f0a6539a28527dc3740618cbd030c7"
+      "input_sha256": "21d69e9d006fca424d76102a27fa7698df0fde0a2cc161fe8eb3d39dc6dca122",
+      "allowlist_sha256": "965d255e393da1bc3b06524cd8c18d7ca03e144cb3c14c165db2424abc47225e"
     },
     "inventory": {
       "status": "COMPLETE",
-      "files": 954,
-      "size_bytes": 26813776,
-      "text_files": 905,
+      "files": 1012,
+      "size_bytes": 27691155,
+      "text_files": 963,
       "binary_files": 49,
-      "lines": 352042,
-      "blank_lines": 24675,
+      "lines": 362907,
+      "blank_lines": 25114,
       "legacy_text_files": 1,
       "groups": {
         "application": {
-          "files": 392,
-          "size_bytes": 8667726
+          "files": 426,
+          "size_bytes": 8956798
         },
         "tests_source": {
-          "files": 175,
-          "size_bytes": 3082654
+          "files": 194,
+          "size_bytes": 3349272
         },
         "tests_fixture": {
           "files": 27,
           "size_bytes": 2041521
         },
         "tools": {
-          "files": 116,
-          "size_bytes": 1422629
+          "files": 118,
+          "size_bytes": 1434621
         },
         "dependencies": {
           "files": 73,
-          "size_bytes": 9022019
+          "size_bytes": 9267170
         },
         "dependency_patches": {
-          "files": 52,
-          "size_bytes": 106045
+          "files": 54,
+          "size_bytes": 110799
         },
         "documents": {
           "files": 67,
-          "size_bytes": 584869
+          "size_bytes": 626184
         },
         "resources": {
           "files": 11,
-          "size_bytes": 1003786
+          "size_bytes": 1020460
         },
         "samples": {
           "files": 35,
           "size_bytes": 874112
         },
         "metadata": {
-          "files": 6,
-          "size_bytes": 8415
+          "files": 7,
+          "size_bytes": 10218
         },
         "generated": {
           "files": 0,
@@ -94,7 +94,7 @@
         },
         ".c": {
           "files": 3,
-          "size_bytes": 272039
+          "size_bytes": 273401
         },
         ".cjs": {
           "files": 1,
@@ -113,12 +113,12 @@
           "size_bytes": 1705
         },
         ".cpp": {
-          "files": 173,
-          "size_bytes": 5807912
+          "files": 190,
+          "size_bytes": 6111341
         },
         ".cppinc": {
-          "files": 63,
-          "size_bytes": 3525275
+          "files": 64,
+          "size_bytes": 3565217
         },
         ".csv": {
           "files": 2,
@@ -126,7 +126,7 @@
         },
         ".dll": {
           "files": 2,
-          "size_bytes": 7707136
+          "size_bytes": 7951360
         },
         ".docx": {
           "files": 6,
@@ -137,8 +137,8 @@
           "size_bytes": 216
         },
         ".h": {
-          "files": 252,
-          "size_bytes": 1402187
+          "files": 278,
+          "size_bytes": 1494267
         },
         ".html": {
           "files": 4,
@@ -162,7 +162,7 @@
         },
         ".json": {
           "files": 24,
-          "size_bytes": 1573774
+          "size_bytes": 1582953
         },
         ".lib": {
           "files": 1,
@@ -174,11 +174,11 @@
         },
         ".md": {
           "files": 74,
-          "size_bytes": 669450
+          "size_bytes": 710812
         },
         ".patch": {
-          "files": 52,
-          "size_bytes": 106045
+          "files": 54,
+          "size_bytes": 110799
         },
         ".pdf": {
           "files": 9,
@@ -193,12 +193,12 @@
           "size_bytes": 607298
         },
         ".ps1": {
-          "files": 77,
-          "size_bytes": 535784
+          "files": 85,
+          "size_bytes": 570684
         },
         ".py": {
-          "files": 127,
-          "size_bytes": 2274837
+          "files": 130,
+          "size_bytes": 2378496
         },
         ".rc": {
           "files": 1,
@@ -214,7 +214,7 @@
         },
         ".txt": {
           "files": 31,
-          "size_bytes": 166857
+          "size_bytes": 166935
         },
         ".xcf": {
           "files": 1,
@@ -225,82 +225,82 @@
           "size_bytes": 26329
         },
         ".yml": {
-          "files": 2,
-          "size_bytes": 2185
+          "files": 3,
+          "size_bytes": 3504
         },
         "<none>": {
           "files": 9,
-          "size_bytes": 5804
+          "size_bytes": 6895
         }
       }
     },
     "source_scale": {
       "status": "COMPLETE",
       "application": {
-        "files": 392,
-        "text_files": 392,
-        "size_bytes": 8667726,
-        "lines": 191157,
-        "blank_lines": 12261,
-        "code_lines": 172054,
-        "comment_lines": 6842,
-        "classified_files": 392
+        "files": 426,
+        "text_files": 426,
+        "size_bytes": 8956798,
+        "lines": 196744,
+        "blank_lines": 12434,
+        "code_lines": 177233,
+        "comment_lines": 7077,
+        "classified_files": 426
       },
       "tests_source": {
-        "files": 175,
-        "text_files": 175,
-        "size_bytes": 3082654,
-        "lines": 51882,
-        "blank_lines": 2908,
-        "code_lines": 48232,
-        "comment_lines": 742,
-        "classified_files": 175
+        "files": 194,
+        "text_files": 194,
+        "size_bytes": 3349272,
+        "lines": 56132,
+        "blank_lines": 3044,
+        "code_lines": 52312,
+        "comment_lines": 776,
+        "classified_files": 194
       },
       "tools": {
-        "files": 116,
-        "text_files": 116,
-        "size_bytes": 1422629,
-        "lines": 31334,
-        "blank_lines": 3273,
-        "code_lines": 25485,
-        "comment_lines": 339,
-        "classified_files": 101
+        "files": 118,
+        "text_files": 118,
+        "size_bytes": 1434621,
+        "lines": 31709,
+        "blank_lines": 3291,
+        "code_lines": 25828,
+        "comment_lines": 351,
+        "classified_files": 103
       },
       "src_tree": {
-        "files": 408,
-        "size_bytes": 8948160
+        "files": 442,
+        "size_bytes": 9239823
       }
     },
     "lexical": {
       "status": "COMPLETE",
-      "files": 392,
-      "source_bytes": 8667726,
+      "files": 426,
+      "source_bytes": 8956798,
       "bytes": {
-        "code": 5627213,
-        "literal": 485529,
-        "comment": 407141,
-        "whitespace": 2147843
+        "code": 5836265,
+        "literal": 502735,
+        "comment": 425230,
+        "whitespace": 2192568
       },
       "literal_bytes": {
-        "string": 411923,
-        "character": 14043,
-        "number": 59563,
+        "string": 426461,
+        "character": 14593,
+        "number": 61681,
         "other": 0
       },
       "literal_counts": {
-        "string": 17879,
-        "character": 3287,
-        "number": 33567,
+        "string": 18489,
+        "character": 3420,
+        "number": 34954,
         "other": 0
       },
-      "lexical_items": 1583499,
-      "string_payload_source_bytes": 362107,
+      "lexical_items": 1645602,
+      "string_payload_source_bytes": 374993,
       "string_purpose": "UNCLASSIFIED"
     },
     "localization": {
       "status": "COMPLETE",
-      "ja_ids": 3184,
-      "en_ids": 3184,
+      "ja_ids": 3313,
+      "en_ids": 3313,
       "en_missing_ids": 0
     },
     "packages": [
@@ -308,9 +308,9 @@
         "status": "COMPLETE",
         "locale": "en",
         "edition": "full",
-        "sha256": "e4b21a9f7e1438b6c39295eac0708bd08fb7534d1622bdcc5ae20e8018bcfef4",
-        "zip_bytes": 123552128,
-        "unpacked_bytes": 330241470,
+        "sha256": "0395eac910b44a5d1c8c0c98dadef51e6498d8fd55aff8f66e530ff9481f0162",
+        "zip_bytes": 123954212,
+        "unpacked_bytes": 331127428,
         "file_count": 1431,
         "basis": "archive-bytes"
       },
@@ -318,9 +318,9 @@
         "status": "COMPLETE",
         "locale": "en",
         "edition": "lite",
-        "sha256": "1e4c3d16864692865de6339505c84757ad68c57402a007023db9e6d9cc102608",
-        "zip_bytes": 15074263,
-        "unpacked_bytes": 34667651,
+        "sha256": "133713fe3c47e2b7e322b9f4f36c96dd7ac8de13b1ca615d06f739a450e700ac",
+        "zip_bytes": 15475204,
+        "unpacked_bytes": 35552585,
         "file_count": 92,
         "basis": "archive-bytes"
       },
@@ -328,9 +328,9 @@
         "status": "COMPLETE",
         "locale": "ja",
         "edition": "full",
-        "sha256": "aa8024501d9204142c8272a075a0a28c423120d2f6967f70a5bcbf991c872b85",
-        "zip_bytes": 124170000,
-        "unpacked_bytes": 330827481,
+        "sha256": "4678b1cb0a68eab3f8d0f02948dde8b64813b4320436ea830179625bb5edc4c1",
+        "zip_bytes": 124574061,
+        "unpacked_bytes": 331706432,
         "file_count": 1434,
         "basis": "archive-bytes"
       },
@@ -338,9 +338,9 @@
         "status": "COMPLETE",
         "locale": "ja",
         "edition": "lite",
-        "sha256": "988febac2a6e241442cab8f6bfd86a58967df14afcc4213ae634db9be74e7107",
-        "zip_bytes": 15679300,
-        "unpacked_bytes": 35240769,
+        "sha256": "2825223a6dbeabc6a8bc6610d6daebae19d7250c191c3e1f7b5e474b4028fd40",
+        "zip_bytes": 16082195,
+        "unpacked_bytes": 36118184,
         "file_count": 95,
         "basis": "archive-bytes"
       }
@@ -354,7 +354,7 @@
       "status": "UNMEASURED",
       "reason": "not-selected"
     },
-    "record_id": "0314fa04dda6b0bbb33875d4be43f31aacb08a4de324aed4d7b43faadd724056",
+    "record_id": "87ded03d7117fd8f4a327d8ac231a0061899465fdc5c63e7c5b5f75ec73c1381",
     "comparison": {
       "status": "NOT_APPLICABLE",
       "reason": "profile-or-source-kind-changed",

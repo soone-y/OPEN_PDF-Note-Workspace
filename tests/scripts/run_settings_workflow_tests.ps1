@@ -55,7 +55,7 @@ $driver = Join-Path $fixture "settings_workflow_app_tests.exe"
 & $compiler -std=c++17 -Wall -Wextra -Werror -static-libgcc -static-libstdc++ `
     -I (Join-Path $repoRoot "src") -I (Join-Path $repoRoot "third_party/pdfium/include") `
     (Join-Path $repoRoot "tests/integration/settings_workflow_app_tests.cpp") `
-    (Join-Path $repoRoot "src/clrop/json.cpp") -o $driver
+    (Join-Path $repoRoot "src/clrop/json.cpp") -lgdi32 -lcomctl32 -o $driver
 if ($LASTEXITCODE -ne 0) { throw "Settings workflow driver compilation failed." }
 # Never delete/reuse past test evidence. All app/setup/import/output paths stay
 # under this new fixture; the driver's nested job kills its children on timeout.
@@ -181,6 +181,7 @@ try {
     }
     if (-not $FontBoundaryOnly -and -not $ExternalOnly) {
         $markers = @($markers) + @("[PASS] central guide / modes / rollback / custom bindings / scrolling / restart / PDF transition")
+        $markers = @($markers) + @("[PASS] settings prepaint / idle budget / offscreen labels / invalidation / memory / lifetime")
     }
     foreach ($marker in $markers) {
         if ([regex]::Matches($driverOutput, [regex]::Escape($marker)).Count -ne 1) {

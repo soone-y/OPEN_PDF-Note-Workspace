@@ -23,6 +23,8 @@ struct TextEditSnapshot {
     size_t caret = 0;
     size_t selStart = 0;
     size_t selEnd = 0;
+    TextWritingMode writingMode = TextWritingMode::Horizontal;
+    TextBoxEditBounds bounds{};
 };
 
 struct TextEditCommand {
@@ -122,6 +124,8 @@ static TextEditSnapshot CaptureTextEditSnapshot() {
         std::min(g_pdf.editCaret, g_pdf.editText.size()),
         std::min(g_pdf.editSelStart, g_pdf.editText.size()),
         std::min(g_pdf.editSelEnd, g_pdf.editText.size()),
+        g_pdf.editWritingMode,
+        {g_pdf.editX1, g_pdf.editY1, g_pdf.editX2, g_pdf.editY2},
     };
 }
 
@@ -131,7 +135,7 @@ static bool TextEditDocumentStateMatches(const TextEditSnapshot& left,
     // not make its document command ineligible for Undo/Redo. Only canonical
     // text and formatting are preconditions.
     return left.text == right.text && left.fontName == right.fontName &&
-           left.fontPt == right.fontPt;
+           left.fontPt == right.fontPt && left.writingMode == right.writingMode;
 }
 
 static size_t SaturatingTextEditOffsetAdd(size_t left, size_t right) {
@@ -220,6 +224,11 @@ static bool RestoreTextEditSnapshot(const TextEditSnapshot& snap) {
         g_pdf.editText.swap(nextText);
         g_pdf.editFontName.swap(nextFont);
         g_pdf.editFontPt = (snap.fontPt > 0.0) ? snap.fontPt : g_textFontPt;
+        if (g_pdf.editWritingMode != snap.writingMode) {
+            g_pdf.editX1 = snap.bounds.left; g_pdf.editY1 = snap.bounds.top;
+            g_pdf.editX2 = snap.bounds.right; g_pdf.editY2 = snap.bounds.bottom;
+        }
+        g_pdf.editWritingMode = snap.writingMode;
         g_pdf.editCaret = nextCaret;
         g_pdf.editSelStart = nextSelStart;
         g_pdf.editSelEnd = nextSelEnd;
@@ -746,12 +755,40 @@ bool UpdateAnnotationAtIndex(HWND owner, int index, const Annotation& after) {
     }
     const Annotation before = g_annots[static_cast<size_t>(index)];
     if (AnnotationEquals(before, after)) return true;
-    g_annots[static_cast<size_t>(index)] = after;
+    Annotation updated = after;
+    if (updated.type == Annotation::Type::TextBox && updated.writingMode != before.writingMode)
+        FinalizeTextBoxAnnotationLayout(updated);
+    g_annots[static_cast<size_t>(index)] = std::move(updated);
     EnsureAnnotationId(g_annots[static_cast<size_t>(index)], g_annots, index);
     RecordAnnotUpdate(index, index, before, g_annots[static_cast<size_t>(index)]);
     MarkAnnotsDirty(owner);
     if (g_hPdfView) InvalidateRect(g_hPdfView, nullptr, FALSE);
     return true;
+}
+
+bool ApplyPdfTextBoxWritingMode(HWND hwnd, TextWritingMode mode) {
+    if (!hwnd || g_pdf.kind != DocKind::Pdf || IsPdfPreviewReadOnlyActive() || IsSaveTransactionRunning()) return false;
+    if (g_pdf.editingText) {
+        if (g_pdf.editWritingMode == mode) return true;
+        RECT before{};
+        const bool hadBefore = GetEditingTextBoxClientRect(&before);
+        RecordTextEditChange();
+        g_pdf.editWritingMode = mode;
+        g_pdf.editLayoutDirty = true;
+        RecalcEditingTextboxSize(true);
+        EnsureEditingTextBoxVisible(hwnd, L"writing_mode_change");
+        UpdateImeWindowPosition(hwnd, true);
+        InvalidateEditingTextBoxRect(hwnd, hadBefore ? &before : nullptr);
+        return true;
+    }
+    int index = GetActiveSelectedAnnotationIndex();
+    if (index < 0 && g_hAnnotList)
+        index = static_cast<int>(SendMessageW(g_hAnnotList, LB_GETCURSEL, 0, 0));
+    if (index < 0 || index >= static_cast<int>(g_annots.size()) ||
+        g_annots[static_cast<size_t>(index)].type != Annotation::Type::TextBox) return false;
+    Annotation after = g_annots[static_cast<size_t>(index)];
+    after.writingMode = mode;
+    return UpdateAnnotationAtIndex(GetParent(hwnd), index, after);
 }
 
 bool FinalizePendingPdfLinkMarkers(HWND owner, const std::wstring& linkId, const std::wstring& notePath) {
@@ -1022,12 +1059,15 @@ bool AddMathAnnotationFromText(HWND pdfWnd, const std::wstring& rawText, MathKin
 
 static void BeginTextEdit(HWND hwnd, int pageIndex, double anchorX, double anchorY,
                           double wPt, double hPt, const std::wstring& text,
-                          const std::wstring& fontName, double fontPt, int contentRotation = 0) {
+                          const std::wstring& fontName, double fontPt, int contentRotation = 0,
+                          TextWritingMode writingMode = TextWritingMode::Horizontal,
+                          const POINT* caretClick = nullptr) {
     if (pageIndex < 0 || pageIndex >= static_cast<int>(g_pdf.pages.size())) return;
     const auto& page = g_pdf.pages[static_cast<size_t>(pageIndex)];
     const auto initial = InitialTextBoxEditBounds(page, anchorX, anchorY, wPt, hPt, contentRotation);
     g_pdf.editingText = true;
     g_pdf.editContentRotation = page_rotation::Normalize(contentRotation);
+    g_pdf.editWritingMode = writingMode;
     g_pdf.editPage = pageIndex;
     g_pdf.editX1 = initial.left;
     g_pdf.editX2 = initial.right;
@@ -1035,10 +1075,7 @@ static void BeginTextEdit(HWND hwnd, int pageIndex, double anchorX, double ancho
     g_pdf.editY2 = initial.bottom;
     g_pdf.editText = text;
     g_pdf.editCaret = g_pdf.editText.size();
-    g_pdf.editSelStart = g_pdf.editCaret;
-    g_pdf.editSelEnd = g_pdf.editCaret;
     g_pdf.editSelectingText = false;
-    g_pdf.editSelAnchor = g_pdf.editCaret;
     g_pdf.editLayoutDirty = true;
     g_pdf.editInnerLayoutW = 0;
     g_pdf.editLayout.lines.clear();
@@ -1051,6 +1088,13 @@ static void BeginTextEdit(HWND hwnd, int pageIndex, double anchorX, double ancho
     g_pdf.textBoxHoverValid = false;
     ClearTextEditHistory();
     RecalcEditingTextboxSize(true);
+    // Resolve the click against the measured editor before revealing it moves the view.
+    size_t clickCaret = 0;
+    if (caretClick && HitTestEditCaretFromClientPoint(*caretClick, &clickCaret, true)) {
+        g_pdf.editCaret = clickCaret;
+    }
+    ClearEditSelection();
+    g_pdf.editSelAnchor = g_pdf.editCaret;
     EnsureEditingTextBoxVisible(hwnd, L"begin_text_edit");
     SetFocus(hwnd);
     // Enable IME now that text editing has started.

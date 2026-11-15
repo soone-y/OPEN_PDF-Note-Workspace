@@ -1,6 +1,9 @@
 // file: core/app_core.h
 #pragma once
 
+#include "workspace/session_order.h"
+#include "core/annot_tool_definition.h"
+
 #if !defined(MAYBE_UNUSED)
 #  if defined(__has_cpp_attribute)
 #    if __has_cpp_attribute(maybe_unused)
@@ -83,72 +86,8 @@ inline constexpr bool kIsLiteEdition = (PDF_NOTE_LITE_EDITION == 1);
 
 LONG WINAPI CrashLogFilter(EXCEPTION_POINTERS* ep);
 
-enum class ToolMode {
-    Select,
-    Pan,
-    Magnifier,
-    MarkerText,
-    MarkerTextUnderline,
-    MarkerTextColor,
-    MarkerFree,
-    MarkerLine,
-    MarkerArrow,
-    MarkerWave,
-    TextBox,
-    Line,
-    Arrow,
-    Wave,
-    Freehand,
-    Shape,
-    Eraser
-};
-inline constexpr int kToolModeCount = static_cast<int>(ToolMode::Eraser) + 1;
-
-enum class AnnotToolFamily {
-    Select,
-    Pan,
-    Magnifier,
-    Text,
-    Marker,
-    Pen,
-    Shape,
-    Eraser
-};
-inline constexpr int kAnnotToolFamilyCount = static_cast<int>(AnnotToolFamily::Eraser) + 1;
-
 enum class AnnotToolUiState { Enabled, Disabled, Hidden };
 enum class AnnotToolShortcutTargetKind { Category, Detail };
-enum class AnnotToolGeometry { None, Shape, Line, Wave, Arrow };
-enum class AnnotToolPresentation { None, Stroke, Emphasis };
-enum class ShapeDetail { Line, Arrow, Wave, Rectangle, Ellipse, Triangle, Diamond, Arc, Star };
-struct ShapeToolSelection {
-    AnnotToolPresentation presentation = AnnotToolPresentation::Stroke;
-    AnnotToolGeometry geometry = AnnotToolGeometry::Line;
-
-    constexpr bool operator==(const ShapeToolSelection& other) const {
-        return presentation == other.presentation && geometry == other.geometry;
-    }
-};
-enum class AnnotToolOptionGroup {
-    None,
-    Magnifier,
-    Text,
-    MarkerText,
-    MarkerFree,
-    Line,
-    Arrow,
-    Wave,
-    Pen,
-    Shape,
-};
-struct AnnotToolDetailDescriptor {
-    ToolMode mode = ToolMode::Select;
-    AnnotToolFamily family = AnnotToolFamily::Select;
-    const char* key = "select";
-    AnnotToolOptionGroup optionGroup = AnnotToolOptionGroup::None;
-    AnnotToolGeometry geometry = AnnotToolGeometry::None;
-    AnnotToolPresentation presentation = AnnotToolPresentation::None;
-};
 struct AnnotToolShortcutBinding {
     std::wstring key;
     AnnotToolShortcutTargetKind targetKind = AnnotToolShortcutTargetKind::Detail;
@@ -159,40 +98,11 @@ struct AnnotToolShortcutBinding {
     bool alt = false;
     bool shift = false;
 };
-const std::vector<AnnotToolFamily>& AnnotToolFamilyUiOrder();
-const std::vector<AnnotToolDetailDescriptor>& AnnotToolDetailDescriptors();
-const AnnotToolDetailDescriptor* FindAnnotToolDetailDescriptor(ToolMode mode);
-AnnotToolGeometry AnnotToolGeometryForMode(ToolMode mode);
-AnnotToolPresentation AnnotToolPresentationForMode(ToolMode mode, ShapeDrawMode shapeDrawMode);
-ShapeToolSelection ShapeToolSelectionForMode(ToolMode mode, ShapeDrawMode shapeDrawMode);
-std::optional<ToolMode> ToolModeForShapeToolSelection(ShapeToolSelection selection);
-const char* ShapeToolPresentationKey(AnnotToolPresentation presentation);
-bool ShapeToolPresentationFromKey(const std::string& key, AnnotToolPresentation& out);
-const char* ShapeToolGeometryKey(AnnotToolGeometry geometry);
-bool ShapeToolGeometryFromKey(const std::string& key, AnnotToolGeometry& out);
-const char* ShapeDetailKey(ShapeDetail detail);
-bool ShapeDetailFromKey(const std::string& key, ShapeDetail& out);
-std::vector<ShapeDetail> OrderedShapeDetails();
-bool ShapeDetailIsLinear(ShapeDetail detail);
-bool ShapeDetailUsesBox(ShapeDetail detail);
-ToolMode ToolModeForShapeDetail(ShapeDetail detail);
-ShapeKind ShapeKindForShapeDetail(ShapeDetail detail);
-ShapeDetail ShapeDetailForLegacyState(ToolMode mode, ShapeKind kind);
 void SyncLegacyShapeStateFromDetail();
-bool AnnotToolUsesGeometry(ToolMode mode, AnnotToolGeometry geometry);
-bool IsLineLikeAnnotToolMode(ToolMode mode);
-bool IsArrowAnnotToolMode(ToolMode mode);
-bool IsWaveAnnotToolMode(ToolMode mode);
-bool IsEmphasisAnnotToolMode(ToolMode mode, ShapeDrawMode shapeDrawMode);
-const char* AnnotToolFamilyKey(AnnotToolFamily family);
-bool AnnotToolFamilyFromKey(const std::string& key, AnnotToolFamily& out);
-const char* AnnotToolModeKey(ToolMode mode);
-bool AnnotToolModeFromKey(const std::string& key, ToolMode& out);
 bool ParseAnnotToolShortcutKeyForUser(const std::wstring& text, AnnotToolShortcutBinding& out);
 bool IsFixedAnnotToolNavigationShortcut(const AnnotToolShortcutBinding& binding);
 [[nodiscard]] bool IsReservedAnnotToolShortcut(const AnnotToolShortcutBinding& binding);
 [[nodiscard]] std::vector<AnnotToolShortcutBinding> DefaultAnnotToolShortcuts();
-AnnotToolFamily AnnotToolFamilyForMode(ToolMode mode);
 HWND AnnotToolFamilyButtonHwnd(AnnotToolFamily family);
 int AnnotToolFamilyCommand(AnnotToolFamily family);
 std::wstring AnnotToolFamilyLabel(AnnotToolFamily family);
@@ -709,6 +619,8 @@ extern bool g_textBoxReadableBackground;
 extern bool g_textBoxReadableBackgroundInverted;
 extern bool g_textBoxAutoWrap;
 extern HWND g_hChkTextAutoWrap;
+extern HWND g_hChkTextVertical;
+extern bool g_textBoxVertical;
 extern HWND g_hChkPanMouseWheelZoom;
 
 struct SavedToolbarState {
@@ -839,15 +751,6 @@ const std::vector<Annotation>* CurrentLogicalPdfAnnotations();
 bool IsPdfPreviewReadOnlyActive();
 void EndIntegratedPdfPreviewMode(HWND owner, bool restoreOriginalPdf);
 
-// 数値ソート系（テンプレートなのでヘッダに実装）
-int KanjiDigit(wchar_t ch);
-int FullwidthDigit(wchar_t ch);
-int RomanDigit(wchar_t ch);
-std::optional<int> ParseRomanNumber(const std::wstring& s);
-std::optional<int> ParseKanjiNumber(const std::wstring& s);
-std::optional<int> ExtractNumericKey(const std::wstring& name);
-
-
 void SetListWide(HWND hList);
 bool IsPdfFile(const std::filesystem::path& p);
 bool IsImageFile(const std::filesystem::path& p);
@@ -875,6 +778,7 @@ void PersistConfig();
 // Explicit settings saves must not report success or close the editor on failure.
 [[nodiscard]] bool TryPersistConfig();
 void SyncToolbarFontSizeCombo(bool activeSizeOnly = false);
+void SyncToolbarTextWritingMode();
 std::filesystem::path WorkspaceClassesPath(const std::wstring& root, const WorkspaceConfig& cfg);
 std::filesystem::path WorkspaceCachePath(const std::wstring& root, const WorkspaceConfig& cfg);
 const UiText& GetUiText();

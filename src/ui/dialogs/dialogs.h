@@ -6,6 +6,10 @@
 LRESULT CALLBACK ToolbarHostProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 bool ShouldSkipImeMessageInLoop(const MSG& msg);
 
+// Only the caller that disabled this owner may restore it. Call after close
+// validation succeeds and before DestroyWindow; never force global foreground.
+void RestoreModalOwnerBeforeClose(HWND owner);
+
 // Top-level dialogs opt in to one of these roles.  On an application exit
 // request, transient notices are dismissed while settings/output dialogs keep
 // the exit flow from discarding work that has not been applied or executed.

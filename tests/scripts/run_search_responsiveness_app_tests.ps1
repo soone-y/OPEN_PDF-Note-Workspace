@@ -15,14 +15,15 @@ try {
 } catch { throw 'A build or linked-app test is active. Wait for it to finish.' }
 try {
     $suffix = if ($Locale -eq 'en') { '_en' } else { '' }
-    $objectDir = Join-Path $repoRoot "out/obj_${ArtifactName}${suffix}"
+    $objectName = if ($ArtifactName -eq 'pdf_note_workspace') { "obj${suffix}" } else { "obj_${ArtifactName}${suffix}" }
+    $objectDir = Join-Path $repoRoot "out/$objectName"
     $binDir = Join-Path $repoRoot $(if ($Locale -eq 'en') { 'out/bin_en' } else { 'out/bin' })
     $response = Join-Path $objectDir 'link_args.rsp'
     $original = Get-Content -LiteralPath $response
     $searchObject = $original | Where-Object { $_ -match '[/\\]src_search_search\.o"?$' }
     if (@($searchObject).Count -ne 1) { throw 'Expected exactly one production search object.' }
     $testResponse = Join-Path $outputDir 'link.rsp'
-    $original | Where-Object { $_ -ne $searchObject } | Set-Content -Encoding utf8 $testResponse
+    [IO.File]::WriteAllLines($testResponse, [string[]]@($original | Where-Object { $_ -ne $searchObject }), [Text.UTF8Encoding]::new($false))
     $testObject = Join-Path $outputDir 'test.o'
     $testExe = Join-Path $outputDir 'test.exe'
     & g++ -std=c++17 -O2 -Wall -Wextra -Werror -Wno-unused-parameter -UNDEBUG -municode -I (Join-Path $repoRoot 'src') `
@@ -47,7 +48,7 @@ try {
     $process.Refresh()
     if ($null -eq $process.ExitCode -or $process.ExitCode -ne 0) { throw "Search test failed (exit $($process.ExitCode)): $outputDir/stderr.log" }
     $output = Get-Content (Join-Path $outputDir 'stdout.log') -Raw
-    foreach ($marker in @('Search failed-PDF budget PASS:', 'Search publication PASS:', 'Search note worker PASS:', 'Search worker lifecycle PASS:', 'Search responsiveness PASS:')) {
+    foreach ($marker in @('Search failed-PDF budget PASS:', 'Search publication PASS:', 'Search note worker PASS:', 'Search worker lifecycle PASS:', 'Search process scope PASS:', 'Search process lifecycle PASS:', 'Search blocked-read cancellation PASS:', 'Search groups PASS:', 'Search responsiveness PASS:')) {
         if (!$output.Contains($marker)) { throw "Required marker missing: $marker; evidence: $outputDir" }
     }
     Write-Host $output.TrimEnd()

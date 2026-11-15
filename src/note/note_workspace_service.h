@@ -50,7 +50,7 @@ private:
     std::shared_ptr<const WorkspaceNoteIndexSnapshot> FindCachedIndexLocked(
         const SnapshotIdentity& identity,
         const std::wstring& targetPath,
-        NoteContentKind contentKind, bool clroAsciiOnly);
+        NoteContentKind contentKind, bool clroAsciiOnly, bool quoteLazyContinuation);
     void InsertCachedIndexLocked(
         SnapshotIdentity identity,
         std::wstring targetPath,

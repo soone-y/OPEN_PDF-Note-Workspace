@@ -84,6 +84,8 @@ Next paragraph.
 
 Put a space after the heading's `#` characters. `***` and `___` also form rules. A line of `===` below text can form a heading, but this app treats `---` as a horizontal rule. Prefer hash headings for clarity.
 
+Automatic heading indentation uses the initial left padding as the first tier's baseline. Body text under level 1 has no extra indent; level 2 adds one step, level 3 adds two, and so on. An explicit `<d=…>` setting uses its specified indentation.
+
 ### Bullets, numbering, tasks, and quotes `M`
 
 ```text
@@ -103,20 +105,23 @@ Put a space after the heading's `#` characters. `***` and `___` also form rules.
 > Another quoted paragraph
 ```
 
+By default, only lines with `>` belong to a quote. A line without `>` ends the quote even without a blank line. Enable “Allow quote continuation without >” in the Note settings to accept unmarked paragraph continuation lines. You can also toggle “Quote continuation without >” in the lower-right status assist. This preference applies to Markdown-family note display and export.
+
 Use `-`, `*`, or `+` for bullets and `1.` or `1)` for numbering, followed by a space. Indent nested content to the parent's content position. Set task status in the source with `[ ]`, `[x]`, or `[X]`. Quotes may contain headings and lists.
 
 ### Inline formatting `M`
 
 | Syntax | Meaning |
 | --- | --- |
-| `**bold**` or `__bold__` | Bold |
+| `**bold**` | Bold |
+| `__text__` | Underline in `.clro`, bold in `.md` |
 | `*italic*` or `_italic_` | Italic |
 | `***bold italic***` | Both |
 | `~~strike~~` | Strikethrough |
 | `` `code` `` | Inline code; do not interpret its contents |
 | `\*text\*` | Literal punctuation |
 
-Do not put spaces between emphasis markers and their text. For underline, use `<u>text</>`. When inline code contains backticks, enclose it in a longer run of backticks.
+Do not put spaces between emphasis markers and their text. In `.clro`, `__text__` adds underline and `___text___` combines italic and underline. You can also use `<u>text</>`. HTML export preserves the underline, and TXT export removes the markers while keeping their text. Markdown export preserves the original `__`, which standard Markdown interprets as bold. When inline code contains backticks, enclose it in a longer run of backticks.
 
 ### Show code and syntax literally `M`
 
@@ -288,7 +293,9 @@ The color's `#` is optional. `hicont`, `hi-contrast`, `highcontrast`, or `high-c
 
 ### Compatibility headings and scope endings `c`
 
-For compatibility with existing notes, standalone `<h1>heading</>` through `<h6>heading</>` lines also form headings. `</#>`, `</##>`, and corresponding levels close heading-related indentation and formatting scopes. Prefer Markdown headings for ordinary notes.
+At the start of a line, `<m>` forms the highest heading tier, followed by `<m1>` through `<m5>`. `<m>Heading</>` corresponds to `# Heading`; `<m1>Heading</m1>` corresponds to `## Heading`. Use `</>` or a matching named closing tag, or omit the close at the end of the line. An opening tag on its own can use the immediately following text line as its title, without a blank separator. `<m6>` and higher are not heading names. With CLRO's ASCII-only setting OFF, digits in tag names may also be fullwidth: `＜ｍ１＞Heading＜／ｍ１＞`. Numbers in prose and attribute values stay unchanged.
+
+Standalone `<h1>heading</>` through `<h6>heading</>` lines remain supported. `</#>`, `</##>`, and corresponding levels close heading-related indentation and formatting scopes. `<m=5>`, `<m+5>`, and similar valued forms retain their line-height meaning. Bare `<m>` within a line also retains its legacy line-height meaning; use heading tags at the start of a line.
 
 ### Math tag attributes and constraints `c`
 

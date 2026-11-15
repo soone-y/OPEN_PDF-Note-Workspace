@@ -7,6 +7,7 @@ bool RunPdfPageRotationProbe(HWND owner, const std::wstring& outputDirectory,
         return false;
     const auto originalAnnots = g_annots;
     const auto originalRotations = g_pdf.pageViewRotations;
+    const auto originalSavedRotations = g_pdf.savedPageRotations;
     const auto originalTool = g_toolMode;
     const auto originalFont = g_textFontName;
     const double originalPt = g_textFontPt;
@@ -26,6 +27,7 @@ bool RunPdfPageRotationProbe(HWND owner, const std::wstring& outputDirectory,
         g_annots = originalAnnots;
         g_pdf.scale = originalScale;
         g_pdf.pageViewRotations = originalRotations;
+        g_pdf.savedPageRotations = originalSavedRotations;
         BuildPageCaches(g_hPdfView);
         UpdatePageLayout(g_hPdfView);
         g_pdf.scrollX = originalScrollX; g_pdf.scrollY = originalScrollY;
@@ -249,14 +251,62 @@ bool RunPdfPageRotationProbe(HWND owner, const std::wstring& outputDirectory,
     for (size_t i=0;i<g_annots.size();++i)
         if (!AnnotationEquals(g_annots[i],annotationsBeforeBatch[i])) return fail(L"Batch rotation mutated a saved annotation.");
     if (trace) *trace += L"pdf_rotation:all_pages_ok pages="+std::to_wstring(g_pdf.pages.size())+L"\n";
-    // Exercise the real metadata writer/reader and the same pre-layout restore
-    // used by document loading. Fit modes must retain rotations independently
-    // from whether a saved zoom/anchor is requested.
-    if (!RotateCurrentPdfPageView(g_hPdfView, 1, false)) return fail(L"Cannot seed persisted rotation.");
-    const auto persistedTurns = g_pdf.pageViewRotations;
+    JumpToPage(g_hPdfView, 0);
+    const auto baseline = g_pdf.savedPageRotations;
+    SendMessageW(owner, WM_COMMAND, ID_VIEW_ROTATE_PAGE_RIGHT, 0);
+    if (g_pdf.pages.front().viewRotation != 1 || g_pdf.savedPageRotations != baseline)
+        return fail(L"Temporary rotation changed the saved angle.");
+    PdfViewRestorePoint live;
+    if (!BuildCurrentPdfViewRecord(live)) return fail(L"Cannot capture temporary rotation anchor.");
+    SaveLastPdfViewInfo(); // The same writer is used on close and exit.
     PdfViewRestorePoint stored;
-    if (!ReadPdfViewRecordForPath(g_pdf.path, stored) || stored.pageRotations != persistedTurns)
-        return fail(L"Page rotations did not round trip through the real view record.");
+    if (!ReadPdfViewRecordForPath(g_pdf.path, stored) || stored.pageRotations != baseline)
+        return fail(L"Saving the view position persisted a temporary rotation.");
+    const auto& anchorPage = g_pdf.pages[static_cast<size_t>(live.pageIndex)];
+    const auto savedAnchor = page_rotation::Between({live.xPt, live.yPt}, anchorPage.canonicalWidthPt,
+        anchorPage.canonicalHeightPt, anchorPage.viewRotation, baseline[live.pageIndex]);
+    if (stored.pageIndex != live.pageIndex || std::abs(stored.xPt - savedAnchor.x) > 1e-6 ||
+        std::abs(stored.yPt - savedAnchor.y) > 1e-6)
+        return fail(L"The saved position did not follow the saved orientation.");
+
+    JumpToPage(g_hPdfView, 1);
+    SendMessageW(owner, WM_COMMAND, ID_VIEW_ROTATE_PAGE_RIGHT, 0);
+    JumpToPage(g_hPdfView, 0);
+    const auto beforeFailedEdit = g_pdf.pageViewRotations;
+    HANDLE recordLock = CreateFileW(LastPdfViewFilePath().c_str(), GENERIC_READ, FILE_SHARE_READ,
+        nullptr, OPEN_EXISTING, 0, nullptr);
+    if (recordLock == INVALID_HANDLE_VALUE) return fail(L"Cannot lock the view record for the save-failure check.");
+    const bool lockedSave = RotateCurrentPdfPageView(g_hPdfView, 1, false, PdfPageRotationMode::Saved);
+    const bool lockClosed = CloseHandle(recordLock) != FALSE;
+    if (!lockClosed || lockedSave || g_pdf.pageViewRotations != beforeFailedEdit ||
+        g_pdf.savedPageRotations != baseline || !ReadPdfViewRecordForPath(g_pdf.path, stored) ||
+        stored.pageRotations != baseline)
+        return fail(L"A failed rotation save changed the view or the saved angles.");
+
+    SendMessageW(owner, WM_COMMAND, ID_EDIT_ROTATE_PAGE_RIGHT, 0);
+    auto persistedTurns = baseline;
+    persistedTurns.front() = 2;
+    auto expectedView = beforeFailedEdit;
+    expectedView.front() = 2;
+    if (g_pdf.pageViewRotations != expectedView || g_pdf.savedPageRotations != persistedTurns ||
+        !ReadPdfViewRecordForPath(g_pdf.path, stored) || stored.pageRotations != persistedTurns)
+        return fail(L"View right followed by Edit right did not save a half turn.");
+
+    SendMessageW(owner, WM_COMMAND, ID_VIEW_ROTATE_ALL_RIGHT, 0);
+    SendMessageW(owner, WM_COMMAND, ID_VIEW_ROTATE_ALL_RESET, 0);
+    if (g_pdf.pageViewRotations != persistedTurns || g_pdf.savedPageRotations != persistedTurns)
+        return fail(L"Clearing temporary rotation did not return to the saved angles.");
+    SendMessageW(owner, WM_COMMAND, ID_VIEW_ROTATE_ALL_RIGHT, 0);
+    SendMessageW(owner, WM_COMMAND, ID_EDIT_ROTATE_ALL_RIGHT, 0);
+    for (auto& turn : persistedTurns) turn = page_rotation::Normalize(turn + 2);
+    if (g_pdf.pageViewRotations != persistedTurns || g_pdf.savedPageRotations != persistedTurns ||
+        !ReadPdfViewRecordForPath(g_pdf.path, stored) || stored.pageRotations != persistedTurns)
+        return fail(L"Editing all pages did not save each displayed angle plus the new turn.");
+
+    // Leave a temporary angle active for the real record writer and the
+    // pre-layout restore used when opening the PDF again.
+    SendMessageW(owner, WM_COMMAND, ID_VIEW_ROTATE_ALL_LEFT, 0);
+    SaveLastPdfViewInfo();
     const auto originalOpenMode = g_config.pdfOpenViewMode;
     const bool originalOpeningPreference = g_usePdfOpeningPreference;
     const bool originalOpeningAnchor = g_restorePdfOpeningAnchor;
@@ -264,10 +314,12 @@ bool RunPdfPageRotationProbe(HWND owner, const std::wstring& outputDirectory,
         g_config.pdfOpenViewMode = mode;
         QueuePendingPdfRestoreForPath(g_pdf.path);
         RestorePendingPdfPageRotations();
-        if (g_pdf.pageViewRotations != persistedTurns) return fail(L"Fit preference lost saved rotations.");
+        if (g_pdf.pageViewRotations != persistedTurns || g_pdf.savedPageRotations != persistedTurns)
+            return fail(L"Reopening retained temporary rotation or lost saved rotation.");
         BuildPageCaches(g_hPdfView);
         UpdatePageLayout(g_hPdfView);
-        if (g_pdf.pages.front().viewRotation != persistedTurns.front()) return fail(L"Layout preceded rotation restore.");
+        for (size_t i = 0; i < g_pdf.pages.size(); ++i)
+            if (g_pdf.pages[i].viewRotation != persistedTurns[i]) return fail(L"Layout preceded rotation restore.");
         if (!clrop::PdfIdFastMatches(originalPdfId, BuildCurrentOpenPdfFastId()))
             return fail(L"Restored view rotation changed the PDF identity before annotation loading.");
     }
@@ -275,7 +327,67 @@ bool RunPdfPageRotationProbe(HWND owner, const std::wstring& outputDirectory,
     g_usePdfOpeningPreference = originalOpeningPreference;
     g_restorePdfOpeningAnchor = originalOpeningAnchor;
     g_pendingPdfRestore.reset();
-    if (!RotateAllPdfPagesView(g_hPdfView, 0, true)) return fail(L"Cannot restore zero rotations after record probe.");
+    // Page two is visibly zero, but its saved angle is nonzero. An edit
+    // reset must still persist the original orientation in this case.
+    JumpToPage(g_hPdfView, 1);
+    if (!RotateCurrentPdfPageView(g_hPdfView, 2) || g_pdf.pages[1].viewRotation != 0)
+        return fail(L"Cannot set up an edit reset with no visible change.");
+    const auto editResetGeneration = g_pdf.renderGeneration;
+    SendMessageW(owner, WM_COMMAND, ID_EDIT_ROTATE_PAGE_RESET, 0);
+    persistedTurns[1] = 0;
+    if (g_pdf.renderGeneration != editResetGeneration || g_pdf.savedPageRotations != persistedTurns ||
+        !ReadPdfViewRecordForPath(g_pdf.path, stored) || stored.pageRotations != persistedTurns)
+        return fail(L"Edit reset lost the saved change when the display was already reset.");
+    if (trace) *trace += L"pdf_rotation:temporary_and_saved_ok\n";
+
+    if (g_pdf.pages.size() < 3) return fail(L"Remaining-page rotation requires at least three pages.");
+    JumpToPage(g_hPdfView, 0);
+    SendMessageW(owner, WM_COMMAND, ID_EDIT_ROTATE_PAGE_RIGHT, 0);
+    SendMessageW(owner, WM_COMMAND, ID_VIEW_ROTATE_PAGE_LEFT, 0);
+    persistedTurns.front() = 1;
+    auto remainingView = persistedTurns;
+    remainingView.front() = 0; // The preceding page has a temporary turn of its own.
+    const auto turnRemaining = [&](int delta) {
+        for (size_t i = 1; i < remainingView.size(); ++i)
+            remainingView[i] = page_rotation::Normalize(remainingView[i] + delta);
+    };
+    const auto checkRemaining = [&](int command) {
+        JumpToPage(g_hPdfView, 1);
+        const auto generation = g_pdf.renderGeneration;
+        SendMessageW(owner, WM_COMMAND, command, 0);
+        if (g_pdf.renderGeneration != generation + 1 || g_pdf.pageViewRotations != remainingView ||
+            g_pdf.savedPageRotations != persistedTurns ||
+            !ReadPdfViewRecordForPath(g_pdf.path, stored) || stored.pageRotations != persistedTurns)
+            return false;
+        for (size_t i = 0; i < remainingView.size(); ++i) {
+            const auto& page = g_pdf.pages[i];
+            const auto size = page_rotation::Extent(page.canonicalWidthPt, page.canonicalHeightPt, remainingView[i]);
+            if (page.viewRotation != remainingView[i] || page.widthPt != size.width || page.heightPt != size.height)
+                return false;
+        }
+        return true;
+    };
+    turnRemaining(-1);
+    if (!checkRemaining(ID_VIEW_ROTATE_REMAINING_LEFT)) return fail(L"Temporary left rotation changed the wrong pages.");
+    turnRemaining(1);
+    if (!checkRemaining(ID_VIEW_ROTATE_REMAINING_RIGHT)) return fail(L"Temporary right rotation did not round trip.");
+    turnRemaining(1);
+    if (!checkRemaining(ID_VIEW_ROTATE_REMAINING_RIGHT)) return fail(L"Cannot seed temporary remaining-page rotation.");
+    turnRemaining(1);
+    std::copy(remainingView.begin() + 1, remainingView.end(), persistedTurns.begin() + 1);
+    if (!checkRemaining(ID_EDIT_ROTATE_REMAINING_RIGHT)) return fail(L"Saved rotation lost the current angles or changed preceding pages.");
+    turnRemaining(-1);
+    if (!checkRemaining(ID_VIEW_ROTATE_REMAINING_LEFT)) return fail(L"Cannot seed temporary rotation for reset.");
+    std::copy(persistedTurns.begin() + 1, persistedTurns.end(), remainingView.begin() + 1);
+    if (!checkRemaining(ID_VIEW_ROTATE_REMAINING_RESET)) return fail(L"Remaining-page view reset lost saved angles.");
+    turnRemaining(-1);
+    std::copy(remainingView.begin() + 1, remainingView.end(), persistedTurns.begin() + 1);
+    if (!checkRemaining(ID_EDIT_ROTATE_REMAINING_LEFT)) return fail(L"Saved left rotation changed the wrong pages.");
+    std::fill(remainingView.begin() + 1, remainingView.end(), 0);
+    std::fill(persistedTurns.begin() + 1, persistedTurns.end(), 0);
+    if (!checkRemaining(ID_EDIT_ROTATE_REMAINING_RESET)) return fail(L"Remaining-page edit reset changed preceding pages.");
+    if (trace) *trace += L"pdf_rotation:remaining_pages_ok\n";
+
     if (trace) *trace += L"pdf_rotation:pdf_id_original_ok cases=4 restore_modes=3\n";
     if (trace) *trace += L"pdf_rotation:canonical_edit_save_undo_export_ok cases=4\n";
     return true;

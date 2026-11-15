@@ -2,10 +2,11 @@
 // NOTE: This file is intentionally included by `src/pdf_view/pdf_view.cpp` to keep the build as a
 // single translation unit while physically splitting responsibilities.
 
-static void ClampPdfScroll(int viewH, int viewW);
+static void ClampPdfScroll(int viewH, int viewW, bool observeTravel = true);
 static void UpdatePageLayout(HWND pdfWnd);
 static void ApplyPdfScaleDirect(HWND pdfWnd, double newScale, POINT focusInClient, bool renderPages);
 static void ShutdownPdfVirtualRenderWorker();
+static void StopPdfBitmapRetentionTimer();
 // A UI-thread transaction: reentrant size/paint may update geometry, but must
 // not schedule page pixels until initial fit and saved anchor are both final.
 static unsigned g_pdfInitialViewportUpdateDepth = 0;
@@ -26,10 +27,10 @@ static constexpr int kTextBoxGlyphOverhangPadPx = 2; // P1-1: keep right-edge gl
 // separate from the PDF page bitmap cache, so low-resolution page rendering does not
 // permanently degrade annotation text quality.
 // INCREASED to 576.0 to prevent text annotations from looking "shrunk and forcibly enlarged" on high DPI displays.
-static constexpr double kTextBoxStableRasterDpi = 576.0; // render once, then scale to avoid zoom-hinting jitter
+static constexpr double kTextBoxStableRasterDpi = annotation_text::kRasterDpi; // shared with the read-only viewer
 static constexpr double kTextBoxLayoutDpi = kTextBoxStableRasterDpi;
 [[nodiscard]] static int TextBoxFontHeightPx(double fontPt) {
-    return std::max(1, static_cast<int>(std::lround(fontPt * kTextBoxLayoutDpi / 72.0)));
+    return annotation_text::FontHeight(fontPt);
 }
 static constexpr int kTextClickLeftOffsetPx = 2; // 新規文字注釈をクリック位置へ近づける（P3-14: 従来より4px右寄せ）
 static constexpr int kTextInputDownBiasPx = 1; // Screen-space bias shared by insertion, reediting and hover.
@@ -317,6 +318,7 @@ void SetPdfSearchPointMarker(int pageIndex, double xPt, double yPt) {
 
 void ClearPdfState() {
     StopPdfKeyboardScroll(g_hPdfView);
+    StopPdfBitmapRetentionTimer();
     g_pdfWheelInput.Reset();
     if (!IsDocumentOpenLockTransitionActive() && !g_pdf.path.empty()) {
         ReleaseDocumentOpenLock(std::filesystem::path(g_pdf.path));
@@ -339,6 +341,7 @@ void ClearPdfState() {
     g_pdf.contentHeight = 0.0;
     g_pdf.pageCount = 0;
     g_pdf.pageViewRotations.clear();
+    g_pdf.savedPageRotations.clear();
     g_pdf.scale = 1.0;
     g_pdf.renderScale = 1.0;
     g_pdf.scrollY = 0.0;

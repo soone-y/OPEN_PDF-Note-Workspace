@@ -15,6 +15,7 @@ try {
     & $compiler.Source -std=c++17 -O1 -municode -DCLROP_READ_ONLY_BUILD -DMD4C_USE_UTF16 `
         "-DPDF_NOTE_LOCALE_EN=$([int]($Locale -eq 'en'))" -Isrc -Ithird_party/pdfium/include "-I$generated" `
         tests/unit/readonly_pdf_region_selection_tests.cpp src/readonly_viewer/pdf_region_selection.cpp `
+        src/readonly_viewer/annotation_text.cpp `
         src/core/localization.cpp src/theme/built_in_theme.cpp src/clrop/json.cpp `
         third_party/pdfium/lib/pdfium.dll.lib -lgdi32 -luser32 -lmsimg32 -lshell32 -lole32 -luuid -lcomctl32 -luxtheme -o $exe
     if ($LASTEXITCODE -ne 0) { throw 'Reader selection test compilation failed.' }

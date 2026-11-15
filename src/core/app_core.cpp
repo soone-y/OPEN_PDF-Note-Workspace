@@ -258,6 +258,7 @@ HWND g_hChkTextReadableBackground = nullptr;
 HWND g_hRadioTextReadableBackgroundNormal = nullptr;
 HWND g_hRadioTextReadableBackgroundInverted = nullptr;
 HWND g_hChkTextAutoWrap = nullptr;
+HWND g_hChkTextVertical = nullptr;
 HWND g_hChkPanMouseWheelZoom = nullptr;
 HWND g_hComboWidth = nullptr;
 HWND g_hComboMarkerAlpha = nullptr;
@@ -403,42 +404,6 @@ ToolMode g_markerGroupMode = ToolMode::MarkerText;
 ToolMode g_penGroupMode = ToolMode::Freehand;
 ToolMode g_shapeGroupMode = ToolMode::Line;
 
-static std::vector<ToolMode> DefaultAnnotToolModeUiOrder() {
-    return {
-        ToolMode::Select,
-        ToolMode::Pan,
-        ToolMode::Magnifier,
-        ToolMode::TextBox,
-        ToolMode::MarkerText,
-        ToolMode::MarkerTextUnderline,
-        ToolMode::MarkerTextColor,
-        ToolMode::MarkerFree,
-        ToolMode::Freehand,
-        ToolMode::Line,
-        ToolMode::Wave,
-        ToolMode::Arrow,
-        ToolMode::Shape,
-        ToolMode::MarkerLine,
-        ToolMode::MarkerWave,
-        ToolMode::MarkerArrow,
-        ToolMode::Eraser,
-    };
-}
-
-static const std::vector<AnnotToolFamily>& DefaultAnnotToolFamilyUiOrder() {
-    static const std::vector<AnnotToolFamily> order = {
-        AnnotToolFamily::Select,
-        AnnotToolFamily::Pan,
-        AnnotToolFamily::Magnifier,
-        AnnotToolFamily::Text,
-        AnnotToolFamily::Marker,
-        AnnotToolFamily::Pen,
-        AnnotToolFamily::Shape,
-        AnnotToolFamily::Eraser,
-    };
-    return order;
-}
-
 static std::array<AnnotToolUiState, kToolModeCount> DefaultAnnotToolModeUiStates() {
     std::array<AnnotToolUiState, kToolModeCount> s{};
     s.fill(AnnotToolUiState::Enabled);
@@ -472,6 +437,7 @@ bool g_textFontUseA4ScaleSlotB = true;
 bool g_textBoxReadableBackground = false;
 bool g_textBoxReadableBackgroundInverted = false;
 bool g_textBoxAutoWrap = true;
+bool g_textBoxVertical = false;
 SavedToolbarState g_preEditToolbarState;
 bool g_lineToolsShareStyle = true;
 double g_lineWidthPt = 2.0;
@@ -1987,133 +1953,8 @@ bool IsPdfPreviewReadOnlyActive() {
 }
 
 // ---------------------------------------------------------------------
-// number / sort helpers (from original)
+// list / file helpers
 // ---------------------------------------------------------------------
-int KanjiDigit(wchar_t ch) {
-    switch (ch) {
-    case L'零': case L'〇': return 0;
-    case L'一': return 1;
-    case L'二': return 2;
-    case L'三': return 3;
-    case L'四': return 4;
-    case L'五': return 5;
-    case L'六': return 6;
-    case L'七': return 7;
-    case L'八': return 8;
-    case L'九': return 9;
-    default: return -1;
-    }
-}
-
-int FullwidthDigit(wchar_t ch) {
-    if (ch >= 0xFF10 && ch <= 0xFF19) return static_cast<int>(ch - 0xFF10);
-    return -1;
-}
-
-int RomanDigit(wchar_t ch) {
-    wchar_t u = static_cast<wchar_t>(towupper(ch));
-    switch (u) {
-    case L'I': return 1;
-    case L'V': return 5;
-    case L'X': return 10;
-    case L'L': return 50;
-    case L'C': return 100;
-    case L'D': return 500;
-    case L'M': return 1000;
-    default: return -1;
-    }
-}
-
-std::optional<int> ParseRomanNumber(const std::wstring& s) {
-    std::vector<int> vals;
-    for (wchar_t ch : s) {
-        int v = RomanDigit(ch);
-        if (v >= 0) vals.push_back(v);
-    }
-    if (vals.empty()) return std::nullopt;
-    int total = 0;
-    for (size_t i = 0; i < vals.size(); ++i) {
-        if (i + 1 < vals.size() && vals[i] < vals[i + 1]) {
-            total -= vals[i];
-        } else {
-            total += vals[i];
-        }
-    }
-    return total;
-}
-
-std::optional<int> ParseKanjiNumber(const std::wstring& s) {
-    int total = 0;
-    int current = 0;
-    bool found = false;
-    for (wchar_t ch : s) {
-        int d = KanjiDigit(ch);
-        if (d >= 0) {
-            current = current * 10 + d;
-            found = true;
-            continue;
-        }
-        if (ch == L'十') {
-            current = (current == 0) ? 10 : current * 10;
-            found = true;
-        } else if (ch == L'百') {
-            current = (current == 0) ? 100 : current * 100;
-            found = true;
-        } else if (ch == L'千') {
-            current = (current == 0) ? 1000 : current * 1000;
-            found = true;
-        }
-    }
-    if (!found) return std::nullopt;
-    total += current;
-    return total;
-}
-
-std::optional<int> ExtractNumericKey(const std::wstring& name) {
-    auto digitAt = [&](size_t index) -> int {
-        if (index >= name.size()) return -1;
-        const int fullwidth = FullwidthDigit(name[index]);
-        if (fullwidth >= 0) return fullwidth;
-        return (name[index] >= L'0' && name[index] <= L'9')
-            ? static_cast<int>(name[index] - L'0')
-            : -1;
-    };
-    auto parseDigitRun = [&](size_t start) -> std::optional<int> {
-        std::wstring digits;
-        for (size_t index = start; index < name.size(); ++index) {
-            const int digit = digitAt(index);
-            if (digit < 0) break;
-            digits.push_back(static_cast<wchar_t>(L'0' + digit));
-        }
-        if (digits.empty()) return std::nullopt;
-        try {
-            return std::stoi(digits);
-        } catch (...) {
-            return std::nullopt;
-        }
-    };
-
-    // Prefer the ordinal marker used by ordinary session names.  This avoids
-    // treating a year and a period number as one number (for example,
-    // "2026年度 第2回" is session 2, not 20262).
-    for (size_t index = 0; index < name.size(); ++index) {
-        if (name[index] != L'第') continue;
-        size_t digitStart = index + 1;
-        while (digitStart < name.size() && iswspace(name[digitStart])) ++digitStart;
-        if (auto value = parseDigitRun(digitStart)) return value;
-    }
-
-    // Without an ordinal marker, use only the first contiguous digit run.
-    // Separate numbers must not be concatenated: "資料2_3" sorts as 2.
-    for (size_t index = 0; index < name.size(); ++index) {
-        if (digitAt(index) >= 0) return parseDigitRun(index);
-    }
-
-    auto roman = ParseRomanNumber(name);
-    if (roman) return roman;
-    return ParseKanjiNumber(name);
-}
-
 void SetListWide(HWND hList) {
     if (!hList) return;
     int count = static_cast<int>(SendMessageW(hList, LB_GETCOUNT, 0, 0));
@@ -2459,6 +2300,7 @@ WorkspaceConfig DefaultWorkspaceConfig() {
     cfg.textBoxReadableBackground = g_textBoxReadableBackground;
     cfg.textBoxReadableBackgroundInverted = g_textBoxReadableBackgroundInverted;
     cfg.textBoxAutoWrap = g_textBoxAutoWrap;
+    cfg.textBoxVertical = g_textBoxVertical;
     cfg.lineToolsShareStyle = true;
     cfg.lineWidthPt = (g_lineWidthPt > 0.0) ? g_lineWidthPt : 2.5;
     cfg.arrowWidthPt = (g_arrowWidthPt > 0.0) ? g_arrowWidthPt : cfg.lineWidthPt;
@@ -2581,7 +2423,7 @@ static bool LooksLikeWorkspaceJson(const std::string& rawJson) {
     if (json.front() != '{' || json.back() != '}') return false;
     if (!IsSyntacticallyValidJsonLite(json)) return false;
     // NOTE: shortcuts are no longer persisted in workspace.json.
-static const std::regex keyRe("\"(classesDir|cacheDir|showAnnots|pdfFlowMode|pdfOpenViewMode|pdfBitmapBudgetMiB|pdfSinglePageMode|showPdfPageOverlay|showPdfZoomOverlay|emptyViewGuideMode|panMouseWheelZoom|mouseWheelInvertVertical|mouseWheelInvertHorizontal|touchpadInvertVertical|touchpadInvertHorizontal|touchpadScrollStabilization|leftWidth|rightWidth|topHeight|leftPaneCollapsed|language|bottomPanePin|bottomNoteMode|notePlacement|colorTone|toneVariant|quickAnnotPopupPlacement|noteFontPt|noteFontName|noteRenderFontPt|noteRenderFontName|noteRenderJpFontName|noteWrapEnabled|noteVimCaretLineRawTextVisible|noteVimClickEntersInsertMode|noteOverlayRefreshDelayMs|noteFullReparseDelayMs|ownerDrawUi|useNativeFileDialogs|developerMode|studentMode|exportStandardTextAnnots|quickPdfScalePercent|quickPdfStandardTextAnnots|quickPdfMatchPdfPaneTextLayout|quickPdfKeepPageRotation|quickPdfTextColorMode|quickPdfTextColorBackground|quickNoteStripMarkup|quickNoteIncludeComments|quickNoteMathPlaceholder|quickNoteMathPlaceholderText|additionalNoteExtensions|newNoteExtension|restoreLastSession|exportNormalizeClroSyntax|sessionSortMode|sessionNumberingMode|sessionFileLayout|sessionAutoOpenMode|sessionAutoOpenPairLinked|startupSelectFirstSession|fullWidthParenCaretInside|fullWidthParenCancelNextLeft)\"\\s*:");
+static const std::regex keyRe("\"(classesDir|cacheDir|showAnnots|pdfFlowMode|pdfOpenViewMode|pdfBitmapBudgetMiB|pdfSinglePageMode|showPdfPageOverlay|showPdfZoomOverlay|emptyViewGuideMode|panMouseWheelZoom|mouseWheelInvertVertical|mouseWheelInvertHorizontal|touchpadInvertVertical|touchpadInvertHorizontal|touchpadScrollStabilization|leftWidth|rightWidth|topHeight|leftPaneCollapsed|language|bottomPanePin|bottomNoteMode|notePlacement|colorTone|toneVariant|quickAnnotPopupPlacement|noteFontPt|noteFontName|noteRenderFontPt|noteRenderFontName|noteRenderJpFontName|noteWrapEnabled|noteVimCaretLineRawTextVisible|noteVimClickEntersInsertMode|noteOverlayRefreshDelayMs|noteFullReparseDelayMs|ownerDrawUi|useNativeFileDialogs|developerMode|studentMode|exportStandardTextAnnots|quickPdfScalePercent|quickPdfStandardTextAnnots|quickPdfMatchPdfPaneTextLayout|quickPdfKeepPageRotation|quickPdfEmbedEditableData|quickPdfTextColorMode|quickPdfTextColorBackground|quickNoteStripMarkup|quickNoteIncludeComments|quickNoteMathPlaceholder|quickNoteMathPlaceholderText|additionalNoteExtensions|newNoteExtension|restoreLastSession|exportNormalizeClroSyntax|sessionSortMode|sessionNumberingMode|sessionFileLayout|sessionAutoOpenMode|sessionAutoOpenPairLinked|startupSelectFirstSession|fullWidthParenCaretInside|fullWidthParenCancelNextLeft)\"\\s*:");
     return std::regex_search(json, keyRe);
 }
 
@@ -2696,7 +2538,7 @@ static bool IsWorkspaceConfigKnownTopLevelField(const std::string& key) {
         "mouseWheelInvertHorizontal", "touchpadInvertVertical", "touchpadInvertHorizontal", "touchpadScrollStabilization",
         "ownerDrawUi", "useNativeFileDialogs", "developerMode", "studentMode",
         "exportStandardTextAnnots", "quickPdfScalePercent", "quickPdfStandardTextAnnots",
-        "quickPdfKeepPageRotation", "quickPdfMatchPdfPaneTextLayout", "quickPdfTextColorMode", "quickPdfTextColorBackground", "quickNoteStripMarkup", "quickNoteIncludeComments",
+        "quickPdfKeepPageRotation", "quickPdfEmbedEditableData", "quickPdfMatchPdfPaneTextLayout", "quickPdfTextColorMode", "quickPdfTextColorBackground", "quickNoteStripMarkup", "quickNoteIncludeComments",
         "quickNoteMathPlaceholder", "quickNoteMathPlaceholderText", "debugLogPreviewTrace", "debugLogSwitchTiming",
         "debugLogCrash", "debugLogStartupWatchdog", "debugLogOfficeConversion",
         "leftWidth", "rightWidth", "topHeight",
@@ -2710,7 +2552,7 @@ static bool IsWorkspaceConfigKnownTopLevelField(const std::string& key) {
         "showMathList", "downKeyLastLineAction", "downKeyLastLineInsertNewline",
         "leftRightLineMoveAction", "autoPairBrackets", "fullWidthParenCaretInside", "fullWidthParenCancelNextLeft",
         "noteFontName", "noteFontPt", "noteRenderFontName", "noteRenderJpFontName",
-        "noteRenderFontPt", "noteSystem", "noteRenderEnabled", "noteRawOnly", "noteRenderMath", "clroAsciiOnly",
+        "noteRenderFontPt", "noteSystem", "noteRenderEnabled", "noteRawOnly", "noteRenderMath", "clroAsciiOnly", "noteQuoteLazyContinuation",
         "noteWrapEnabled", "noteVimModeEnabled", "noteVimCaretLineRawTextVisible",
         "noteVimClickEntersInsertMode", "noteOverlayRefreshDelayMs", "noteFullReparseDelayMs",
         "noteMathMarginTopPercent",
@@ -2725,7 +2567,7 @@ static bool IsWorkspaceConfigKnownTopLevelField(const std::string& key) {
         "autoIntegrateCustomMinutes", "clroNamePattern", "additionalNoteExtensions",
         "newNoteExtension", "pdfOpenViewMode", "restoreLastSession", "exportNormalizeClroSyntax", "textFontName", "textFontPt",
         "textFontUseA4Scale", "textFontActiveSizeSlot", "textFontPtSlotA", "textFontPtSlotB",
-        "textFontUseA4ScaleSlotA", "textFontUseA4ScaleSlotB", "textBoxReadableBackground", "textBoxReadableBackgroundInverted", "textBoxAutoWrap",
+        "textFontUseA4ScaleSlotA", "textFontUseA4ScaleSlotB", "textBoxReadableBackground", "textBoxReadableBackgroundInverted", "textBoxAutoWrap", "textBoxVertical",
         "lineToolsShareStyle", "lineWidthPt", "arrowWidthPt", "arrowHead", "waveWidthPt", "lineDashStyle", "freehandWidthPt",
         "markerFreeWidthPt", "markerTextWidthPt", "markerTextUnderline", "eraserWidthPt",
         "newMarkerDisplayMode",
@@ -3075,62 +2917,6 @@ static std::vector<std::string> ParseJsonStringArrayField(const std::string& jso
     return items;
 }
 
-static const char* ToolModeKey(ToolMode mode) {
-    switch (mode) {
-    case ToolMode::Select:     return "select";
-    case ToolMode::Pan:        return "pan";
-    case ToolMode::Magnifier:  return "magnifier";
-    case ToolMode::MarkerText: return "marker_text";
-    case ToolMode::MarkerTextUnderline: return "marker_text_underline";
-    case ToolMode::MarkerTextColor: return "marker_text_color";
-    case ToolMode::MarkerFree: return "marker_free";
-    case ToolMode::MarkerLine: return "marker_line";
-    case ToolMode::MarkerArrow:return "marker_arrow";
-    case ToolMode::MarkerWave: return "marker_wave";
-    case ToolMode::TextBox:    return "text";
-    case ToolMode::Line:       return "line";
-    case ToolMode::Arrow:      return "arrow";
-    case ToolMode::Wave:       return "wave";
-    case ToolMode::Freehand:   return "freehand";
-    case ToolMode::Shape:      return "shape";
-    case ToolMode::Eraser:     return "eraser";
-    default:                   return "";
-    }
-}
-
-static bool ToolModeFromKey(std::string key, ToolMode& out) {
-    std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    if (key == "select") { out = ToolMode::Select; return true; }
-    if (key == "pan") { out = ToolMode::Pan; return true; }
-    if (key == "magnifier") { out = ToolMode::Magnifier; return true; }
-    if (key == "marker_text" || key == "markertext") { out = ToolMode::MarkerText; return true; }
-    if (key == "marker_text_underline" || key == "markertextunderline" ||
-        key == "marker_underline" || key == "markerunderline") { out = ToolMode::MarkerTextUnderline; return true; }
-    if (key == "marker_text_color" || key == "markertextcolor" ||
-        key == "marker_color_text" || key == "markercolortext" ||
-        key == "text_color_marker" || key == "textcolormarker") { out = ToolMode::MarkerTextColor; return true; }
-    if (key == "marker_free" || key == "markerfree") { out = ToolMode::MarkerFree; return true; }
-    if (key == "marker_line" || key == "markerline") { out = ToolMode::MarkerLine; return true; }
-    if (key == "marker_arrow" || key == "markerarrow") { out = ToolMode::MarkerArrow; return true; }
-    if (key == "marker_wave" || key == "markerwave") { out = ToolMode::MarkerWave; return true; }
-    if (key == "text" || key == "textbox") { out = ToolMode::TextBox; return true; }
-    if (key == "line") { out = ToolMode::Line; return true; }
-    if (key == "arrow") { out = ToolMode::Arrow; return true; }
-    if (key == "wave") { out = ToolMode::Wave; return true; }
-    if (key == "freehand") { out = ToolMode::Freehand; return true; }
-    if (key == "shape") { out = ToolMode::Shape; return true; }
-    if (key == "eraser") { out = ToolMode::Eraser; return true; }
-    return false;
-}
-
-const char* AnnotToolModeKey(ToolMode mode) {
-    return ToolModeKey(mode);
-}
-
-bool AnnotToolModeFromKey(const std::string& key, ToolMode& out) {
-    return ToolModeFromKey(key, out);
-}
-
 static bool ParseShortcutKeyToken(const std::string& token, UINT& outVk) {
     outVk = 0;
     if (token.size() == 1) {
@@ -3320,7 +3106,7 @@ static std::string BuildUserToolShortcutsJson(const std::vector<AnnotToolShortcu
     for (const auto& binding : bindings) {
         const char* target = binding.targetKind == AnnotToolShortcutTargetKind::Category
             ? AnnotToolFamilyKey(binding.family)
-            : ToolModeKey(binding.mode);
+            : AnnotToolModeKey(binding.mode);
         if (!target || !*target || binding.key.empty()) continue;
         if (!first) oss << ",\n";
         first = false;
@@ -3384,7 +3170,7 @@ static bool LoadUserToolShortcuts(std::vector<AnnotToolShortcutBinding>& out) {
         if (IsFixedAnnotToolNavigationShortcut(binding)) continue;
         if (tool) {
             ToolMode mode{};
-            if (!ToolModeFromKey(*tool, mode)) continue;
+            if (!AnnotToolModeFromKey(*tool, mode)) continue;
             binding.targetKind = AnnotToolShortcutTargetKind::Detail;
             binding.mode = mode;
             binding.family = AnnotToolFamilyForMode(mode);
@@ -3460,7 +3246,7 @@ void LoadAnnotToolUiConfigFromSetupJson(const std::string& setupJson) {
     auto modeOrderKeys = ParseJsonStringArrayField(setupJson, "annotToolModeOrder");
     for (const auto& k : modeOrderKeys) {
         ToolMode mode{};
-        if (ToolModeFromKey(k, mode)) {
+        if (AnnotToolModeFromKey(k, mode)) {
             expandedOrder.push_back(mode);
         }
     }
@@ -3475,7 +3261,7 @@ void LoadAnnotToolUiConfigFromSetupJson(const std::string& setupJson) {
         std::string v = entry.substr(sep + 1);
         ToolMode mode{};
         AnnotToolUiState s{};
-        if (!ToolModeFromKey(k, mode)) continue;
+        if (!AnnotToolModeFromKey(k, mode)) continue;
         if (!AnnotToolUiStateFromKey(v, s)) continue;
         int idx = static_cast<int>(mode);
         if (idx < 0 || idx >= kToolModeCount) continue;
@@ -3830,7 +3616,7 @@ bool ReplaceAnnotToolShortcutBindings(const std::vector<AnnotToolShortcutBinding
         if (binding.targetKind == AnnotToolShortcutTargetKind::Category) {
             if (!AnnotToolFamilyKey(binding.family) || !*AnnotToolFamilyKey(binding.family)) return false;
         } else if (binding.targetKind == AnnotToolShortcutTargetKind::Detail) {
-            const char* key = ToolModeKey(binding.mode);
+            const char* key = AnnotToolModeKey(binding.mode);
             if (!key || !*key || static_cast<int>(binding.mode) < 0 ||
                 static_cast<int>(binding.mode) >= kToolModeCount) return false;
             binding.family = AnnotToolFamilyForMode(binding.mode);
@@ -3855,36 +3641,6 @@ bool ReplaceAnnotToolShortcutBindings(const std::vector<AnnotToolShortcutBinding
     // The empty-view guide reads accepted runtime bindings on its next paint.
     if (g_hPdfView) InvalidateRect(g_hPdfView, nullptr, FALSE);
     return true;
-}
-
-const char* AnnotToolFamilyKey(AnnotToolFamily family) {
-    switch (family) {
-    case AnnotToolFamily::Select: return "select";
-    case AnnotToolFamily::Pan: return "pan";
-    case AnnotToolFamily::Magnifier: return "magnifier";
-    case AnnotToolFamily::Text: return "text";
-    case AnnotToolFamily::Marker: return "marker";
-    case AnnotToolFamily::Pen: return "pen";
-    case AnnotToolFamily::Shape: return "shape";
-    case AnnotToolFamily::Eraser: return "eraser";
-    default: return "";
-    }
-}
-
-bool AnnotToolFamilyFromKey(const std::string& raw, AnnotToolFamily& out) {
-    std::string key = raw;
-    std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) {
-        return static_cast<char>(std::tolower(c));
-    });
-    if (key == "select") { out = AnnotToolFamily::Select; return true; }
-    if (key == "pan") { out = AnnotToolFamily::Pan; return true; }
-    if (key == "magnifier") { out = AnnotToolFamily::Magnifier; return true; }
-    if (key == "text" || key == "textbox") { out = AnnotToolFamily::Text; return true; }
-    if (key == "marker") { out = AnnotToolFamily::Marker; return true; }
-    if (key == "pen" || key == "freehand") { out = AnnotToolFamily::Pen; return true; }
-    if (key == "shape") { out = AnnotToolFamily::Shape; return true; }
-    if (key == "eraser") { out = AnnotToolFamily::Eraser; return true; }
-    return false;
 }
 
 static double ThemeContrastRatio(COLORREF a, COLORREF b) {
@@ -4505,6 +4261,7 @@ static bool ButtonIsKnownCheckbox(HWND hWnd) {
     return hWnd == g_hAnnotShow ||
            hWnd == g_hChkTextReadableBackground ||
            hWnd == g_hChkTextAutoWrap ||
+           hWnd == g_hChkTextVertical ||
            hWnd == g_hChkPanMouseWheelZoom ||
            hWnd == g_hChkShortcutHeading1 ||
            hWnd == g_hChkShortcutBack ||
@@ -5382,41 +5139,6 @@ bool HandleQuickAnnotContextMenu(HWND host, const POINT* screenPt, bool allowWit
     return ShowQuickAnnotToolMenu(host, &clientPt, false);
 }
 
-const std::vector<AnnotToolFamily>& AnnotToolFamilyUiOrder() {
-    return DefaultAnnotToolFamilyUiOrder();
-}
-
-AnnotToolFamily AnnotToolFamilyForMode(ToolMode mode) {
-    switch (mode) {
-    case ToolMode::Select:
-        return AnnotToolFamily::Select;
-    case ToolMode::Pan:
-        return AnnotToolFamily::Pan;
-    case ToolMode::Magnifier:
-        return AnnotToolFamily::Magnifier;
-    case ToolMode::TextBox:
-        return AnnotToolFamily::Text;
-    case ToolMode::MarkerText:
-    case ToolMode::MarkerTextUnderline:
-    case ToolMode::MarkerTextColor:
-    case ToolMode::MarkerFree:
-        return AnnotToolFamily::Marker;
-    case ToolMode::Freehand:
-        return AnnotToolFamily::Pen;
-    case ToolMode::MarkerLine:
-    case ToolMode::MarkerArrow:
-    case ToolMode::Line:
-    case ToolMode::MarkerWave:
-    case ToolMode::Arrow:
-    case ToolMode::Wave:
-    case ToolMode::Shape:
-        return AnnotToolFamily::Shape;
-    case ToolMode::Eraser:
-    default:
-        return AnnotToolFamily::Eraser;
-    }
-}
-
 HWND AnnotToolFamilyButtonHwnd(AnnotToolFamily family) {
     switch (family) {
     case AnnotToolFamily::Select:    return g_hBtnModeSelect;
@@ -5877,6 +5599,9 @@ static void ApplyJsonToWorkspaceConfig(const std::string& json, WorkspaceConfig&
     if (auto b = ParseJsonBoolField(json, "quickPdfKeepPageRotation")) {
         cfg.quickPdfKeepPageRotation = *b;
     }
+    if (auto b = ParseJsonBoolField(json, "quickPdfEmbedEditableData")) {
+        cfg.quickPdfEmbedEditableData = *b;
+    }
     if (auto v = ParseJsonIntField(json, "quickPdfTextColorMode")) {
         cfg.quickPdfTextColorMode = *v >= 0 && *v <= 3 ? *v : 0;
     }
@@ -6069,6 +5794,7 @@ static void ApplyJsonToWorkspaceConfig(const std::string& json, WorkspaceConfig&
         cfg.noteRenderMath = *b;
     }
     if (auto b = ParseJsonBoolField(json, "clroAsciiOnly")) cfg.clroAsciiOnly = *b;
+    if (auto b = ParseJsonBoolField(json, "noteQuoteLazyContinuation")) cfg.noteQuoteLazyContinuation = *b;
     if (auto b = ParseJsonBoolField(json, "noteWrapEnabled")) {
         cfg.noteWrapEnabled = *b;
     }
@@ -6214,6 +5940,9 @@ static void ApplyJsonToWorkspaceConfig(const std::string& json, WorkspaceConfig&
     }
     if (auto b = ParseJsonBoolField(json, "textBoxAutoWrap")) {
         cfg.textBoxAutoWrap = *b;
+    }
+    if (auto b = ParseJsonBoolField(json, "textBoxVertical")) {
+        cfg.textBoxVertical = *b;
     }
     if (cfg.textFontActiveSizeSlot == 1) {
         cfg.textFontPt = cfg.textFontPtSlotB;
@@ -6393,311 +6122,12 @@ static void ApplyJsonToWorkspaceConfig(const std::string& json, WorkspaceConfig&
 
 }
 
-const std::vector<AnnotToolDetailDescriptor>& AnnotToolDetailDescriptors() {
-    static const std::vector<AnnotToolDetailDescriptor> descriptors = [] {
-        std::vector<AnnotToolDetailDescriptor> out;
-        out.reserve(kToolModeCount);
-        for (ToolMode mode : DefaultAnnotToolModeUiOrder()) {
-            AnnotToolOptionGroup optionGroup = AnnotToolOptionGroup::None;
-            AnnotToolGeometry geometry = AnnotToolGeometry::None;
-            AnnotToolPresentation presentation = AnnotToolPresentation::None;
-            switch (mode) {
-            case ToolMode::Magnifier: optionGroup = AnnotToolOptionGroup::Magnifier; break;
-            case ToolMode::TextBox: optionGroup = AnnotToolOptionGroup::Text; break;
-            case ToolMode::MarkerText:
-            case ToolMode::MarkerTextUnderline:
-            case ToolMode::MarkerTextColor: optionGroup = AnnotToolOptionGroup::MarkerText; break;
-            case ToolMode::MarkerFree: optionGroup = AnnotToolOptionGroup::MarkerFree; break;
-            case ToolMode::MarkerLine:
-                optionGroup = AnnotToolOptionGroup::Line;
-                geometry = AnnotToolGeometry::Line;
-                presentation = AnnotToolPresentation::Emphasis;
-                break;
-            case ToolMode::MarkerArrow:
-                optionGroup = AnnotToolOptionGroup::Arrow;
-                geometry = AnnotToolGeometry::Arrow;
-                presentation = AnnotToolPresentation::Emphasis;
-                break;
-            case ToolMode::MarkerWave:
-                optionGroup = AnnotToolOptionGroup::Wave;
-                geometry = AnnotToolGeometry::Wave;
-                presentation = AnnotToolPresentation::Emphasis;
-                break;
-            case ToolMode::Line:
-                optionGroup = AnnotToolOptionGroup::Line;
-                geometry = AnnotToolGeometry::Line;
-                presentation = AnnotToolPresentation::Stroke;
-                break;
-            case ToolMode::Arrow:
-                optionGroup = AnnotToolOptionGroup::Arrow;
-                geometry = AnnotToolGeometry::Arrow;
-                presentation = AnnotToolPresentation::Stroke;
-                break;
-            case ToolMode::Wave:
-                optionGroup = AnnotToolOptionGroup::Wave;
-                geometry = AnnotToolGeometry::Wave;
-                presentation = AnnotToolPresentation::Stroke;
-                break;
-            case ToolMode::Freehand: optionGroup = AnnotToolOptionGroup::Pen; break;
-            case ToolMode::Shape:
-                optionGroup = AnnotToolOptionGroup::Shape;
-                geometry = AnnotToolGeometry::Shape;
-                break;
-            default: break;
-            }
-            out.push_back({mode, AnnotToolFamilyForMode(mode), ToolModeKey(mode), optionGroup, geometry, presentation});
-        }
-        return out;
-    }();
-    return descriptors;
-}
-
-const AnnotToolDetailDescriptor* FindAnnotToolDetailDescriptor(ToolMode mode) {
-    const auto& descriptors = AnnotToolDetailDescriptors();
-    auto it = std::find_if(descriptors.begin(), descriptors.end(), [mode](const AnnotToolDetailDescriptor& descriptor) {
-        return descriptor.mode == mode;
-    });
-    return it == descriptors.end() ? nullptr : &*it;
-}
-
-AnnotToolGeometry AnnotToolGeometryForMode(ToolMode mode) {
-    const auto* descriptor = FindAnnotToolDetailDescriptor(mode);
-    return descriptor ? descriptor->geometry : AnnotToolGeometry::None;
-}
-
-AnnotToolPresentation AnnotToolPresentationForMode(ToolMode mode, ShapeDrawMode shapeDrawMode) {
-    if (mode == ToolMode::Shape) {
-        return shapeDrawMode == ShapeDrawMode::Fill
-            ? AnnotToolPresentation::Emphasis
-            : AnnotToolPresentation::Stroke;
-    }
-    const auto* descriptor = FindAnnotToolDetailDescriptor(mode);
-    return descriptor ? descriptor->presentation : AnnotToolPresentation::None;
-}
-
-ShapeToolSelection ShapeToolSelectionForMode(ToolMode mode, ShapeDrawMode shapeDrawMode) {
-    return { AnnotToolPresentationForMode(mode, shapeDrawMode), AnnotToolGeometryForMode(mode) };
-}
-
-std::optional<ToolMode> ToolModeForShapeToolSelection(ShapeToolSelection selection) {
-    if (selection.presentation != AnnotToolPresentation::Stroke &&
-        selection.presentation != AnnotToolPresentation::Emphasis) {
-        return std::nullopt;
-    }
-    switch (selection.geometry) {
-    case AnnotToolGeometry::Line:
-        return selection.presentation == AnnotToolPresentation::Emphasis ? ToolMode::MarkerLine : ToolMode::Line;
-    case AnnotToolGeometry::Wave:
-        return selection.presentation == AnnotToolPresentation::Emphasis ? ToolMode::MarkerWave : ToolMode::Wave;
-    case AnnotToolGeometry::Arrow:
-        return selection.presentation == AnnotToolPresentation::Emphasis ? ToolMode::MarkerArrow : ToolMode::Arrow;
-    case AnnotToolGeometry::Shape:
-        return ToolMode::Shape;
-    default:
-        return std::nullopt;
-    }
-}
-
-const char* ShapeToolPresentationKey(AnnotToolPresentation presentation) {
-    switch (presentation) {
-    case AnnotToolPresentation::Stroke: return "stroke";
-    case AnnotToolPresentation::Emphasis: return "emphasis";
-    default: return "stroke";
-    }
-}
-
-bool ShapeToolPresentationFromKey(const std::string& raw, AnnotToolPresentation& out) {
-    std::string key = raw;
-    std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) {
-        return static_cast<char>(std::tolower(c));
-    });
-    if (key == "stroke") { out = AnnotToolPresentation::Stroke; return true; }
-    if (key == "emphasis") { out = AnnotToolPresentation::Emphasis; return true; }
-    return false;
-}
-
-const char* ShapeToolGeometryKey(AnnotToolGeometry geometry) {
-    switch (geometry) {
-    case AnnotToolGeometry::Line: return "line";
-    case AnnotToolGeometry::Wave: return "wave";
-    case AnnotToolGeometry::Arrow: return "arrow";
-    case AnnotToolGeometry::Shape: return "shape";
-    default: return "line";
-    }
-}
-
-bool ShapeToolGeometryFromKey(const std::string& raw, AnnotToolGeometry& out) {
-    std::string key = raw;
-    std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) {
-        return static_cast<char>(std::tolower(c));
-    });
-    if (key == "line") { out = AnnotToolGeometry::Line; return true; }
-    if (key == "wave") { out = AnnotToolGeometry::Wave; return true; }
-    if (key == "arrow") { out = AnnotToolGeometry::Arrow; return true; }
-    if (key == "shape") { out = AnnotToolGeometry::Shape; return true; }
-    return false;
-}
-
-const char* ShapeDetailKey(ShapeDetail detail) {
-    switch (detail) {
-    case ShapeDetail::Line: return "line";
-    case ShapeDetail::Arrow: return "arrow";
-    case ShapeDetail::Wave: return "wave";
-    case ShapeDetail::Rectangle: return "rectangle";
-    case ShapeDetail::Ellipse: return "ellipse";
-    case ShapeDetail::Triangle: return "triangle";
-    case ShapeDetail::Diamond: return "diamond";
-    case ShapeDetail::Arc: return "arc";
-    case ShapeDetail::Star: return "star";
-    default: return "line";
-    }
-}
-
-bool ShapeDetailFromKey(const std::string& raw, ShapeDetail& out) {
-    std::string key = raw;
-    std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) {
-        return static_cast<char>(std::tolower(c));
-    });
-    if (key == "line" || key == "marker_line") { out = ShapeDetail::Line; return true; }
-    if (key == "arrow" || key == "marker_arrow") { out = ShapeDetail::Arrow; return true; }
-    if (key == "wave" || key == "marker_wave") { out = ShapeDetail::Wave; return true; }
-    if (key == "shape" || key == "rect" || key == "rectangle" || key == "square") {
-        out = ShapeDetail::Rectangle;
-        return true;
-    }
-    if (key == "ellipse" || key == "circle" || key == "rotated_ellipse") {
-        out = ShapeDetail::Ellipse;
-        return true;
-    }
-    if (key == "triangle" || key == "equilateral_triangle") {
-        out = ShapeDetail::Triangle;
-        return true;
-    }
-    if (key == "diamond") { out = ShapeDetail::Diamond; return true; }
-    if (key == "arc") { out = ShapeDetail::Arc; return true; }
-    if (key == "star") { out = ShapeDetail::Star; return true; }
-    return false;
-}
-
-std::vector<ShapeDetail> OrderedShapeDetails() {
-    return {
-        ShapeDetail::Line,
-        ShapeDetail::Arrow,
-        ShapeDetail::Wave,
-        ShapeDetail::Rectangle,
-        ShapeDetail::Ellipse,
-        ShapeDetail::Triangle,
-        ShapeDetail::Diamond,
-        ShapeDetail::Arc,
-        ShapeDetail::Star,
-    };
-}
-
-bool ShapeDetailIsLinear(ShapeDetail detail) {
-    return detail == ShapeDetail::Line ||
-           detail == ShapeDetail::Arrow ||
-           detail == ShapeDetail::Wave;
-}
-
-bool ShapeDetailUsesBox(ShapeDetail detail) {
-    return !ShapeDetailIsLinear(detail);
-}
-
-ToolMode ToolModeForShapeDetail(ShapeDetail detail) {
-    switch (detail) {
-    case ShapeDetail::Line: return ToolMode::Line;
-    case ShapeDetail::Arrow: return ToolMode::Arrow;
-    case ShapeDetail::Wave: return ToolMode::Wave;
-    case ShapeDetail::Rectangle:
-    case ShapeDetail::Ellipse:
-    case ShapeDetail::Triangle:
-    case ShapeDetail::Diamond:
-    case ShapeDetail::Arc:
-    case ShapeDetail::Star:
-        return ToolMode::Shape;
-    default:
-        return ToolMode::Line;
-    }
-}
-
-ShapeKind ShapeKindForShapeDetail(ShapeDetail detail) {
-    switch (detail) {
-    case ShapeDetail::Ellipse: return ShapeKind::Ellipse;
-    case ShapeDetail::Triangle: return ShapeKind::Triangle;
-    case ShapeDetail::Diamond: return ShapeKind::Diamond;
-    case ShapeDetail::Arc: return ShapeKind::Arc;
-    case ShapeDetail::Star: return ShapeKind::Star;
-    case ShapeDetail::Rectangle:
-    default:
-        return ShapeKind::Rectangle;
-    }
-}
-
-ShapeDetail ShapeDetailForLegacyState(ToolMode mode, ShapeKind kind) {
-    switch (mode) {
-    case ToolMode::MarkerLine:
-    case ToolMode::Line:
-        return ShapeDetail::Line;
-    case ToolMode::MarkerArrow:
-    case ToolMode::Arrow:
-        return ShapeDetail::Arrow;
-    case ToolMode::MarkerWave:
-    case ToolMode::Wave:
-        return ShapeDetail::Wave;
-    case ToolMode::Shape:
-        switch (kind) {
-        case ShapeKind::Ellipse:
-        case ShapeKind::Circle:
-        case ShapeKind::RotatedEllipse:
-            return ShapeDetail::Ellipse;
-        case ShapeKind::Triangle:
-        case ShapeKind::EquilateralTriangle:
-            return ShapeDetail::Triangle;
-        case ShapeKind::Diamond:
-            return ShapeDetail::Diamond;
-        case ShapeKind::Arc:
-            return ShapeDetail::Arc;
-        case ShapeKind::Star:
-            return ShapeDetail::Star;
-        case ShapeKind::Rectangle:
-        case ShapeKind::Square:
-        default:
-            return ShapeDetail::Rectangle;
-        }
-    default:
-        return ShapeDetail::Line;
-    }
-}
-
 void SyncLegacyShapeStateFromDetail() {
     if (ShapeDetailUsesBox(g_shapeDetail)) {
         g_shapeKind = ShapeKindForShapeDetail(g_shapeDetail);
     }
     g_shapeGroupMode = ToolModeForShapeDetail(g_shapeDetail);
     g_shapeToolSelection = ShapeToolSelectionForMode(g_shapeGroupMode, g_shapeDrawMode);
-}
-
-bool AnnotToolUsesGeometry(ToolMode mode, AnnotToolGeometry geometry) {
-    return geometry != AnnotToolGeometry::None && AnnotToolGeometryForMode(mode) == geometry;
-}
-
-bool IsLineLikeAnnotToolMode(ToolMode mode) {
-    const AnnotToolGeometry geometry = AnnotToolGeometryForMode(mode);
-    return geometry == AnnotToolGeometry::Line ||
-           geometry == AnnotToolGeometry::Wave ||
-           geometry == AnnotToolGeometry::Arrow;
-}
-
-bool IsArrowAnnotToolMode(ToolMode mode) {
-    return AnnotToolUsesGeometry(mode, AnnotToolGeometry::Arrow);
-}
-
-bool IsWaveAnnotToolMode(ToolMode mode) {
-    return AnnotToolUsesGeometry(mode, AnnotToolGeometry::Wave);
-}
-
-bool IsEmphasisAnnotToolMode(ToolMode mode, ShapeDrawMode shapeDrawMode) {
-    return AnnotToolPresentationForMode(mode, shapeDrawMode) == AnnotToolPresentation::Emphasis;
 }
 
 static void NormalizeCacheDir(const std::filesystem::path& root, WorkspaceConfig& cfg) {
@@ -6856,6 +6286,7 @@ bool SaveWorkspaceConfigToFile(const std::filesystem::path& path, const Workspac
     ofs << "  \"quickPdfStandardTextAnnots\": " << (cfg.quickPdfStandardTextAnnots ? "true" : "false") << ",\n";
     ofs << "  \"quickPdfMatchPdfPaneTextLayout\": " << (cfg.quickPdfMatchPdfPaneTextLayout ? "true" : "false") << ",\n";
     ofs << "  \"quickPdfKeepPageRotation\": " << (cfg.quickPdfKeepPageRotation ? "true" : "false") << ",\n";
+    ofs << "  \"quickPdfEmbedEditableData\": " << (cfg.quickPdfEmbedEditableData ? "true" : "false") << ",\n";
     ofs << "  \"quickPdfTextColorMode\": " << cfg.quickPdfTextColorMode << ",\n";
     ofs << "  \"quickPdfTextColorBackground\": " << cfg.quickPdfTextColorBackground << ",\n";
     ofs << "  \"quickNoteStripMarkup\": " << (cfg.quickNoteStripMarkup ? "true" : "false") << ",\n";
@@ -6951,6 +6382,7 @@ bool SaveWorkspaceConfigToFile(const std::filesystem::path& path, const Workspac
     ofs << "  \"noteRawOnly\": " << (cfg.noteRawOnly ? "true" : "false") << ",\n";
     ofs << "  \"noteRenderMath\": " << (cfg.noteRenderMath ? "true" : "false") << ",\n";
     ofs << "  \"clroAsciiOnly\": " << (cfg.clroAsciiOnly ? "true" : "false") << ",\n";
+    ofs << "  \"noteQuoteLazyContinuation\": " << (cfg.noteQuoteLazyContinuation ? "true" : "false") << ",\n";
     ofs << "  \"noteWrapEnabled\": " << (cfg.noteWrapEnabled ? "true" : "false") << ",\n";
     ofs << "  \"noteVimModeEnabled\": " << (cfg.noteVimModeEnabled ? "true" : "false") << ",\n";
     ofs << "  \"noteVimCaretLineRawTextVisible\": " << (cfg.noteVimCaretLineRawTextVisible ? "true" : "false") << ",\n";
@@ -7012,6 +6444,7 @@ bool SaveWorkspaceConfigToFile(const std::filesystem::path& path, const Workspac
     ofs << "  \"textBoxReadableBackground\": " << (cfg.textBoxReadableBackground ? "true" : "false") << ",\n";
     ofs << "  \"textBoxReadableBackgroundInverted\": " << (cfg.textBoxReadableBackgroundInverted ? "true" : "false") << ",\n";
     ofs << "  \"textBoxAutoWrap\": " << (cfg.textBoxAutoWrap ? "true" : "false") << ",\n";
+    ofs << "  \"textBoxVertical\": " << (cfg.textBoxVertical ? "true" : "false") << ",\n";
     ofs << "  \"lineToolsShareStyle\": " << (cfg.lineToolsShareStyle ? "true" : "false") << ",\n";
     ofs << "  \"lineWidthPt\": " << cfg.lineWidthPt << ",\n";
     ofs << "  \"arrowWidthPt\": " << cfg.arrowWidthPt << ",\n";
@@ -7100,6 +6533,7 @@ bool TryPersistConfig() {
         g_config.textBoxReadableBackground = g_textBoxReadableBackground;
         g_config.textBoxReadableBackgroundInverted = g_textBoxReadableBackgroundInverted;
         g_config.textBoxAutoWrap = g_textBoxAutoWrap;
+        g_config.textBoxVertical = g_textBoxVertical;
         g_config.noteFontName = g_noteFontName;
         g_config.noteFontPt = g_noteFontPt;
         g_config.noteRenderFontName = g_noteRenderFontName;
@@ -7459,7 +6893,7 @@ static bool WriteSetupJsonFile(const std::filesystem::path& setup,
     {
         bool first = true;
         for (ToolMode mode : DefaultAnnotToolModeUiOrder()) {
-            const char* k = ToolModeKey(mode);
+            const char* k = AnnotToolModeKey(mode);
             if (!k || !*k) continue;
             if (!first) oss << ", ";
             first = false;
@@ -7472,7 +6906,7 @@ static bool WriteSetupJsonFile(const std::filesystem::path& setup,
         bool first = true;
         auto states = DefaultAnnotToolModeUiStates();
         for (ToolMode mode : DefaultAnnotToolModeUiOrder()) {
-            const char* k = ToolModeKey(mode);
+            const char* k = AnnotToolModeKey(mode);
             if (!k || !*k) continue;
             if (!first) oss << ", ";
             first = false;
@@ -8124,7 +7558,7 @@ static std::string BuildAnnotToolModeOrderArrayJson() {
     oss << "[";
     bool first = true;
     for (ToolMode mode : g_annotToolModeUiOrder) {
-        const char* k = ToolModeKey(mode);
+        const char* k = AnnotToolModeKey(mode);
         if (!k || !*k) continue;
         if (!first) oss << ", ";
         first = false;
@@ -8139,7 +7573,7 @@ static std::string BuildAnnotToolModeStateArrayJson() {
     oss << "[";
     bool first = true;
     for (ToolMode mode : DefaultAnnotToolModeUiOrder()) {
-        const char* k = ToolModeKey(mode);
+        const char* k = AnnotToolModeKey(mode);
         if (!k || !*k) continue;
         if (!first) oss << ", ";
         first = false;

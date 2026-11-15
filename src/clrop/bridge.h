@@ -32,7 +32,8 @@ bool LoadAnnotations(const std::wstring& clropPath,
 bool SaveAnnotations(const std::wstring& clropPath,
                      const std::wstring& pdfPath,
                      const std::vector<Annotation>& annots,
-                     std::wstring& err);
+                     std::wstring& err,
+                     const std::wstring& publishedPdfPath = {});
 bool SerializeAnnotations(const std::wstring& pdfPath,
                           const std::vector<Annotation>& annots,
                           std::string& outJson,

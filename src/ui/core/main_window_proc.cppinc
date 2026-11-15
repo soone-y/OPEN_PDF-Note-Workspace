@@ -661,7 +661,6 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
         break;
     case WM_CAPTURECHANGED:
-        if (IsSaveTransactionRunning()) return 0;
         ui::CancelDrag(hWnd);
         break;
     case WM_CANCELMODE:

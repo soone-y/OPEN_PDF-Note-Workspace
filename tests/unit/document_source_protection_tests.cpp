@@ -1,6 +1,8 @@
 #include "workspace/workspace_write_lock.h"
 #include "core/atomic_write.h"
 #include "core/empty_note_file.h"
+#include "core/file_sha256.h"
+#include "clrop/pdf_identity.h"
 #include <winioctl.h>
 #include <fstream>
 #include <iostream>
@@ -28,7 +30,28 @@ std::string Read(const fs::path& path) {
     return bytes;
 }
 // Child uses ordinary Win32 file operations and knows nothing about app mutexes.
-int ExternalProbe(const fs::path& path) {
+int ExternalProbe(const fs::path& path, bool writesOnly = false) {
+    if (document_source_protection::SourceSharing(path.wstring()) == FILE_SHARE_READ) {
+        for (const DWORD access : {static_cast<DWORD>(GENERIC_WRITE), static_cast<DWORD>(FILE_APPEND_DATA)}) {
+            HANDLE writer = CreateFileW(path.c_str(), access,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (writer != INVALID_HANDLE_VALUE) { CloseHandle(writer); return 13; }
+            if (GetLastError() != ERROR_SHARING_VIOLATION) return 14;
+        }
+        HANDLE truncate = CreateFileW(path.c_str(), GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+            TRUNCATE_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (truncate != INVALID_HANDLE_VALUE) { CloseHandle(truncate); return 15; }
+        if (GetLastError() != ERROR_SHARING_VIOLATION) return 16;
+        if (writesOnly) return 0;
+        const auto replacement = fs::path(path.wstring() + L".external-replacement");
+        { std::ofstream file(replacement, std::ios::binary); file << "replacement"; if (!file) return 17; }
+        const bool replaced = MoveFileExW(replacement.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING) != FALSE;
+        const DWORD replaceError = GetLastError();
+        if (!replaced && !DeleteFileW(replacement.c_str())) return 18;
+        if (replaced || (replaceError != ERROR_SHARING_VIOLATION && replaceError != ERROR_ACCESS_DENIED)) return 19;
+    }
     if (DeleteFileW(ToExtendedWin32PathIfAbsoluteLocal(path).c_str())) return 11;
     const DWORD deleteError = GetLastError();
     const auto moved = fs::path(path.wstring() + L".external-move");
@@ -38,9 +61,10 @@ int ExternalProbe(const fs::path& path) {
     return deleteError == ERROR_SHARING_VIOLATION && moveError == ERROR_SHARING_VIOLATION
         ? 0 : static_cast<int>((deleteError << 16) | moveError);
 }
-void BlockedExternally(const fs::path& path) {
+void BlockedExternally(const fs::path& path, bool writesOnly = false) {
     const auto executable = Self();
-    std::wstring command = L"\"" + executable + L"\" --probe \"" + path.wstring() + L"\"";
+    std::wstring command = L"\"" + executable +
+        (writesOnly ? L"\" --probe-write \"" : L"\" --probe \"") + path.wstring() + L"\"";
     STARTUPINFOW startup{}; startup.cb = sizeof(startup);
     startup.dwFlags = STARTF_USESHOWWINDOW; startup.wShowWindow = SW_HIDE;
     PROCESS_INFORMATION child{};
@@ -52,7 +76,9 @@ void BlockedExternally(const fs::path& path) {
     DWORD code = 0; const bool gotCode = GetExitCodeProcess(child.hProcess, &code) != FALSE;
     CloseHandle(child.hProcess);
     if (wait != WAIT_OBJECT_0 || !gotCode || code != 0) std::cerr << "External probe wait=" << wait << " exit=" << code << '\n';
-    Check(wait == WAIT_OBJECT_0 && gotCode && code == 0, "external process cannot delete or move protected original");
+    Check(wait == WAIT_OBJECT_0 && gotCode && code == 0, writesOnly
+        ? "PDF reader still denies external writes during source-protection rebind"
+        : "external process cannot mutate protected original (PDF writes included)");
 }
 void FreeToMove(const fs::path& path) {
     const auto moved = fs::path(path.wstring() + L".closed-move");
@@ -291,11 +317,63 @@ void EmptyDeletionTests(const fs::path& root) {
         "relative paths never select a deletion target");
 }
 
+void IdentityTests() {
+    clrop::PdfId original;
+    original.path = L"original.pdf"; original.size = 1000; original.pageCount = 2;
+    original.pageSizesPt = {{600.0, 800.0}, {620.0, 840.0}};
+    original.sha256 = std::string(64, 'a');
+    auto changed = original; changed.path = L"renamed.pdf";
+    Check(clrop::PdfIdStrongMatches(original, changed), "renaming does not change content identity");
+    changed.size++;
+    Check(!clrop::PdfIdFastMatches(original, changed), "different byte sizes are rejected");
+    changed = original; changed.pageCount = 1; changed.pageSizesPt.resize(1);
+    Check(!clrop::PdfIdFastMatches(original, changed), "different page counts are rejected");
+    changed = original; changed.pageSizesPt[1][0] += 1.0;
+    Check(!clrop::PdfIdFastMatches(original, changed), "different original page extents are rejected");
+    changed = original; std::swap(changed.pageSizesPt[0], changed.pageSizesPt[1]);
+    Check(!clrop::PdfIdFastMatches(original, changed), "page size ordering matters");
+    changed = original; changed.pageSizesPt[0][0] += 0.005;
+    Check(clrop::PdfIdFastMatches(original, changed), "page extent tolerance is retained");
+    changed = original; changed.sha256 = std::string(64, 'b');
+    Check(clrop::PdfIdFastMatches(original, changed) && !clrop::PdfIdStrongMatches(original, changed),
+        "same-sized content substitution is rejected by strong validation");
+    changed = original; changed.sha256.clear(); changed.pageSizesPt.clear();
+    Check(clrop::PdfIdFastMatches(original, changed) && !clrop::PdfIdStrongMatches(original, changed),
+        "legacy read fallback does not imply strong equality");
+}
+
 void Tests(const fs::path& root) {
+    IdentityTests();
     const auto pdf = root / L"sample.pdf", note = root / L"ノート 空白.txt";
     Write(pdf, "pdf fixture bytes"); Write(note, "original note");
     Open(pdf); Open(note);
     BlockedExternally(pdf); BlockedExternally(note);
+    Check(Read(pdf) == "pdf fixture bytes", "blocked external PDF mutations preserve all original bytes");
+    {
+        // PDFium's read handle allows owned rename while retaining write denial.
+        HANDLE reader = CreateFileW(pdf.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
+            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        Check(reader != INVALID_HANDLE_VALUE, "hold a PDF reader across protection rebind");
+        document_source_protection::Mutation mutation(pdf, pdf);
+        BlockedExternally(pdf, true);
+        DWORD restoreError = 0;
+        Check(mutation.Finish(false, &restoreError), "restore source protection beside the PDF reader");
+        CloseHandle(reader);
+    }
+    {
+        HANDLE reader = CreateFileW(pdf.c_str(), GENERIC_READ, FILE_SHARE_READ,
+            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        Check(reader != INVALID_HANDLE_VALUE, "independent read-only PDF readers coexist");
+        CloseHandle(reader);
+        HANDLE writer = CreateFileW(note.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        Check(writer != INVALID_HANDLE_VALUE, "note external-write and reload policy is preserved");
+        CloseHandle(writer);
+        std::string digest;
+        Check(core_hash::FileSha256(pdf, &digest) && digest ==
+            "c80fd9255e7a1f8f04c0050a5826ff6abf3b803a5f953c5bf5d33c982efb5877",
+            "whole-file SHA-256 works while the PDF is protected");
+    }
     std::string bytes;
     Check(ReadFileBytesWin32(note, bytes) && bytes == "original note", "normal reads remain allowed while protected");
     const auto temp = root / L"tmp", escape = root / L"escape";
@@ -365,6 +443,16 @@ void Tests(const fs::path& root) {
     ReleaseAllDocumentOpenLocks();
     FreeToMove(pdf); FreeToMove(missing);
     {
+        HANDLE writer = CreateFileW(pdf.c_str(), GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        Check(writer != INVALID_HANDLE_VALUE, "closing PDF releases the external-write restriction");
+        { DocumentOpenLockCandidate candidate(pdf, &error);
+          Check(!candidate.acquired(), "existing external writer prevents an unprotected PDF open"); }
+        CloseHandle(writer);
+        Open(pdf); BlockedExternally(pdf); ReleaseDocumentOpenLock(pdf);
+    }
+    {
         HANDLE external = CreateFileW(pdf.c_str(), DELETE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         Check(external != INVALID_HANDLE_VALUE, "hold external delete access before opening");
@@ -391,6 +479,7 @@ void Tests(const fs::path& root) {
 }
 int wmain(int argc, wchar_t** argv) {
     if (argc == 3 && std::wstring(argv[1]) == L"--probe") return ExternalProbe(argv[2]);
+    if (argc == 3 && std::wstring(argv[1]) == L"--probe-write") return ExternalProbe(argv[2], true);
     try {
         const auto root = fs::path(Self()).parent_path() / (L"fixture-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
         Check(fs::create_directory(root), "create fresh owned fixture below test executable");

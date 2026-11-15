@@ -110,6 +110,7 @@ enum : int {
     IDC_NEW_NOTE_EXTENSION = 4225,
     IDC_EMPTY_VIEW_GUIDE = 4226,
     IDC_CLRO_ASCII_ONLY = 4227,
+    IDC_NOTE_QUOTE_LAZY_CONTINUATION = 4228,
     IDC_NOTE_BOTTOM_SPACE_MODE = 4250,
     IDC_NOTE_BOTTOM_SPACE_FIXED,
     IDC_NOTE_BOTTOM_SPACE_FONT,
@@ -127,7 +128,9 @@ enum : int {
     IDC_SETTINGS_PRESETS_LINK,
     IDC_SETTINGS_RECOVERY_LINK,
     IDC_SETTINGS_PALETTE_LINK,
-    IDC_SETTINGS_LOG_LOCATION
+    IDC_SETTINGS_LOG_LOCATION,
+    IDC_NOTE_FG_CUSTOM = 4254,
+    IDC_QUICK_PDF_EMBED_EDITABLE_DATA = 4255
 };
 
 enum class GeneralSettingsPageMode {
@@ -420,6 +423,7 @@ struct GeneralSettingsCtx {
     HWND chkQuickPdfStandardText = nullptr;
     HWND chkQuickPdfMatchLayout = nullptr;
     HWND chkQuickPdfKeepRotation = nullptr;
+    HWND chkQuickPdfEmbedEditableData = nullptr;
     HWND cbQuickPdfColorMode = nullptr;
     HWND editQuickPdfBackground = nullptr;
     HWND chkQuickNoteStripMarkup = nullptr;
@@ -465,6 +469,7 @@ struct GeneralSettingsCtx {
     HWND cbNoteRenderMode = nullptr;
     HWND chkNoteWrapEnabled = nullptr;
     HWND chkClroAsciiOnly = nullptr;
+    HWND chkNoteQuoteLazyContinuation = nullptr;
     HWND cbNoteBottomSpaceMode = nullptr;
     HWND editNoteBottomSpaceFixed = nullptr;
     HWND editNoteBottomSpaceFont = nullptr;
@@ -476,6 +481,8 @@ struct GeneralSettingsCtx {
     HWND cbNoteGridPitch = nullptr;
     HWND cbNoteBgMode = nullptr;
     HWND btnNoteBgCustom = nullptr;
+    HWND btnNoteFgCustom = nullptr;
+    COLORREF noteFgCustomColor = RGB(0, 0, 0);
     HWND cbNoteMathMargin = nullptr;
     HWND cbNoteMathSupSub = nullptr;
     HWND cbNoteInlineMathVerticalAlignment = nullptr;
@@ -692,6 +699,12 @@ static void UpdateNoteBackgroundButtonLabel(GeneralSettingsCtx* ctx) {
     SetWindowTextW(ctx->btnNoteBgCustom, text.c_str());
 }
 
+static void UpdateNoteTextColorButtonLabel(GeneralSettingsCtx* ctx) {
+    if (!ctx || !ctx->btnNoteFgCustom) return;
+    const auto label = localization::Text(L"settings.note.text_color") + L" " + GenHexColorW(ctx->noteFgCustomColor);
+    SetWindowTextW(ctx->btnNoteFgCustom, label.c_str());
+}
+
 static void FillNoteBackgroundCombo(GeneralSettingsCtx* ctx) {
     if (!ctx || !ctx->cbNoteBgMode) return;
     ctx->noteBgChoices.clear();
@@ -883,8 +896,6 @@ static void ScrollGeneralSettingsTo(HWND hWnd, GeneralSettingsCtx* ctx, int newP
     if (clamped == ctx->scrollPos) return;
     int delta = ctx->scrollPos - clamped;
     ctx->scrollPos = clamped;
-    ScrollWindowEx(ctx->scrollPanel, 0, delta, nullptr, nullptr, nullptr, nullptr,
-                   SW_INVALIDATE | SW_ERASE | SW_SCROLLCHILDREN);
     SCROLLINFO si{};
     si.cbSize = sizeof(si);
     si.fMask = SIF_POS;
@@ -892,6 +903,7 @@ static void ScrollGeneralSettingsTo(HWND hWnd, GeneralSettingsCtx* ctx, int newP
     SetScrollInfo(hWnd, SB_VERT, &si, TRUE);
     UpdateGeneralSectionNavUi(ctx, SettingsSectionForScrollPosition(
         ctx->sectionTops, ctx->sectionCount, ctx->scrollPos));
+    ScrollSettingsContents(ctx->scrollPanel, delta);
 }
 
 static void JumpGeneralSettingsToSection(HWND hWnd, GeneralSettingsCtx* ctx, int sectionIndex) {
@@ -1132,6 +1144,7 @@ static LRESULT CALLBACK ThemeEditDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
                                &ctx->scrollPos, &ctx->scrollMax);
         }
         ApplyThemeToDialog(hWnd);
+        PrepareSettingsScroll(hWnd, hWnd);
         return 0;
     }
     case WM_THEMECHANGED:

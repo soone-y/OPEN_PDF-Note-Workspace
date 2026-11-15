@@ -11,7 +11,7 @@ New-Item -ItemType Directory -Force -Path $testDir | Out-Null
 Push-Location -LiteralPath $repoRoot
 try {
     & $compiler.Source -std=gnu++17 -O2 -Wall -Isrc -Ithird_party/pdfium/include `
-        tests/unit/pdf_annotation_export_tests.cpp src/file_output/pdf_annotation_export.cpp `
+        tests/unit/pdf_annotation_export_tests.cpp src/file_output/pdf_annotation_export.cpp src/file_output/pdf_annotation_detach.cpp `
         third_party/pdfium/lib/pdfium.dll.lib -lgdi32 -lmsimg32 -o $testExe
     if ($LASTEXITCODE -ne 0) { throw 'PDF annotation export tests failed to compile.' }
     $previousPath = $env:PATH

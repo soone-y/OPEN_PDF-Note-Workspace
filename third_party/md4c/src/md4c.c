@@ -4937,19 +4937,21 @@ md_process_inlines(MD_CTX* ctx, const MD_LINE* lines, MD_SIZE n_lines)
                     }
                     MD_FALLTHROUGH();
 
-                case '*':       /* Emphasis, strong emphasis. */
+                case '*': {     /* Emphasis, strong emphasis or double-underscore underline. */
+                    MD_SPANTYPE strong_type = (mark->ch == '_' &&
+                        (ctx->parser.flags & MD_FLAG_DOUBLEUNDERSCOREUNDERLINE)) ? MD_SPAN_U : MD_SPAN_STRONG;
                     if(mark->flags & MD_MARK_OPENER) {
                         if((mark->end - off) % 2) {
                             MD_ENTER_SPAN(MD_SPAN_EM, NULL);
                             off++;
                         }
                         while(off + 1 < mark->end) {
-                            MD_ENTER_SPAN(MD_SPAN_STRONG, NULL);
+                            MD_ENTER_SPAN(strong_type, NULL);
                             off += 2;
                         }
                     } else {
                         while(off + 1 < mark->end) {
-                            MD_LEAVE_SPAN(MD_SPAN_STRONG, NULL);
+                            MD_LEAVE_SPAN(strong_type, NULL);
                             off += 2;
                         }
                         if((mark->end - off) % 2) {
@@ -4958,6 +4960,7 @@ md_process_inlines(MD_CTX* ctx, const MD_LINE* lines, MD_SIZE n_lines)
                         }
                     }
                     break;
+                }
 
                 case '~':
                     if(mark->end - mark->beg == 1  &&  (ctx->parser.flags & MD_FLAG_SUBSCRIPTS)) {
@@ -7030,7 +7033,24 @@ md_analyze_line(MD_CTX* ctx, OFF beg, OFF* p_end,
         line->type = MD_LINE_TEXT;
         if(pivot_line->type == MD_LINE_TEXT  &&  n_brothers + n_children == 0) {
             /* Lazy continuation. */
-            n_parents = ctx->n_containers;
+            if(ctx->parser.flags & MD_FLAG_NOQUOTE_LAZY_CONTINUATION) {
+                /* Preserve implicit list parents, stopping at a missing quote
+                 * marker. Cache the list-only interval to keep deep lists linear. */
+                n_implicit_parents_beg = n_parents;
+                while(n_parents < ctx->n_containers && ctx->containers[n_parents].ch != _T('>')) {
+                    if(ctx->last_n_implicit_parents_beg <= n_parents &&
+                       n_parents < ctx->last_n_implicit_parents_end &&
+                       ctx->last_n_implicit_parents_end <= ctx->n_containers)
+                    {
+                        n_parents = ctx->last_n_implicit_parents_end;
+                    } else {
+                        n_parents++;
+                    }
+                }
+                n_implicit_parents_end = n_parents;
+            } else {
+                n_parents = ctx->n_containers;
+            }
         }
 
         /* Check for task mark. */

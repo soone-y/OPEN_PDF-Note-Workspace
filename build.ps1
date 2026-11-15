@@ -2,11 +2,13 @@
 param(
     [switch]$Rebuild,
     [switch]$Clean,
+    [switch]$HardClean,
     [switch]$VerboseOutput,
     [switch]$Lite,
     [switch]$AllLocales,
     [ValidateSet("ja", "en")]
-    [string]$Locale = "ja"
+    [string]$Locale = "ja",
+    [switch]$Run
 )
 
 Set-StrictMode -Version Latest
@@ -96,6 +98,13 @@ function Test-BuildConfigurationIsNewer {
     return $false
 }
 
+if ($Clean -and $Rebuild) {
+    throw "-Clean と -Rebuild は同時に指定できません。成果物を削除するだけなら -Clean、削除後に作り直すなら -Rebuild を指定してください。"
+}
+if ($HardClean -and ($Clean -or $Rebuild -or $Run)) {
+    throw "-HardClean は -Clean、-Rebuild、-Run と併用できません。"
+}
+
 if ($AllLocales) {
     if ($PSBoundParameters.ContainsKey("Locale")) {
         throw "-AllLocales と -Locale は同時に指定できません。両言語なら -AllLocales、単一言語なら -Locale ja または -Locale en を使用してください。"
@@ -105,6 +114,8 @@ if ($AllLocales) {
         $arguments = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $PSCommandPath, "-Locale", $targetLocale)
         if ($Rebuild) { $arguments += "-Rebuild" }
         if ($Clean) { $arguments += "-Clean" }
+        if ($HardClean) { $arguments += "-HardClean" }
+        if ($Run) { $arguments += "-Run" }
         if ($VerboseOutput) { $arguments += "-VerboseOutput" }
         if ($Lite) { $arguments += "-Lite" }
         $previousErrorAction = $ErrorActionPreference
@@ -132,9 +143,12 @@ $readOnlyViewerArtifactPath = Join-Path $PSScriptRoot ("out/bin{0}/readonly_view
 $workspaceConfigurationInputs = @($workspaceBuildScript, $buildSourcesManifest, $repoVersionFile)
 $readOnlyViewerConfigurationInputs = @($readOnlyViewerBuildScript, $buildSourcesManifest, $repoVersionFile)
 
-if ($Clean -and $Rebuild) {
-    throw "-Clean と -Rebuild は同時に指定できません。成果物を削除するだけなら -Clean、削除後に作り直すなら -Rebuild を指定してください。"
+$localEditions = if ($Lite) { @('Lite') } else { @('Full', 'Lite') }
+if ($HardClean -or ($Clean -and $Run)) {
+    . (Join-Path $PSScriptRoot 'scripts/build/local_run.ps1')
+    Invoke-LocalRunLayout -RepositoryRoot $PSScriptRoot -Locale $Locale -Editions $localEditions -Clean:$Clean -HardClean:$HardClean
 }
+if ($HardClean) { $Clean = $true }
 
 if ($Lite) {
     if ($Clean) {
@@ -161,6 +175,10 @@ if ($Clean) {
     Write-Host "ビルド成果物の削除が完了しました。" -ForegroundColor Green
 }
 else {
+    if ($Run) {
+        . (Join-Path $PSScriptRoot 'scripts/build/local_run.ps1')
+        Invoke-LocalRunLayout -RepositoryRoot $PSScriptRoot -Locale $Locale -Editions $localEditions
+    }
     Write-Host "ビルドが完了しました。" -ForegroundColor Green
 }
 

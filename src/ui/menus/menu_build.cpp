@@ -80,6 +80,7 @@ HMENU BuildMenuBarForState(const MainMenuStateSnapshot& menuState) {
     AppendMenuW(file, MF_STRING, ID_FILE_EXIT, ui.menuExit.c_str());
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), text(L"menu.bar.file").c_str());
 
+    const UINT pdfViewFlags = MenuStringState(menuState.hasCurrentPdf);
     HMENU edit = CreatePopupMenu();
     AppendMenuW(edit, MenuStringState(menuState.canUndo), ID_EDIT_UNDO,
                 localization::Text(L"menu.edit.undo").c_str());
@@ -95,10 +96,22 @@ HMENU BuildMenuBarForState(const MainMenuStateSnapshot& menuState) {
     AppendMenuW(move, renamePdfFlags, ID_OP_MOVE_PDF, text(L"menu.common.pdf").c_str());
     AppendMenuW(move, renameNoteFlags, ID_OP_MOVE_NOTE, text(L"menu.common.note").c_str());
     AppendMenuW(edit, MF_POPUP, reinterpret_cast<UINT_PTR>(move), text(L"menu.edit.move_file").c_str());
+    HMENU editRotation = CreatePopupMenu();
+    AppendMenuW(editRotation, pdfViewFlags, ID_EDIT_ROTATE_PAGE_LEFT, text(L"menu.rotate.left").c_str());
+    AppendMenuW(editRotation, pdfViewFlags, ID_EDIT_ROTATE_PAGE_RIGHT, text(L"menu.rotate.right").c_str());
+    AppendMenuW(editRotation, pdfViewFlags, ID_EDIT_ROTATE_PAGE_RESET, text(L"menu.rotate.reset").c_str());
+    AppendMenuW(editRotation, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(editRotation, pdfViewFlags, ID_EDIT_ROTATE_REMAINING_LEFT, text(L"menu.rotate.remaining_left").c_str());
+    AppendMenuW(editRotation, pdfViewFlags, ID_EDIT_ROTATE_REMAINING_RIGHT, text(L"menu.rotate.remaining_right").c_str());
+    AppendMenuW(editRotation, pdfViewFlags, ID_EDIT_ROTATE_REMAINING_RESET, text(L"menu.rotate.remaining_reset").c_str());
+    AppendMenuW(editRotation, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(editRotation, pdfViewFlags, ID_EDIT_ROTATE_ALL_LEFT, text(L"menu.rotate.all_left").c_str());
+    AppendMenuW(editRotation, pdfViewFlags, ID_EDIT_ROTATE_ALL_RIGHT, text(L"menu.rotate.all_right").c_str());
+    AppendMenuW(editRotation, pdfViewFlags, ID_EDIT_ROTATE_ALL_RESET, text(L"menu.rotate.all_reset").c_str());
+    AppendMenuW(edit, MF_POPUP, reinterpret_cast<UINT_PTR>(editRotation), text(L"menu.edit.rotation").c_str());
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(edit), localization::Text(L"menu.edit.title").c_str());
 
     HMENU view = CreatePopupMenu();
-    const UINT pdfViewFlags = MenuStringState(menuState.hasCurrentPdf);
     HMENU close = CreatePopupMenu();
     AppendMenuW(close, pdfViewFlags, ID_VIEW_CLOSE_PDF, text(L"menu.common.pdf").c_str());
     AppendMenuW(close, MenuStringState(!g_currentNotePath.empty()), ID_VIEW_CLOSE_NOTE,
@@ -119,11 +132,15 @@ HMENU BuildMenuBarForState(const MainMenuStateSnapshot& menuState) {
     HMENU rotation = CreatePopupMenu();
     AppendMenuW(rotation, pdfViewFlags, ID_VIEW_ROTATE_PAGE_LEFT, shortcutText(L"menu.rotate.left", ShortcutAction::RotateLeft).c_str());
     AppendMenuW(rotation, pdfViewFlags, ID_VIEW_ROTATE_PAGE_RIGHT, shortcutText(L"menu.rotate.right", ShortcutAction::RotateRight).c_str());
-    AppendMenuW(rotation, pdfViewFlags, ID_VIEW_ROTATE_PAGE_RESET, shortcutText(L"menu.rotate.reset", ShortcutAction::ResetRotation).c_str());
+    AppendMenuW(rotation, pdfViewFlags, ID_VIEW_ROTATE_PAGE_RESET, shortcutText(L"menu.rotate.reset_temporary", ShortcutAction::ResetRotation).c_str());
+    AppendMenuW(rotation, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(rotation, pdfViewFlags, ID_VIEW_ROTATE_REMAINING_LEFT, text(L"menu.rotate.remaining_left").c_str());
+    AppendMenuW(rotation, pdfViewFlags, ID_VIEW_ROTATE_REMAINING_RIGHT, text(L"menu.rotate.remaining_right").c_str());
+    AppendMenuW(rotation, pdfViewFlags, ID_VIEW_ROTATE_REMAINING_RESET, text(L"menu.rotate.remaining_reset_temporary").c_str());
     AppendMenuW(rotation, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(rotation, pdfViewFlags, ID_VIEW_ROTATE_ALL_LEFT, text(L"menu.rotate.all_left").c_str());
     AppendMenuW(rotation, pdfViewFlags, ID_VIEW_ROTATE_ALL_RIGHT, text(L"menu.rotate.all_right").c_str());
-    AppendMenuW(rotation, pdfViewFlags, ID_VIEW_ROTATE_ALL_RESET, text(L"menu.rotate.all_reset").c_str());
+    AppendMenuW(rotation, pdfViewFlags, ID_VIEW_ROTATE_ALL_RESET, text(L"menu.rotate.all_reset_temporary").c_str());
     AppendMenuW(view, MF_POPUP, reinterpret_cast<UINT_PTR>(rotation), text(L"menu.view.rotation").c_str());
     AppendMenuW(view, pdfViewFlags | (g_showAnnots ? MF_CHECKED : 0), ID_TOOL_TOGGLE_ANNOTS,
                 shortcutText(L"shortcut.action.annotations", ShortcutAction::ToggleAnnotations).c_str());
@@ -184,20 +201,23 @@ HMENU BuildMenuBarForState(const MainMenuStateSnapshot& menuState) {
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(exportMenu), ui.menuExport.c_str());
 
     HMENU tools = CreatePopupMenu();
-    AppendMenuW(tools, MF_STRING, ID_WORKSPACE_MEMO, shortcutText(L"menu.tools.workspace_memo", ShortcutAction::Memo).c_str());
+    AppendMenuW(tools, MenuStringState(!g_currentSessionPath.empty()), ID_OP_CREATE_BLANK_PDF, ui.menuCreateBlankPdf.c_str());
+    AppendMenuW(tools, MF_STRING, ID_OP_CONVERT_IMAGE_TO_PDF, text(L"menu.tools.convert_image").c_str());
+    if (!kIsLiteEdition) AppendMenuW(tools, MF_STRING, ID_OP_CONVERT_OFFICE_TO_PDF, ui.menuConvertOfficeToPdf.c_str());
+    AppendMenuW(tools, MF_STRING, ID_TOOLS_DETACH_PDF_ANNOTATIONS,
+                text(L"menu.tools.detach_pdf_annotations").c_str());
+    AppendMenuW(tools, MF_SEPARATOR, 0, nullptr);
+    HMENU pairs = CreatePopupMenu();
+    AppendMenuW(pairs, MF_STRING, ID_TOOLS_PDF_PAIR_DIRECTORY, text(L"pair_finder.directory_mode").c_str());
+    AppendMenuW(pairs, MF_STRING, ID_TOOLS_PDF_PAIR_CLROP, text(L"pair_finder.clrop_mode").c_str());
+    AppendMenuW(tools, MF_POPUP, reinterpret_cast<UINT_PTR>(pairs), text(L"pair_finder.title").c_str());
     HMENU viewer = CreatePopupMenu();
-    AppendMenuW(viewer, MF_STRING, ID_OP_LAUNCH_READONLY_VIEWER, text(L"menu.viewer.launch").c_str());
     AppendMenuW(viewer, MF_STRING, ID_OP_OPEN_READONLY_VIEWER_FILE, text(L"menu.viewer.open_file").c_str());
+    AppendMenuW(viewer, MF_STRING, ID_OP_LAUNCH_READONLY_VIEWER, text(L"menu.viewer.launch").c_str());
     AppendMenuW(viewer, MF_STRING, ID_OP_CLOSE_ALL_READONLY_VIEWERS, text(L"menu.viewer.close_all").c_str());
     AppendMenuW(tools, MF_POPUP, reinterpret_cast<UINT_PTR>(viewer), text(L"menu.tools.viewer").c_str());
-    const UINT readonlyViewerFlags = (!CurrentLogicalPdfPath().empty() &&
-                                      IsPdfFile(std::filesystem::path(CurrentLogicalPdfPath())))
-                                     ? MF_STRING : (MF_STRING | MF_GRAYED);
-    AppendMenuW(tools, readonlyViewerFlags, ID_OP_OPEN_READONLY_VIEWER, text(L"menu.tools.open_in_viewer").c_str());
-    if (!kIsLiteEdition) AppendMenuW(tools, MF_STRING, ID_OP_CONVERT_OFFICE_TO_PDF, ui.menuConvertOfficeToPdf.c_str());
-    AppendMenuW(tools, MenuStringState(menuState.hasCurrentImage), ID_OP_CONVERT_IMAGE_TO_PDF,
-                text(L"menu.tools.convert_image").c_str());
-    AppendMenuW(tools, MenuStringState(!g_currentSessionPath.empty()), ID_OP_CREATE_BLANK_PDF, ui.menuCreateBlankPdf.c_str());
+    AppendMenuW(tools, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(tools, MF_STRING, ID_WORKSPACE_MEMO, shortcutText(L"menu.tools.workspace_memo", ShortcutAction::Memo).c_str());
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(tools), text(L"menu.bar.tools").c_str());
 
     AppendMenuW(bar, MF_STRING, ID_SEARCH, ui.menuSearch.c_str());

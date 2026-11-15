@@ -1,6 +1,13 @@
 // file: search.cpp
 #include "search/search.h"
 #include "search/note_search_worker.h"
+#include "search/search_process.h"
+#include "search/search_wire.h"
+#include "search/search_groups.h"
+#include "diagnostics/write_checks.h"
+#include "ui/core/main_window_api.h"
+#include "core/ui_prompts.h"
+#include "ui/dialogs/dialogs.h"
 #include "ui/noop_nav_guard.h"
 #include "ui/menus/context_menu_helpers.h"
 
@@ -27,16 +34,17 @@
 #include <fstream>
 #include <optional>
 #include <system_error>
+#include <set>
 
 namespace {
 
-enum class SearchRange { CurrentLecture = 0, CurrentSession, WholeWorkspace };
+enum class SearchRange { CurrentLecture = 0, CurrentSession, WholeWorkspace, Folders };
 enum SearchTargetMask : unsigned {
     TargetNote = 1u << 0,
     TargetPdf = 1u << 1,
     TargetAnnot = 1u << 2,
 };
-constexpr int kSearchRangeCount = 3;
+constexpr int kSearchRangeCount = 4;
 constexpr int kSearchTargetCount = 3;
 constexpr SearchRange kInvalidSearchRange = static_cast<SearchRange>(-1);
 // Search window child control IDs are scoped to SearchWndProc. The same numeric
@@ -52,6 +60,15 @@ constexpr int IDC_SEARCH_OPTION_BASE = 4140;
 constexpr int IDC_SEARCH_WORKSPACE_MEMO = 4143;
 constexpr int IDC_SEARCH_DETAILS = 4144;
 constexpr int IDC_SEARCH_ABOVE_MAIN = 4145;
+constexpr int IDC_SEARCH_FOLDERS = 4150;
+constexpr int IDC_SEARCH_ADD_FOLDER = 4151;
+constexpr int IDC_SEARCH_REMOVE_FOLDER = 4152;
+constexpr int IDC_SEARCH_GROUPS = 4153;
+constexpr int IDC_SEARCH_LOAD_GROUP = 4154;
+constexpr int IDC_SEARCH_SAVE_GROUP = 4155;
+constexpr int IDC_SEARCH_DELETE_GROUP = 4156;
+constexpr int IDC_SEARCH_CONTINUE = 4157;
+constexpr int IDC_SEARCH_MANAGE_SCOPES = 4158;
 constexpr UINT kSearchTimerId = 4120;
 constexpr UINT kSearchTimerIntervalMs = 30;
 constexpr int kSearchEnumStepsPerTick = 120;
@@ -152,6 +169,7 @@ static SearchUiStrings GetSearchUiStrings() {
         s.msgNoSession = text(L"search.ui.no_child");
         s.msgNoLecture = text(L"search.ui.no_parent");
     }
+    s.ranges.push_back(text(L"search.ui.range_folders"));
     return s;
 }
 
@@ -176,7 +194,30 @@ struct SearchResultItem {
     double focusY = 0.0;
     bool hasFocusPoint = false;
     bool openedFromSearch = false;
+    bool processSnapshot = false;
+    bool externalReadOnly = false;
 };
+
+// Worker-private captured editor. It is never populated by a normal UI thread.
+static std::optional<note_snapshot::CurrentEditTextSnapshot> workerCurrentEdit;
+static size_t* workerSkipped = nullptr;
+static std::deque<SearchResultItem>* workerDiagnostics = nullptr;
+static void RecordSearchSkipped(const std::filesystem::path& path, size_t* count) {
+    if (count) ++*count;
+    if (!workerDiagnostics) return;
+    SearchResultItem item;
+    item.path = path;
+    item.title = localization::Format(L"search.ui.unreadable_item", {{L"file", path.filename().wstring()}});
+    item.display = item.title;
+    workerDiagnostics->push_back(std::move(item));
+}
+static bool SearchAttributes(const std::filesystem::path& path, DWORD& attributes) {
+    if (!TryGetPathAttributesWin32(path, &attributes)) return false;
+    // Offline/recall placeholders can invoke a cloud provider merely by being
+    // enumerated or read. Searching never requests hydration or traversal.
+    return (attributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_OFFLINE |
+                          FILE_ATTRIBUTE_RECALL_ON_OPEN | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS)) == 0;
+}
 
 struct PdfScanState {
     std::filesystem::path path;
@@ -217,6 +258,9 @@ struct SearchJob {
     size_t pathMatches = 0;
     size_t processedFiles = 0;
     size_t processedPages = 0;
+    size_t enumerated = 0, maxDepth = 0, skipped = 0;
+    uint64_t candidateBytes = 0;
+    std::set<std::wstring> enumeratedPaths;
 
     std::vector<SearchResultItem> results;
     // UI-thread-owned results waiting for bounded publication. Never pump a
@@ -280,9 +324,25 @@ struct SearchCtx {
     int rapidVWheelInputCount = 0;
     std::wstring idleStatusText;
     SearchJob job;
+    std::unique_ptr<search::Process> process;
+    bool paused = false, workerDone = false;
+    std::wstring workerPhase;
+    std::filesystem::path pinnedWorkspace;
+    std::vector<search::Folder> folders;
+    search::Groups groups;
+    HWND folderList = nullptr, addFolder = nullptr, removeFolder = nullptr;
+    HWND folderLabel = nullptr;
+    HWND groupList = nullptr, loadGroup = nullptr, saveGroup = nullptr, deleteGroup = nullptr;
+    HWND continueSearch = nullptr;
+    HWND manageScopes = nullptr, scopeWindow = nullptr;
+    HWND closeScopes = nullptr;
+    bool scopeBusy = false, closeAfterScope = false, closeScopeAfter = false;
+    bool scopeOwnerDisabled = false;
+    size_t resultBytes = 0;
 };
 
 static std::wstring ToLowerCopy(std::wstring s);
+static std::wstring NormalizePathKey(const std::filesystem::path& path);
 
 static void RunSearch(HWND hWnd, SearchCtx* ctx);
 static void OpenSearchResult(HWND hWnd, SearchCtx* ctx, int listIndex, bool navigationRetry = false);
@@ -581,7 +641,9 @@ static void ScrollListBoxByWheel(HWND list, int delta, SearchCtx* ctx) {
 }
 
 static bool CanOpenSearchResultInReadonlyViewer(const SearchResultItem& item) {
-    if (item.path.empty() || !IsPdfFile(item.path)) return false;
+    if (item.path.empty()) return false;
+    if (IsNoteFile(item.path)) return item.kind == SearchResultKind::NoteLine || item.kind == SearchResultKind::Path;
+    if (!IsPdfFile(item.path)) return false;
     return item.kind == SearchResultKind::PdfPage ||
            item.kind == SearchResultKind::Annot ||
            item.kind == SearchResultKind::Path;
@@ -589,6 +651,7 @@ static bool CanOpenSearchResultInReadonlyViewer(const SearchResultItem& item) {
 
 static bool OpenSearchResultInReadonlyViewer(HWND owner, const SearchResultItem& item) {
     if (!CanOpenSearchResultInReadonlyViewer(item)) return false;
+    if (IsNoteFile(item.path)) return LaunchReadOnlyViewerForFile(owner, item.path.wstring());
     const bool hasPdfY = (item.kind == SearchResultKind::Annot || item.kind == SearchResultKind::PdfPage) &&
                          item.hasFocusPoint &&
                          item.pageIndex >= 0;
@@ -1142,7 +1205,7 @@ static std::wstring CleanSnippet(const std::wstring& s, size_t maxLen = 110) {
     std::wstring out;
     out.reserve(s.size());
     for (wchar_t ch : s) {
-        if (ch == L'\r' || ch == L'\n' || ch == L'\t') {
+        if (ch == L'\r' || ch == L'\n' || ch == L'\t' || ch == L'\0') {
             out.push_back(L' ');
         } else {
             out.push_back(ch);
@@ -1195,6 +1258,10 @@ static bool IsCurrentOpenNotePath(const std::filesystem::path& path) {
 }
 
 static note_snapshot::CurrentEditTextSnapshot CurrentEditSnapshotForNotePath(const std::filesystem::path& path) {
+    if (workerCurrentEdit) {
+        return NormalizePathKey(std::filesystem::path(workerCurrentEdit->targetPath)) == NormalizePathKey(path)
+            ? *workerCurrentEdit : note_snapshot::CurrentEditTextSnapshot{};
+    }
     note_snapshot::CurrentEditTextSnapshot snapshot;
     if (!HasCurrentNoteEditorForPath(path.wstring()) || !IsCurrentOpenNotePath(path)) return snapshot;
     snapshot.available = true;
@@ -1303,9 +1370,15 @@ static void SearchNoteFile(const std::filesystem::path& path,
                            const SearchUiStrings& ui,
                            SearchJob& job) {
     note_snapshot::CurrentEditTextSnapshot currentEdit = CurrentEditSnapshotForNotePath(path);
-    note_snapshot::LatestTextSnapshot snapshot =
-        note_snapshot::LoadLatestTextSnapshot(path.wstring(), currentEdit);
-    if (!snapshot.ok) return;
+    note_snapshot::LatestTextSnapshot snapshot;
+    if (workerCurrentEdit && currentEdit.available) {
+        snapshot.ok = true; snapshot.targetPath = path.wstring();
+        snapshot.bytes = currentEdit.bytes; snapshot.identity = currentEdit.identity;
+        snapshot.source = note_snapshot::TextSnapshotSource::CurrentEdit;
+    } else {
+        snapshot = note_snapshot::LoadLatestTextSnapshot(path.wstring(), currentEdit);
+    }
+    if (!snapshot.ok) { RecordSearchSkipped(path, &job.skipped); return; }
     std::wstring text = DecodeUtf8BytesWide(std::move(snapshot.bytes));
     if (text.empty()) return;
     const std::wstring meta = note_snapshot::LatestTextSnapshotMetaLabel(snapshot);
@@ -1324,7 +1397,7 @@ static void SearchStagedNoteFile(const StagedSearchFile& staged,
     if (currentEdit.available) {
         note_snapshot::LatestTextSnapshot snapshot =
             note_snapshot::LoadLatestTextSnapshot(staged.targetPath.wstring(), currentEdit);
-        if (!snapshot.ok) return;
+        if (!snapshot.ok) { RecordSearchSkipped(staged.targetPath, &job.skipped); return; }
         std::wstring text = DecodeUtf8BytesWide(std::move(snapshot.bytes));
         if (text.empty()) return;
         const std::wstring meta = note_snapshot::LatestTextSnapshotMetaLabel(snapshot);
@@ -1339,6 +1412,7 @@ static void SearchStagedNoteFile(const StagedSearchFile& staged,
                                             staged.stagePath,
                                             &bytes,
                                             &err)) {
+        RecordSearchSkipped(staged.targetPath, &job.skipped);
         return;
     }
     const note::NoteIdentity noteIdentity =
@@ -1372,6 +1446,7 @@ static bool ExtractPdfPageText(FPDF_DOCUMENT doc, int pageIndex, std::wstring& o
                                    reinterpret_cast<unsigned short*>(text.data()));
         if (got > 0) {
             text.resize(got);
+            if (!text.empty() && text.back() == L'\0') text.pop_back();
             out = std::move(text);
         }
     }
@@ -1412,7 +1487,7 @@ static bool GetPdfPageCharCenter(FPDF_DOCUMENT doc,
     return std::isfinite(outX) && std::isfinite(outY);
 }
 
-static void SearchPdfPage(FPDF_DOCUMENT doc,
+[[nodiscard]] static bool SearchPdfPage(FPDF_DOCUMENT doc,
                           int pageIndex,
                           const std::wstring& displayName,
                           const std::filesystem::path& path,
@@ -1420,12 +1495,13 @@ static void SearchPdfPage(FPDF_DOCUMENT doc,
                           note::SemanticSearchOptions options,
                           const SearchUiStrings& ui,
                           std::vector<SearchResultItem>& results) {
-    if (!doc || queryTermsLower.empty() || pageIndex < 0) return;
+    if (!doc || pageIndex < 0) return false;
+    if (queryTermsLower.empty()) return true;
     std::wstring text;
-    if (!ExtractPdfPageText(doc, pageIndex, text)) return;
-    if (text.empty()) return;
+    if (!ExtractPdfPageText(doc, pageIndex, text)) return false;
+    if (text.empty()) return true;
     SearchMatchInfo match = MatchText(text, queryTermsLower, options);
-    if (!match.matched) return;
+    if (!match.matched) return true;
     std::wstring title = !displayName.empty() ? displayName : ui.tagPdf;
     std::wstring snippet = SnipAround(text, match.firstPos, std::max<size_t>(match.firstLen, 1));
     SearchResultItem item;
@@ -1449,6 +1525,7 @@ static void SearchPdfPage(FPDF_DOCUMENT doc,
     item.preview = snippet;
     item.display = item.title + L" " + item.meta + L" " + item.preview;
     results.push_back(std::move(item));
+    return true;
 }
 
 static void SearchAnnotations(const std::vector<Annotation>& annots,
@@ -1522,17 +1599,23 @@ static void SearchAnnotationsForPdf(const std::filesystem::path& pdfPath,
                                     const SearchUiStrings& ui,
                                     std::vector<SearchResultItem>& results) {
     const auto stagePath = file_output::FindLatestStagedClropPathForPdf(pdfPath.wstring());
-    if (!stagePath.empty() && SearchStagedAnnotationsForPdf(pdfPath, stagePath, queryTermsLower, options, ui, results)) {
+    if (!stagePath.empty()) {
+        if (!SearchStagedAnnotationsForPdf(pdfPath, stagePath, queryTermsLower, options, ui, results))
+            RecordSearchSkipped(pdfPath, workerSkipped);
         return;
     }
     std::wstring clropPath = clrop_bridge::ClropPathForPdf(pdfPath.wstring());
     std::error_code ec;
-    if (!std::filesystem::exists(clropPath, ec) || ec) return;
+    if (!std::filesystem::exists(clropPath, ec) || ec) {
+        if (ec) RecordSearchSkipped(clropPath, workerSkipped);
+        return;
+    }
     std::vector<Annotation> annots;
     bool mismatch = false;
     std::wstring err;
     if (!clrop_bridge::LoadAnnotations(clropPath, pdfPath.wstring(), annots, mismatch, nullptr, err,
                                        clrop_bridge::LoadAnnotationsValidation::None)) {
+        RecordSearchSkipped(clropPath, workerSkipped);
         return;
     }
     SearchAnnotations(annots, queryTermsLower, options, ui, pdfPath, results);
@@ -1549,13 +1632,12 @@ static std::wstring NormalizePathKey(const std::filesystem::path& path) {
 static bool IsSearchPathUnderRoot(const std::filesystem::path& path,
                                   const std::filesystem::path& root) {
     if (path.empty() || root.empty()) return false;
-    std::error_code ec;
-    auto rel = std::filesystem::relative(path, root, ec);
-    if (ec || rel.empty()) return false;
-    auto it = rel.begin();
-    if (it == rel.end()) return false;
-    std::wstring first = it->wstring();
-    return first != L"..";
+    // Roots and candidates have already passed local/reparse validation.
+    // Membership must not stat every ancestor again for every matching line.
+    const auto candidate = NormalizePathKey(path.lexically_normal());
+    const auto base = NormalizePathKey(root.lexically_normal());
+    return candidate == base || (candidate.size() > base.size() &&
+        candidate.compare(0, base.size(), base) == 0 && candidate[base.size()] == L'\\');
 }
 
 static bool IsSearchPathUnderAnyRoot(const std::filesystem::path& path,
@@ -1783,6 +1865,10 @@ static void SetSearchControlsEnabled(SearchCtx* ctx, bool enabled) {
     for (HWND btn : ctx->targetChecks) {
         if (btn) EnableWindow(btn, enabled);
     }
+    for (HWND control : {ctx->folderList, ctx->addFolder, ctx->removeFolder,
+         ctx->groupList, ctx->loadGroup, ctx->saveGroup, ctx->deleteGroup,
+         ctx->manageScopes})
+        if (control) EnableWindow(control, enabled);
     UpdateRunButtonLabel(ctx, GetSearchUiStrings());
     // Enter disables the query edit. Keep subsequent shortcuts in this window.
     if (!enabled && previousFocus && ctx->btnRun &&
@@ -1801,6 +1887,8 @@ static void UpdateStatusLabel(SearchCtx* ctx, const SearchUiStrings& ui) {
     }
     std::wstring dots(static_cast<size_t>(ctx->statusPulse % 4), L'.');
     std::wstring text = ui.statusLabel + L": " + ui.statusSearching + dots;
+    if (ctx->process && !ctx->workerPhase.empty()) text += L"  " + ctx->workerPhase;
+    if (ctx->paused) text = localization::Text(L"search.ui.large_paused");
     if (ctx->job.matchCount > 0) {
         text += L"  " + ui.statusHits + std::to_wstring(ctx->job.matchCount);
     }
@@ -1810,11 +1898,21 @@ static void UpdateStatusLabel(SearchCtx* ctx, const SearchUiStrings& ui) {
     if (ctx->job.processedPages > 0) {
         text += L"  " + ui.statusPages + std::to_wstring(ctx->job.processedPages);
     }
+    if (ctx->process) {
+        text += L"  " + localization::Format(L"search.ui.scale", {
+            {L"entries", std::to_wstring(ctx->job.enumerated)},
+            {L"depth", std::to_wstring(ctx->job.maxDepth)},
+            {L"mib", std::to_wstring(ctx->job.candidateBytes / (1024 * 1024))},
+            {L"skipped", std::to_wstring(ctx->job.skipped)}});
+    }
     SetWindowTextW(ctx->labelStatus, text.c_str());
 }
 
 static void FinishSearchJob(HWND hWnd, SearchCtx* ctx, const SearchUiStrings& ui, bool canceled) {
     if (!ctx) return;
+    ctx->process.reset();
+    ctx->paused = false;
+    if (ctx->continueSearch) ShowWindow(ctx->continueSearch, SW_HIDE);
     if (ctx->job.pdf && ctx->job.pdf->ownsDoc && ctx->job.pdf->doc) {
         std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
         FPDF_CloseDocument(ctx->job.pdf->doc);
@@ -1827,7 +1925,7 @@ static void FinishSearchJob(HWND hWnd, SearchCtx* ctx, const SearchUiStrings& ui
     SetSearchControlsEnabled(ctx, true);
     UpdateRunButtonLabel(ctx, ui);
 
-    if (ctx->job.matchCount == 0 && ctx->job.results.empty() && !canceled) {
+    if (ctx->job.matchCount == 0 && ctx->job.results.empty() && !canceled && ctx->job.skipped == 0) {
         SearchResultItem item;
         item.kind = SearchResultKind::Info;
         item.title = ui.msgNoResults;
@@ -1849,6 +1947,9 @@ static void FinishSearchJob(HWND hWnd, SearchCtx* ctx, const SearchUiStrings& ui
 
 static void CancelSearchJob(HWND hWnd, SearchCtx* ctx, bool silent) {
     if (!ctx || !ctx->job.active) return;
+    ctx->process.reset();
+    ctx->paused = false;
+    if (ctx->continueSearch) ShowWindow(ctx->continueSearch, SW_HIDE);
     const auto ui = GetSearchUiStrings();
     if (ctx->job.noteScan) {
         ctx->job.noteScan->completion->canceled = true;
@@ -1906,7 +2007,7 @@ static std::vector<std::filesystem::path> CollectLectureSearchRoots(const std::f
     return roots;
 }
 
-static std::vector<std::filesystem::path> CollectWorkspaceLectureSearchRoots() {
+static std::vector<std::filesystem::path> CollectWorkspaceLectureSearchRoots(size_t* skipped = nullptr) {
     std::vector<std::filesystem::path> roots;
     std::filesystem::path classesPath = GetWorkspaceClassesPath();
     if (classesPath.empty()) return roots;
@@ -1924,6 +2025,7 @@ static std::vector<std::filesystem::path> CollectWorkspaceLectureSearchRoots() {
         auto lectureRoots = CollectLectureSearchRoots(lecture.path());
         roots.insert(roots.end(), lectureRoots.begin(), lectureRoots.end());
     }
+    if (ec && skipped) ++*skipped;
     return roots;
 }
 
@@ -1942,8 +2044,8 @@ static void AppendUniqueRoots(std::vector<std::filesystem::path>& roots,
     }
 }
 
-static std::vector<std::filesystem::path> CollectWorkspaceLectureSearchRootsIncludingVisibleExternal() {
-    std::vector<std::filesystem::path> roots = CollectWorkspaceLectureSearchRoots();
+static std::vector<std::filesystem::path> CollectWorkspaceLectureSearchRootsIncludingVisibleExternal(size_t* skipped = nullptr) {
+    std::vector<std::filesystem::path> roots = CollectWorkspaceLectureSearchRoots(skipped);
     for (const auto& lecturePath : g_lectures) {
         if (lecturePath.empty()) continue;
         std::filesystem::path path(lecturePath);
@@ -2128,12 +2230,14 @@ static bool PrepareSearchRoots(SearchRange range,
         return true;
     }
     case SearchRange::WholeWorkspace:
-        roots = includeTempExternal ? CollectWorkspaceLectureSearchRootsIncludingVisibleExternal()
-                                    : CollectWorkspaceLectureSearchRoots();
+        roots = includeTempExternal ? CollectWorkspaceLectureSearchRootsIncludingVisibleExternal(&ctx->job.skipped)
+                                    : CollectWorkspaceLectureSearchRoots(&ctx->job.skipped);
         if (roots.empty()) {
             AppendInfo(ctx, ui.msgNoSearchableFiles);
             return false;
         }
+        return true;
+    case SearchRange::Folders:
         return true;
     default:
         break;
@@ -2180,6 +2284,9 @@ static void AddScopedStagedDiffsToSearchJob(SearchJob& job) {
 static void ResetSearchState(SearchCtx* ctx, const SearchUiStrings& ui) {
     if (!ctx || !ctx->results) return;
     ctx->job = SearchJob{};
+    ctx->workerDone = ctx->paused = false;
+    ctx->resultBytes = 0;
+    ctx->workerPhase.clear();
     ctx->idleStatusText = ui.statusReady;
     ctx->statusPulse = 0;
     ctx->maxResultWidth = 0;
@@ -2224,11 +2331,17 @@ static void ProcessEnumeration(SearchCtx* ctx,
                 job.enumerationDone = true;
                 break;
             }
+            DWORD rootAttributes = 0;
+            if (!write_checks::IsSafeLocalPath(job.roots[job.rootIndex]) ||
+                !SearchAttributes(job.roots[job.rootIndex], rootAttributes)) {
+                RecordSearchSkipped(job.roots[job.rootIndex], &job.skipped); ++job.rootIndex; continue;
+            }
             job.iter = std::filesystem::recursive_directory_iterator(
                 job.roots[job.rootIndex],
-                std::filesystem::directory_options::skip_permission_denied,
+                std::filesystem::directory_options::none,
                 ec);
             if (ec) {
+                RecordSearchSkipped(job.roots[job.rootIndex], &job.skipped);
                 job.rootIndex++;
                 job.iterValid = false;
                 continue;
@@ -2244,8 +2357,14 @@ static void ProcessEnumeration(SearchCtx* ctx,
 
         const auto& entry = *job.iter;
         std::filesystem::path path = entry.path();
-        bool isReparse = false;
-        if (TryIsReparsePointNoFollow(path, isReparse) && isReparse) {
+        ++job.enumerated;
+        job.maxDepth = std::max(job.maxDepth, static_cast<size_t>(job.iter.depth() + 1));
+        DWORD attributes = 0;
+        const bool attributesAllowed = SearchAttributes(path, attributes);
+        if (!attributesAllowed ||
+            path.filename() == L"__pdf_note_workspace__" ||
+            !job.enumeratedPaths.insert(NormalizePathKey(path)).second) {
+            if (!attributesAllowed) RecordSearchSkipped(path, &job.skipped);
             job.iter.disable_recursion_pending();
             job.iter.increment(ec);
             if (ec) {
@@ -2278,6 +2397,11 @@ static void ProcessEnumeration(SearchCtx* ctx,
         }
         std::error_code stEc;
         if (entry.is_regular_file(stEc) && !stEc) {
+            if ((job.includeNotes && IsNoteFile(path)) ||
+                ((job.includePdfs || job.includeAnnots) && IsPdfFile(path))) {
+                const auto bytes = entry.file_size(stEc);
+                if (!stEc && bytes <= UINT64_MAX - job.candidateBytes) job.candidateBytes += bytes;
+            }
             if (job.includeNotes && IsNoteFile(path)) {
                 if (!HasStagedNoteForTarget(job, path)) {
                     job.noteFiles.push_back(path);
@@ -2290,6 +2414,7 @@ static void ProcessEnumeration(SearchCtx* ctx,
 
         job.iter.increment(ec);
         if (ec) {
+            RecordSearchSkipped(path, &job.skipped);
             job.rootIndex++;
             job.iterValid = false;
         }
@@ -2339,7 +2464,8 @@ static void ProcessStagedAnnotationFiles(SearchCtx* ctx,
     while (processed < fileBudget && job.stagedAnnotIndex < job.stagedAnnotFiles.size()) {
         const auto& staged = job.stagedAnnotFiles[job.stagedAnnotIndex++];
         std::vector<SearchResultItem> found;
-        SearchStagedAnnotationsForPdf(staged.targetPath, staged.stagePath, job.queryTermsLower, job.options, ui, found);
+        if (!SearchStagedAnnotationsForPdf(staged.targetPath, staged.stagePath, job.queryTermsLower, job.options, ui, found))
+            RecordSearchSkipped(staged.targetPath, &job.skipped);
         if (!found.empty()) {
             out.insert(out.end(), found.begin(), found.end());
         }
@@ -2381,6 +2507,7 @@ static void ProcessPdfPages(SearchCtx* ctx,
                 doc = FPDF_LoadDocument(utf8.c_str(), nullptr);
             }
             if (!doc) {
+                RecordSearchSkipped(path, &job.skipped);
                 job.pdfIndex++;
                 job.processedFiles++;
                 // Failed opens consume the transition/time budget too. Cheap
@@ -2422,7 +2549,8 @@ static void ProcessPdfPages(SearchCtx* ctx,
         }
 
         if (SearchClock::now() >= deadline) return;
-        SearchPdfPage(state.doc, state.pageIndex, state.display, state.path, job.queryTermsLower, job.options, ui, out);
+        if (!SearchPdfPage(state.doc, state.pageIndex, state.display, state.path, job.queryTermsLower, job.options, ui, out))
+            RecordSearchSkipped(state.path, &job.skipped);
         state.pageIndex++;
         job.processedPages++;
         processed++;
@@ -2441,8 +2569,111 @@ static bool IsSearchJobComplete(const SearchJob& job) {
     return true;
 }
 
+static void WriteSearchItem(search::Writer& writer, const SearchResultItem& item) {
+    writer.Put<int32_t>(static_cast<int>(item.kind));
+    writer.Text(item.display); writer.Text(item.title); writer.Text(item.meta); writer.Text(item.preview);
+    writer.Text(item.path.wstring());
+    writer.Put<uint64_t>(item.noteSnapshotIdentity.content_fingerprint);
+    writer.Put<int32_t>(item.lineNumber); writer.Put<int32_t>(item.pageIndex);
+    writer.Put<uint64_t>(item.textStart); writer.Put<uint64_t>(item.textEnd);
+    writer.Put<int32_t>(item.hitCount); writer.Put<double>(item.focusX); writer.Put<double>(item.focusY);
+    writer.Put<uint8_t>(item.hasFocusPoint); writer.Put<uint8_t>(item.externalReadOnly);
+}
+static SearchResultItem ReadSearchItem(search::Reader& reader) {
+    SearchResultItem item;
+    const auto kind = reader.Get<int32_t>();
+    if (kind < 0 || kind > static_cast<int>(SearchResultKind::Path)) throw std::runtime_error("search result kind");
+    item.kind = static_cast<SearchResultKind>(kind);
+    item.display = reader.Text(65536); item.title = reader.Text(65536);
+    item.meta = reader.Text(65536); item.preview = reader.Text(65536); item.path = reader.Text();
+    item.noteSnapshotIdentity.content_fingerprint = reader.Get<uint64_t>();
+    item.lineNumber = reader.Get<int32_t>(); item.pageIndex = reader.Get<int32_t>();
+    item.textStart = static_cast<size_t>(reader.Get<uint64_t>()); item.textEnd = static_cast<size_t>(reader.Get<uint64_t>());
+    item.hitCount = reader.Get<int32_t>(); item.focusX = reader.Get<double>(); item.focusY = reader.Get<double>();
+    item.hasFocusPoint = reader.Get<uint8_t>() != 0; item.externalReadOnly = reader.Get<uint8_t>() != 0;
+    item.processSnapshot = true;
+    return item;
+}
+static void WriteSearchProgress(search::Writer& writer, const SearchJob& job) {
+    writer.Put<uint64_t>(job.processedFiles); writer.Put<uint64_t>(job.processedPages);
+    writer.Put<uint64_t>(job.enumerated); writer.Put<uint64_t>(job.maxDepth);
+    writer.Put<uint64_t>(job.candidateBytes); writer.Put<uint64_t>(job.skipped);
+    writer.Put<uint8_t>(job.enumerationDone);
+}
+static void ReadSearchProgress(search::Reader& reader, SearchCtx& ctx) {
+    ctx.job.processedFiles = static_cast<size_t>(reader.Get<uint64_t>());
+    ctx.job.processedPages = static_cast<size_t>(reader.Get<uint64_t>());
+    ctx.job.enumerated = static_cast<size_t>(reader.Get<uint64_t>());
+    ctx.job.maxDepth = static_cast<size_t>(reader.Get<uint64_t>());
+    ctx.job.candidateBytes = reader.Get<uint64_t>();
+    ctx.job.skipped = static_cast<size_t>(reader.Get<uint64_t>());
+    ctx.workerPhase = localization::Text(reader.Get<uint8_t>() ? L"search.ui.phase_search" : L"search.ui.phase_enumerate");
+}
+// This path only consumes a bounded in-memory slot. All enumeration, file
+// parsing and PDFium calls happen in the separately owned read-only process.
+static void ProcessRemoteSearchTick(HWND window, SearchCtx& ctx) {
+    KillTimer(window, kSearchTimerId);
+    const auto ui = GetSearchUiStrings();
+    const auto deadline = SearchClock::now() + kSearchWorkBudget;
+    std::vector<SearchResultItem> results;
+    try {
+        for (size_t n = 0; n < kSearchResultsPerTick && SearchClock::now() < deadline; ++n) {
+            std::string message;
+            const auto state = ctx.process->Poll(message);
+            if (state == search::Process::PollResult::Pending) break;
+            if (state != search::Process::PollResult::Message) throw std::runtime_error("search process ended without completion");
+            search::Reader reader(message);
+            const auto type = reader.Get<uint8_t>();
+            if (type == 'R') {
+                auto item = ReadSearchItem(reader);
+                const auto units = item.display.size() * 2 + item.title.size() + item.meta.size() +
+                                   item.preview.size() + item.path.native().size();
+                const auto bytes = sizeof(item) * 2 + units * sizeof(wchar_t);
+                if (bytes > 64 * 1024 * 1024 - ctx.resultBytes) {
+                    if (!results.empty()) { AppendResults(&ctx, results); results.clear(); }
+                    CancelSearchJob(window, &ctx, false);
+                    const auto text = localization::Text(L"search.ui.result_limit");
+                    SetIdleStatus(&ctx, text); UpdateStatusLabel(&ctx, ui); AppendInfo(&ctx, text);
+                    return;
+                }
+                ctx.resultBytes += bytes;
+                results.push_back(std::move(item));
+            }
+            else if (type == 'P' || type == 'W' || type == 'D') {
+                ReadSearchProgress(reader, ctx);
+                if (type == 'W') {
+                    ctx.paused = true;
+                    ShowWindow(ctx.continueSearch, SW_SHOWNA);
+                } else if (type == 'D') ctx.workerDone = true;
+            } else throw std::runtime_error("search message type");
+            reader.End();
+            if (ctx.paused || ctx.workerDone) break;
+        }
+        if (!results.empty()) { AppendResults(&ctx, results); results.clear(); }
+        ++ctx.statusPulse;
+        UpdateStatusLabel(&ctx, ui);
+        if (ctx.workerDone) {
+            FinishSearchJob(window, &ctx, ui, false);
+            if (ctx.job.skipped) {
+                const auto text = localization::Format(L"search.ui.done_skipped", {{L"count", std::to_wstring(ctx.job.skipped)}});
+                SetIdleStatus(&ctx, text); UpdateStatusLabel(&ctx, ui);
+                AppendInfo(&ctx, text);
+            }
+        } else if (!SetTimer(window, kSearchTimerId, kSearchTimerIntervalMs, nullptr)) {
+            throw std::runtime_error("search timer");
+        }
+    } catch (...) {
+        if (!results.empty()) AppendResults(&ctx, results);
+        CancelSearchJob(window, &ctx, false);
+        SetIdleStatus(&ctx, localization::Text(L"search.ui.worker_failed"));
+        UpdateStatusLabel(&ctx, ui);
+        AppendInfo(&ctx, localization::Text(L"search.ui.worker_failed"));
+    }
+}
+
 static void ProcessSearchTick(HWND hWnd, SearchCtx* ctx) {
     if (!ctx || !ctx->job.active) return;
+    if (ctx->process) { ProcessRemoteSearchTick(hWnd, *ctx); return; }
     // One-shot scheduling guarantees an idle interval AFTER work, including
     // slow indivisible filesystem/PDFium calls. A periodic overdue timer can
     // otherwise run again immediately. All job and PDF ownership stays here.
@@ -2515,10 +2746,27 @@ static void OpenSearchResult(HWND hWnd, SearchCtx* ctx, int listIndex, bool navi
     size_t idx = static_cast<size_t>(listIndex);
     if (idx >= ctx->job.results.size()) return;
     const SearchResultItem item = ctx->job.results[idx];
-    if (item.kind == SearchResultKind::Info) return;
+    if (item.kind == SearchResultKind::Info) {
+        if (!item.path.empty()) ShowSilentMessageDialog(hWnd,
+            localization::Text(L"search.ui.title"), localization::Text(L"search.ui.unreadable_detail"),
+            SoftNoticeKind::Warning, {{localization::Text(L"search.ui.unreadable_path"), item.path.wstring()}});
+        return;
+    }
 
     HWND owner = ctx->owner ? ctx->owner : hWnd;
     ClearOpenedSearchResultMarkers();
+    const bool currentlyManaged = IsSearchPathUnderRoot(item.path, std::filesystem::path(g_workspaceRoot)) ||
+        std::any_of(g_tempExternalLectures.begin(), g_tempExternalLectures.end(), [&](const auto& root) {
+            return IsSearchPathUnderRoot(item.path, std::filesystem::path(root.path));
+        });
+    if (item.externalReadOnly || !currentlyManaged) {
+        if (IsPdfFile(item.path)) {
+            if (OpenSearchResultInReadonlyViewer(owner, item)) MarkSearchResultOpened(ctx, listIndex);
+        } else if (LaunchReadOnlyViewerForFile(owner, item.path.wstring())) {
+            MarkSearchResultOpened(ctx, listIndex);
+        }
+        return;
+    }
 
     if (item.kind == SearchResultKind::Path) {
         std::error_code ec;
@@ -2550,7 +2798,13 @@ static void OpenSearchResult(HWND hWnd, SearchCtx* ctx, int listIndex, bool navi
             PostMessageW(hWnd, kMsgOpenSearchResult, static_cast<WPARAM>(listIndex), 1);
             return;
         }
-        if (!CurrentOpenNoteMatchesSnapshot(item.noteSnapshotIdentity)) return;
+        if (item.processSnapshot) {
+            const auto bytes = WideToUTF8(ReadCurrentNoteEditorText());
+            if (note::FingerprintSnapshotBytes(bytes) != item.noteSnapshotIdentity.content_fingerprint) {
+                ShowSoftNotice(hWnd, localization::Text(L"search.ui.result_changed"), SoftNoticeKind::Warning);
+                return;
+            }
+        } else if (!CurrentOpenNoteMatchesSnapshot(item.noteSnapshotIdentity)) return;
         if (item.lineNumber >= 1) JumpToNoteLine(item.lineNumber);
         if (item.textStart != std::wstring::npos && item.textEnd > item.textStart) {
             SetCurrentNoteSearchMarker(item.textStart, item.textEnd);
@@ -2587,7 +2841,7 @@ static void OpenSearchResult(HWND hWnd, SearchCtx* ctx, int listIndex, bool navi
     }
 }
 
-static void RunSearch(HWND hWnd, SearchCtx* ctx) {
+static void RunSearchImpl(HWND hWnd, SearchCtx* ctx) {
     if (!ctx || !ctx->results) return;
     const auto ui = GetSearchUiStrings();
     if (ctx->job.active) {
@@ -2628,18 +2882,47 @@ static void RunSearch(HWND hWnd, SearchCtx* ctx) {
     ctx->job.includeNotes = TargetMaskIncludesNotes(targetMask);
     ctx->job.includePdfs = TargetMaskIncludesPdfs(targetMask);
     ctx->job.includeAnnots = TargetMaskIncludesAnnotations(targetMask);
-    const bool includeTempExternal = range == SearchRange::WholeWorkspace && IsChecked(ctx->includeTempExternal);
-    if (!PrepareSearchRoots(range, includeTempExternal, ctx->job.roots, ui, ctx)) {
-        if (!ctx->job.results.empty()) {
-            const auto& last = ctx->job.results.back();
-            if (!last.display.empty()) SetIdleStatus(ctx, last.display);
-        }
-        UpdateStatusLabel(ctx, ui);
-        return;
+    if (ctx->pinnedWorkspace != std::filesystem::path(g_workspaceRoot)) {
+        AppendInfo(ctx, localization::Text(L"search.ui.workspace_changed")); return;
     }
-    AddScopedStagedDiffsToSearchJob(ctx->job);
-    ctx->job.enumerationDone = false;
-
+    std::filesystem::path selectedRoot;
+    if ((range == SearchRange::CurrentLecture && !TryGetCurrentLectureRoot(selectedRoot)) ||
+        (range == SearchRange::CurrentSession && !TryGetCurrentSessionRoot(selectedRoot))) {
+        AppendInfo(ctx, range == SearchRange::CurrentLecture ? ui.msgNoLecture : ui.msgNoSession); return;
+    }
+    search::Writer request;
+    request.Put<uint32_t>(1);
+    request.Text(g_workspaceRoot); request.Text(g_config.classesDir); request.Text(g_config.cacheDir);
+    request.Put<int32_t>(static_cast<int>(range)); request.Text(selectedRoot.wstring());
+    request.Put<uint8_t>(range == SearchRange::WholeWorkspace && IsChecked(ctx->includeTempExternal));
+    request.Put<uint32_t>(static_cast<uint32_t>(g_lectures.size()));
+    for (const auto& root : g_lectures) request.Text(root);
+    request.Put<uint32_t>(static_cast<uint32_t>(ctx->folders.size()));
+    bool hasFolder = false;
+    for (size_t i = 0; i < ctx->folders.size(); ++i) {
+        const auto selected = ctx->folderList ? SendMessageW(ctx->folderList, LB_GETSEL, i, 0) > 0 : ctx->folders[i].enabled;
+        ctx->folders[i].enabled = selected;
+        hasFolder |= selected;
+        request.Text(ctx->folders[i].path); request.Put<uint8_t>(selected);
+    }
+    if (range == SearchRange::Folders && !hasFolder) {
+        AppendInfo(ctx, localization::Text(L"search.ui.need_folder")); return;
+    }
+    request.Put<uint32_t>(targetMask); request.Text(query);
+    request.Put<uint8_t>(options.normalizeWidthKana); request.Put<uint8_t>(options.ignoreCase);
+    request.Put<uint8_t>(g_config.clroAsciiOnly); request.Put<uint8_t>(g_config.noteQuoteLazyContinuation);
+    request.Put<uint32_t>(static_cast<uint32_t>(g_config.additionalNoteExtensions.size()));
+    for (const auto& extension : g_config.additionalNoteExtensions) request.Text(extension);
+    const auto currentEdit = CurrentEditSnapshotForNotePath(std::filesystem::path(g_currentNotePath));
+    request.Text(currentEdit.available ? currentEdit.targetPath : L"");
+    request.Text(currentEdit.available ? UTF8ToWide(currentEdit.bytes) : L"");
+    auto process = std::make_unique<search::Process>();
+    if (!process->Start(request.bytes)) {
+        AppendInfo(ctx, localization::Text(L"search.ui.worker_failed")); return;
+    }
+    ctx->process = std::move(process);
+    ctx->paused = ctx->workerDone = false;
+    ctx->workerPhase = localization::Text(L"search.ui.phase_enumerate");
     ctx->job.active = true;
     ctx->job.range = range;
     ctx->job.targetMask = targetMask;
@@ -2648,15 +2931,263 @@ static void RunSearch(HWND hWnd, SearchCtx* ctx) {
     ctx->job.options = options;
     UpdateRunButtonLabel(ctx, ui);
 
-    if (IsSearchJobComplete(ctx->job)) {
-        FinishSearchJob(hWnd, ctx, ui, false);
-        return;
-    }
-
     SetSearchControlsEnabled(ctx, false);
     UpdateStatusLabel(ctx, ui);
     if (!SetTimer(hWnd, kSearchTimerId, kSearchTimerIntervalMs, nullptr)) {
         CancelSearchJob(hWnd, ctx, false);
+    }
+}
+
+static void RunSearch(HWND hWnd, SearchCtx* ctx) {
+    try { RunSearchImpl(hWnd, ctx); }
+    catch (...) {
+        if (!ctx) return;
+        if (ctx->job.active) CancelSearchJob(hWnd, ctx, false);
+        ctx->process.reset();
+        SetSearchControlsEnabled(ctx, true);
+        SetIdleStatus(ctx, localization::Text(L"search.ui.worker_failed"));
+        UpdateStatusLabel(ctx, GetSearchUiStrings());
+    }
+}
+
+static void RefreshSearchFolders(SearchCtx& ctx) {
+    SendMessageW(ctx.folderList, LB_RESETCONTENT, 0, 0);
+    const HDC dc = GetDC(ctx.folderList);
+    const auto font = reinterpret_cast<HFONT>(SendMessageW(ctx.folderList, WM_GETFONT, 0, 0));
+    const auto previous = dc && font ? SelectObject(dc, font) : nullptr;
+    int extent = 0;
+    for (size_t i = 0; i < ctx.folders.size(); ++i) {
+        // This is the user's explicit path selection list, with horizontal
+        // scrolling and copy through the folder picker; no filesystem I/O.
+        SendMessageW(ctx.folderList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(ctx.folders[i].path.c_str()));
+        SendMessageW(ctx.folderList, LB_SETSEL, ctx.folders[i].enabled, i);
+        SIZE size{};
+        if (dc && GetTextExtentPoint32W(dc, ctx.folders[i].path.c_str(),
+                static_cast<int>(ctx.folders[i].path.size()), &size)) extent = std::max(extent, static_cast<int>(size.cx) + 16);
+    }
+    SendMessageW(ctx.folderList, LB_SETHORIZONTALEXTENT, extent, 0);
+    if (previous) SelectObject(dc, previous);
+    if (dc) ReleaseDC(ctx.folderList, dc);
+}
+static void CaptureSearchFolders(SearchCtx& ctx) {
+    if (!ctx.folderList) return;
+    for (size_t i = 0; i < ctx.folders.size(); ++i)
+        ctx.folders[i].enabled = SendMessageW(ctx.folderList, LB_GETSEL, i, 0) > 0;
+}
+static void RefreshSearchGroups(SearchCtx& ctx, int selected = -1) {
+    SendMessageW(ctx.groupList, CB_RESETCONTENT, 0, 0);
+    for (const auto& group : ctx.groups.items())
+        SendMessageW(ctx.groupList, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(group.name.c_str()));
+    SendMessageW(ctx.groupList, CB_SETCURSEL, selected, 0);
+}
+static void HandleSearchScopeCommand(HWND window, SearchCtx& ctx, int id) {
+    if (ctx.job.active || ctx.scopeBusy) return;
+    struct ScopeOperation {
+        SearchCtx& ctx;
+        explicit ScopeOperation(SearchCtx& value) : ctx(value) { ctx.scopeBusy = true; }
+        ~ScopeOperation() {
+            ctx.scopeBusy = false;
+            if (ctx.closeAfterScope) PostMessageW(g_hSearchWnd, WM_CLOSE, 0, 0);
+            else if (ctx.closeScopeAfter && ctx.scopeWindow) PostMessageW(ctx.scopeWindow, WM_CLOSE, 0, 0);
+        }
+    } operation(ctx);
+    const auto title = localization::Text(L"search.ui.groups");
+    const auto fail = [&](const wchar_t* message) { ShowSoftNotice(window, localization::Text(message), SoftNoticeKind::Error); };
+    if (ctx.pinnedWorkspace != std::filesystem::path(g_workspaceRoot)) { fail(L"search.ui.workspace_changed"); return; }
+    if (id == IDC_SEARCH_ADD_FOLDER) {
+        if (ctx.folders.size() >= 256) { fail(L"search.ui.folder_limit"); return; }
+        const auto path = PromptExistingLocalPathAppFirst(window, ctx.pinnedWorkspace,
+            localization::Text(L"search.ui.add_folder"), true);
+        if (!path || ctx.closeScopeAfter || ctx.closeAfterScope) return;
+        CaptureSearchFolders(ctx);
+        const auto key = NormalizePathKey(std::filesystem::path(*path).lexically_normal());
+        auto found = std::find_if(ctx.folders.begin(), ctx.folders.end(), [&](const auto& folder) {
+            return NormalizePathKey(std::filesystem::path(folder.path).lexically_normal()) == key;
+        });
+        if (found == ctx.folders.end()) ctx.folders.push_back({*path, true});
+        else found->enabled = true;
+        RefreshSearchFolders(ctx);
+        if (ctx.folders.size() == 1) {
+            for (size_t i = 0; i < ctx.rangeRadios.size(); ++i)
+                SendMessageW(ctx.rangeRadios[i], BM_SETCHECK, i == 3 ? BST_CHECKED : BST_UNCHECKED, 0);
+            UpdateTemporaryExternalScopeControl(&ctx);
+        }
+        return;
+    }
+    if (id == IDC_SEARCH_REMOVE_FOLDER) {
+        const auto index = SendMessageW(ctx.folderList, LB_GETCARETINDEX, 0, 0);
+        if (index >= 0 && static_cast<size_t>(index) < ctx.folders.size()) {
+            CaptureSearchFolders(ctx); ctx.folders.erase(ctx.folders.begin() + index); RefreshSearchFolders(ctx);
+        }
+        return;
+    }
+    const int selected = static_cast<int>(SendMessageW(ctx.groupList, CB_GETCURSEL, 0, 0));
+    const bool valid = selected >= 0 && static_cast<size_t>(selected) < ctx.groups.items().size();
+    if (id == IDC_SEARCH_LOAD_GROUP) {
+        if (!valid) return;
+        const auto& group = ctx.groups.items()[static_cast<size_t>(selected)];
+        ctx.folders = group.folders; RefreshSearchFolders(ctx);
+        for (size_t i = 0; i < ctx.rangeRadios.size(); ++i)
+            SendMessageW(ctx.rangeRadios[i], BM_SETCHECK, i == static_cast<size_t>(group.range) ? BST_CHECKED : BST_UNCHECKED, 0);
+        for (size_t i = 0; i < ctx.targetChecks.size(); ++i)
+            SendMessageW(ctx.targetChecks[i], BM_SETCHECK, (group.targets & (1u << i)) ? BST_CHECKED : BST_UNCHECKED, 0);
+        SendMessageW(ctx.includeTempExternal, BM_SETCHECK, group.external ? BST_CHECKED : BST_UNCHECKED, 0);
+        SendMessageW(ctx.optNormalizeWidthKana, BM_SETCHECK, group.normalize ? BST_CHECKED : BST_UNCHECKED, 0);
+        SendMessageW(ctx.optIgnoreCase, BM_SETCHECK, group.ignoreCase ? BST_CHECKED : BST_UNCHECKED, 0);
+        UpdateTemporaryExternalScopeControl(&ctx);
+        return;
+    }
+    if (!ctx.groups.ready()) { fail(L"search.ui.group_store_failed"); return; }
+    auto groups = ctx.groups.items();
+    if (id == IDC_SEARCH_SAVE_GROUP) {
+        std::wstring name;
+        const auto initial = valid ? groups[static_cast<size_t>(selected)].name : L"";
+        if (!PromptSimpleText(window, title, initial, name) || ctx.closeScopeAfter || ctx.closeAfterScope) return;
+        name = TrimWhitespace(name);
+        if (name.empty() || name.size() > 128 || GetSelectedTargetMask(ctx) == 0) { fail(L"search.ui.group_invalid"); return; }
+        CaptureSearchFolders(ctx);
+        search::Group group;
+        group.name = name; group.folders = ctx.folders; group.range = static_cast<int>(GetSelectedRange(ctx));
+        group.targets = GetSelectedTargetMask(ctx); group.external = IsChecked(ctx.includeTempExternal);
+        group.normalize = IsChecked(ctx.optNormalizeWidthKana); group.ignoreCase = IsChecked(ctx.optIgnoreCase);
+        auto existing = std::find_if(groups.begin(), groups.end(), [&](const auto& item) { return item.name == name; });
+        int newSelection = static_cast<int>(groups.size());
+        if (existing == groups.end()) groups.push_back(std::move(group));
+        else { newSelection = static_cast<int>(existing - groups.begin()); *existing = std::move(group); }
+        if (!ctx.groups.Save(groups)) { fail(L"search.ui.group_store_failed"); return; }
+        RefreshSearchGroups(ctx, newSelection);
+        ShowSoftNotice(window, localization::Text(L"search.ui.group_saved"), SoftNoticeKind::Info);
+    } else if (id == IDC_SEARCH_DELETE_GROUP && valid) {
+        groups.erase(groups.begin() + selected);
+        if (!ctx.groups.Save(groups)) { fail(L"search.ui.group_store_failed"); return; }
+        RefreshSearchGroups(ctx);
+    }
+}
+
+static void CloseSearchScopes(HWND window, SearchCtx& ctx) {
+    if (ctx.scopeBusy) {
+        // Nested path/name dialogs still hold this context. Cancel the owned
+        // popup and let ScopeOperation finish before destroying its owner.
+        ctx.closeScopeAfter = true;
+        const HWND popup = GetWindow(window, GW_ENABLEDPOPUP);
+        if (popup && popup != window && GetWindow(popup, GW_OWNER) == window)
+            PostMessageW(popup, WM_CLOSE, 0, 0);
+        return;
+    }
+    ctx.closeScopeAfter = false;
+    if (ctx.scopeOwnerDisabled) {
+        ctx.scopeOwnerDisabled = false;
+        RestoreModalOwnerBeforeClose(GetWindow(window, GW_OWNER));
+    }
+    DestroyWindow(window);
+}
+
+static LRESULT CALLBACK SearchScopeProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    auto* ctx = reinterpret_cast<SearchCtx*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+    try {
+    if (message == WM_CREATE) {
+        ctx = static_cast<SearchCtx*>(reinterpret_cast<CREATESTRUCTW*>(lParam)->lpCreateParams);
+        SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ctx));
+        ctx->scopeWindow = window;
+        ctx->closeScopeAfter = false;
+        auto control = [&](const wchar_t* type, const wchar_t* label, DWORD style, int id) {
+            const auto caption = label ? localization::Text(label) : std::wstring{};
+            HWND child = CreateWindowExW(0, type, caption.c_str(),
+                WS_CHILD | WS_VISIBLE | style, 0, 0, 0, 0, window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), g_hInst, nullptr);
+            SetUIFont(child); return child;
+        };
+        ctx->folderLabel = control(L"STATIC", L"search.ui.folder_hint", 0, 0);
+        ctx->folderList = control(L"LISTBOX", nullptr, WS_TABSTOP | WS_VSCROLL | WS_HSCROLL |
+            WS_BORDER | LBS_MULTIPLESEL | LBS_NOINTEGRALHEIGHT, IDC_SEARCH_FOLDERS);
+        ctx->addFolder = control(L"BUTTON", L"search.ui.add_folder", WS_TABSTOP | BS_PUSHBUTTON, IDC_SEARCH_ADD_FOLDER);
+        ctx->removeFolder = control(L"BUTTON", L"search.ui.remove_folder", WS_TABSTOP | BS_PUSHBUTTON, IDC_SEARCH_REMOVE_FOLDER);
+        ctx->groupList = control(L"COMBOBOX", nullptr, WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, IDC_SEARCH_GROUPS);
+        ctx->loadGroup = control(L"BUTTON", L"search.ui.load_group", WS_TABSTOP | BS_PUSHBUTTON, IDC_SEARCH_LOAD_GROUP);
+        ctx->saveGroup = control(L"BUTTON", L"search.ui.save_group", WS_TABSTOP | BS_PUSHBUTTON, IDC_SEARCH_SAVE_GROUP);
+        ctx->deleteGroup = control(L"BUTTON", L"search.ui.delete_group", WS_TABSTOP | BS_PUSHBUTTON, IDC_SEARCH_DELETE_GROUP);
+        ctx->closeScopes = control(L"BUTTON", L"common.close", WS_TABSTOP | BS_PUSHBUTTON, IDCANCEL);
+        if (!ctx->folderLabel || !ctx->folderList || !ctx->addFolder || !ctx->removeFolder ||
+            !ctx->groupList || !ctx->loadGroup || !ctx->saveGroup || !ctx->deleteGroup || !ctx->closeScopes) return -1;
+        for (HWND button : {ctx->addFolder, ctx->removeFolder, ctx->loadGroup, ctx->saveGroup, ctx->deleteGroup, ctx->closeScopes})
+            EnableSearchOwnerDrawButton(button);
+        RefreshSearchFolders(*ctx); RefreshSearchGroups(*ctx);
+        ApplyThemeToDialog(window);
+        return 0;
+    }
+    if (!ctx) return DefWindowProcW(window, message, wParam, lParam);
+    switch (message) {
+    case WM_SIZE: {
+        RECT bounds{}; GetClientRect(window, &bounds);
+        const int width = std::max(0L, bounds.right - 32), height = std::max(0L, bounds.bottom - 32);
+        const int listHeight = std::max(40, height - 224);
+        MoveWindow(ctx->folderLabel, 16, 16, width, 52, TRUE);
+        MoveWindow(ctx->folderList, 16, 76, width, listHeight, TRUE);
+        MoveWindow(ctx->addFolder, 16, 84 + listHeight, width / 2 - 4, 30, TRUE);
+        MoveWindow(ctx->removeFolder, 20 + width / 2, 84 + listHeight, width / 2 - 4, 30, TRUE);
+        MoveWindow(ctx->groupList, 16, 122 + listHeight, width, 220, TRUE);
+        const int buttonWidth = (width - 16) / 3;
+        MoveWindow(ctx->loadGroup, 16, 156 + listHeight, buttonWidth, 30, TRUE);
+        MoveWindow(ctx->saveGroup, 24 + buttonWidth, 156 + listHeight, buttonWidth, 30, TRUE);
+        MoveWindow(ctx->deleteGroup, 32 + buttonWidth * 2, 156 + listHeight, buttonWidth, 30, TRUE);
+        MoveWindow(ctx->closeScopes, 16 + width - 140, 194 + listHeight, 140, 30, TRUE);
+        return 0;
+    }
+    case WM_GETMINMAXINFO: {
+        auto* limits = reinterpret_cast<MINMAXINFO*>(lParam);
+        limits->ptMinTrackSize = {600, 440}; return 0;
+    }
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDCANCEL) { CloseSearchScopes(window, *ctx); return 0; }
+        if (HIWORD(wParam) == BN_CLICKED) HandleSearchScopeCommand(window, *ctx, LOWORD(wParam));
+        return 0;
+    case WM_DRAWITEM:
+        if (DrawSearchToggleButton(reinterpret_cast<DRAWITEMSTRUCT*>(lParam)) ||
+            DrawThemeButton(reinterpret_cast<DRAWITEMSTRUCT*>(lParam))) return TRUE;
+        break;
+    case WM_CTLCOLORSTATIC: case WM_CTLCOLOREDIT: case WM_CTLCOLORLISTBOX: case WM_CTLCOLORBTN:
+        return ThemeCtlColorPanel(reinterpret_cast<HWND>(lParam), reinterpret_cast<HDC>(wParam));
+    case WM_ERASEBKGND: {
+        RECT bounds{}; GetClientRect(window, &bounds);
+        FillRect(reinterpret_cast<HDC>(wParam), &bounds, g_hThemeWindowBrush ? g_hThemeWindowBrush : reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1));
+        return 1;
+    }
+    case WM_CLOSE:
+        CloseSearchScopes(window, *ctx); return 0;
+    case WM_DESTROY:
+        CaptureSearchFolders(*ctx);
+        if (ctx->scopeOwnerDisabled) {
+            ctx->scopeOwnerDisabled = false;
+            RestoreModalOwnerBeforeClose(GetWindow(window, GW_OWNER));
+        }
+        ctx->scopeWindow = nullptr;
+        ctx->folderList = ctx->folderLabel = ctx->addFolder = ctx->removeFolder = nullptr;
+        ctx->groupList = ctx->loadGroup = ctx->saveGroup = ctx->deleteGroup = nullptr;
+        ctx->closeScopes = nullptr;
+        return 0;
+    }
+    return DefWindowProcW(window, message, wParam, lParam);
+    } catch (...) {
+        if (message == WM_CREATE) return -1;
+        ShowSoftNotice(window, localization::Text(L"search.ui.group_store_failed"), SoftNoticeKind::Error);
+        return 0;
+    }
+}
+static void ShowSearchScopes(HWND owner, SearchCtx& ctx) {
+    if (ctx.scopeWindow) { ShowWindow(ctx.scopeWindow, SW_SHOWNORMAL); SetForegroundWindow(ctx.scopeWindow); return; }
+    WNDCLASSW type{}; type.lpfnWndProc = SearchScopeProc; type.hInstance = g_hInst;
+    type.lpszClassName = L"PdfNoteSearchScopes"; type.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    static bool registered = false;
+    if (!registered) registered = RegisterClassW(&type) != 0;
+    if (!registered) return;
+    HWND window = CreateWindowExW(WS_EX_TOOLWINDOW, type.lpszClassName,
+        localization::Text(L"search.ui.groups").c_str(),
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_SIZEBOX,
+        CW_USEDEFAULT, CW_USEDEFAULT, 720, 500, owner, nullptr, g_hInst, &ctx);
+    if (window) {
+        ctx.scopeOwnerDisabled = IsWindowEnabled(owner) != FALSE;
+        if (ctx.scopeOwnerDisabled) EnableWindow(owner, FALSE);
+        PlaceOwnedPopupAtAppTopLeft(window, owner); ShowWindow(window, SW_SHOWNORMAL);
     }
 }
 
@@ -2686,15 +3217,16 @@ static void LayoutSearchWindow(HWND hWnd, SearchCtx* ctx) {
     int h = rc.bottom - rc.top;
     if (w <= 0 || h <= 0) return;
 
-    const int pad = 16;
+    const bool compactLayout = h < 720;
+    const int pad = compactLayout ? 12 : 16;
     const int labelH = 18;
-    const int rowH = 30;
+    const int rowH = compactLayout ? 26 : 30;
     const int hintH = 18;
     const int statusH = 18;
-    const int gap = 8;
+    const int gap = compactLayout ? 4 : 8;
     const int btnW = 140; // Also fits the running label's Ctrl+C hint.
-    const int radioH = 32;
-    const int radioGapY = 6;
+    const int radioH = compactLayout ? 26 : 32;
+    const int radioGapY = compactLayout ? 2 : 6;
 
     int x = pad;
     int y = pad;
@@ -2707,6 +3239,7 @@ static void LayoutSearchWindow(HWND hWnd, SearchCtx* ctx) {
         int cols = 1;
         if (contentW >= 540) cols = 3;
         else if (contentW >= 420) cols = 2;
+        if (radios.size() == 4) cols = contentW >= 680 ? 4 : 2;
         int groupW = std::max(0, (contentW - gap * (cols - 1)) / cols);
         for (size_t i = 0; i < radios.size(); ++i) {
             int col = static_cast<int>(i % static_cast<size_t>(cols));
@@ -2740,6 +3273,10 @@ static void LayoutSearchWindow(HWND hWnd, SearchCtx* ctx) {
     MoveWindow(ctx->aboveMain, x + detailsW + gap, y,
                std::max(0, contentW - detailsW - gap), rowH, TRUE);
     y += rowH + gap;
+    const int continueWidth = 150;
+    MoveWindow(ctx->labelStatus, x, y, std::max(0, contentW - continueWidth - gap), 56, TRUE);
+    MoveWindow(ctx->continueSearch, x + contentW - continueWidth, y, continueWidth, rowH, TRUE);
+    y += 56 + gap;
     if (!ctx->detailsVisible) {
         MoveWindow(ctx->results, x, y, contentW, std::max(0, h - y - pad), TRUE);
         return;
@@ -2748,10 +3285,6 @@ static void LayoutSearchWindow(HWND hWnd, SearchCtx* ctx) {
         MoveWindow(ctx->labelHint, x, y, contentW, hintH, TRUE);
     }
     y += hintH + gap;
-    if (ctx->labelStatus) {
-        MoveWindow(ctx->labelStatus, x, y, contentW, statusH, TRUE);
-    }
-    y += statusH + gap;
     if (ctx->labelSummary) {
         MoveWindow(ctx->labelSummary, x, y, contentW, statusH, TRUE);
     }
@@ -2761,12 +3294,14 @@ static void LayoutSearchWindow(HWND hWnd, SearchCtx* ctx) {
         MoveWindow(ctx->includeTempExternal, x, y, contentW, radioH, TRUE);
     }
     y += radioH + gap;
+    MoveWindow(ctx->manageScopes, x, y, contentW, rowH, TRUE);
+    y += rowH + gap;
     layoutRadioGroup(ctx->labelTarget, ctx->targetChecks);
     if (ctx->labelOptions) {
         MoveWindow(ctx->labelOptions, x, y, contentW, labelH, TRUE);
     }
     y += labelH + gap;
-    const int optCols = contentW >= 540 ? 3 : 1;
+    const int optCols = contentW >= 680 ? 3 : (contentW >= 420 ? 2 : 1);
     const int optW = std::max(0, (contentW - gap * (optCols - 1)) / optCols);
     const HWND optionButtons[] = {ctx->optNormalizeWidthKana, ctx->optIgnoreCase, ctx->optTranslucent};
     for (int i = 0; i < 3; ++i) {
@@ -2794,7 +3329,7 @@ static void LayoutSearchWindow(HWND hWnd, SearchCtx* ctx) {
 static void ToggleSearchDetails(HWND window, SearchCtx* ctx) {
     if (!ctx) return;
     ctx->detailsVisible = !ctx->detailsVisible;
-    const HWND controls[] = {ctx->labelQuery, ctx->labelHint, ctx->labelStatus,
+    const HWND controls[] = {ctx->labelQuery, ctx->labelHint, ctx->manageScopes,
         ctx->labelSummary, ctx->labelRange, ctx->includeTempExternal,
         ctx->labelTarget, ctx->labelOptions, ctx->optNormalizeWidthKana,
         ctx->optIgnoreCase, ctx->optTranslucent, ctx->btnWorkspaceMemo, ctx->labelResults};
@@ -2825,6 +3360,8 @@ static LRESULT CALLBACK SearchWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
     case WM_CREATE: {
         auto ui = GetSearchUiStrings();
         ctx = new SearchCtx();
+        ctx->pinnedWorkspace = g_workspaceRoot;
+        const bool groupsLoaded = ctx->groups.Load(ctx->pinnedWorkspace);
         auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
         if (cs) ctx->owner = reinterpret_cast<HWND>(cs->lpCreateParams);
         ctx->idleStatusText = ui.statusReady;
@@ -2854,7 +3391,15 @@ static LRESULT CALLBACK SearchWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
         ctx->aboveMain = CreateWindowExW(0, L"BUTTON", localization::Text(L"search.ui.above_main").c_str(),
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 0, 0,
             hWnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SEARCH_ABOVE_MAIN)), g_hInst, nullptr);
-        if (!ctx->btnDetails || !ctx->aboveMain) return -1;
+        ctx->manageScopes = CreateWindowExW(0, L"BUTTON", localization::Text(L"search.ui.manage_scopes").c_str(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 0, 0,
+            hWnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SEARCH_MANAGE_SCOPES)), g_hInst, nullptr);
+        ctx->continueSearch = CreateWindowExW(0, L"BUTTON", localization::Text(L"search.ui.continue").c_str(),
+            WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 0, 0,
+            hWnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SEARCH_CONTINUE)), g_hInst, nullptr);
+        EnableSearchOwnerDrawButton(ctx->manageScopes);
+        EnableSearchOwnerDrawButton(ctx->continueSearch);
+        if (!ctx->btnDetails || !ctx->aboveMain || !ctx->manageScopes || !ctx->continueSearch) return -1;
         std::wstring statusText = ui.statusLabel + L": " + ui.statusReady;
         ctx->labelStatus = CreateWindowExW(0, L"STATIC", statusText.c_str(),
                                            WS_CHILD | WS_VISIBLE,
@@ -2956,6 +3501,8 @@ static LRESULT CALLBACK SearchWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
         SetUIFont(ctx->btnRun);
         SetUIFont(ctx->btnDetails);
         SetUIFont(ctx->aboveMain);
+        SetUIFont(ctx->manageScopes);
+        SetUIFont(ctx->continueSearch);
         SetUIFont(ctx->labelStatus);
         SetUIFont(ctx->labelSummary);
         SetUIFont(ctx->labelRange);
@@ -2989,13 +3536,14 @@ static LRESULT CALLBACK SearchWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
         UpdateStatusLabel(ctx, ui);
         LayoutSearchWindow(hWnd, ctx);
         ApplyThemeToDialog(hWnd);
+        if (!groupsLoaded) ShowSoftNotice(hWnd, localization::Text(L"search.ui.group_store_failed"), SoftNoticeKind::Warning);
         return 0;
     }
     case WM_GETMINMAXINFO: {
         auto* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
         if (mmi) {
             mmi->ptMinTrackSize.x = 620;
-            mmi->ptMinTrackSize.y = ctx && !ctx->detailsVisible ? 220 : 640;
+            mmi->ptMinTrackSize.y = ctx && !ctx->detailsVisible ? 300 : 640;
             return 0;
         }
         break;
@@ -3054,7 +3602,7 @@ static LRESULT CALLBACK SearchWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
             int sel = static_cast<int>(wParam);
             size_t idx = static_cast<size_t>(sel);
             if (sel >= 0 && idx < ctx->job.results.size() &&
-                ctx->job.results[idx].kind != SearchResultKind::Info) {
+                (ctx->job.results[idx].kind != SearchResultKind::Info || !ctx->job.results[idx].path.empty())) {
                 OpenSearchResult(hWnd, ctx, sel, lParam != 0);
             }
         }
@@ -3062,6 +3610,16 @@ static LRESULT CALLBACK SearchWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
     case WM_COMMAND: {
         int id = LOWORD(wParam);
         int code = HIWORD(wParam);
+        if (id == IDC_SEARCH_MANAGE_SCOPES && code == BN_CLICKED && ctx && !ctx->job.active) {
+            ShowSearchScopes(hWnd, *ctx); return 0;
+        }
+        if (id == IDC_SEARCH_CONTINUE && code == BN_CLICKED && ctx && ctx->process && ctx->paused) {
+            if (ctx->process->Continue()) {
+                ctx->paused = false; ShowWindow(ctx->continueSearch, SW_HIDE);
+                UpdateStatusLabel(ctx, GetSearchUiStrings());
+            } else CancelSearchJob(hWnd, ctx, false);
+            return 0;
+        }
         if (id == IDC_SEARCH_DETAILS && code == BN_CLICKED) {
             ToggleSearchDetails(hWnd, ctx);
             return 0;
@@ -3107,9 +3665,11 @@ static LRESULT CALLBACK SearchWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
         break;
     }
     case WM_CLOSE:
+        if (ctx && ctx->scopeBusy) { ctx->closeAfterScope = true; return 0; }
         DestroyWindow(hWnd);
         return 0;
     case WM_DESTROY:
+        if (ctx && ctx->scopeWindow) DestroyWindow(ctx->scopeWindow);
         if (ctx && ctx->messageHook) UnhookWindowsHookEx(ctx->messageHook);
         CancelSearchJob(hWnd, ctx, true);
         ClearOpenedSearchResultMarkers();
@@ -3146,6 +3706,13 @@ static LRESULT CALLBACK SearchMessageHook(int code, WPARAM action, LPARAM data) 
     if (code >= 0 && action == PM_REMOVE && data) {
         auto& message = *reinterpret_cast<MSG*>(data);
         try {
+            auto* ctx = g_hSearchWnd ? reinterpret_cast<SearchCtx*>(GetWindowLongPtrW(g_hSearchWnd, GWLP_USERDATA)) : nullptr;
+            if (ctx && ctx->scopeWindow && message.message >= WM_KEYFIRST && message.message <= WM_KEYLAST &&
+                (message.hwnd == ctx->scopeWindow || IsChild(ctx->scopeWindow, message.hwnd))) {
+                if (message.message == WM_KEYDOWN && message.wParam == VK_ESCAPE) {
+                    PostMessageW(ctx->scopeWindow, WM_CLOSE, 0, 0); message.message = WM_NULL;
+                } else if (IsDialogMessageW(ctx->scopeWindow, &message)) message.message = WM_NULL;
+            }
             if (HandleSearchMessage(message)) message.message = WM_NULL;
         } catch (...) {
             // Never unwind across a Win32 hook. Keep query/results and consume
@@ -3157,6 +3724,149 @@ static LRESULT CALLBACK SearchMessageHook(int code, WPARAM action, LPARAM data) 
 }
 
 } // namespace
+
+bool search::RunWorker(std::string_view request, search::Channel& channel) {
+    try {
+        search::Reader reader(request);
+        if (reader.Get<uint32_t>() != 1) return false;
+        g_workspaceRoot = reader.Text(); g_config.classesDir = reader.Text(); g_config.cacheDir = reader.Text();
+        if (!write_checks::IsSafeLocalPath(g_workspaceRoot)) return false;
+        const auto range = static_cast<SearchRange>(reader.Get<int32_t>());
+        const std::filesystem::path selectedRoot(reader.Text());
+        const bool includeExternal = reader.Get<uint8_t>() != 0;
+        const auto rootCount = reader.Get<uint32_t>();
+        if (rootCount > 65536) return false;
+        std::vector<std::filesystem::path> writableRoots{g_workspaceRoot};
+        for (uint32_t i = 0; i < rootCount; ++i) {
+            auto path = reader.Text();
+            if (write_checks::IsSafeLocalPath(path)) { g_lectures.push_back(path); writableRoots.emplace_back(path); }
+        }
+        const auto folderCount = reader.Get<uint32_t>();
+        if (folderCount > 256) return false;
+        std::vector<std::filesystem::path> folders;
+        for (uint32_t i = 0; i < folderCount; ++i) {
+            const auto path = reader.Text();
+            if (reader.Get<uint8_t>()) folders.emplace_back(path);
+        }
+        SearchCtx ctx;
+        auto& job = ctx.job;
+        std::deque<SearchResultItem> diagnostics;
+        workerDiagnostics = &diagnostics;
+        workerSkipped = &job.skipped;
+        job.targetMask = reader.Get<uint32_t>();
+        if (!job.targetMask || job.targetMask > 7 || static_cast<int>(range) < 0 || static_cast<int>(range) > 3) return false;
+        job.includeNotes = TargetMaskIncludesNotes(job.targetMask);
+        job.includePdfs = TargetMaskIncludesPdfs(job.targetMask);
+        job.includeAnnots = TargetMaskIncludesAnnotations(job.targetMask);
+        job.query = reader.Text();
+        job.options.normalizeWidthKana = reader.Get<uint8_t>() != 0;
+        job.options.ignoreCase = reader.Get<uint8_t>() != 0;
+        job.options.ignoreSeparators = job.options.normalizeWidthKana;
+        g_config.clroAsciiOnly = reader.Get<uint8_t>() != 0;
+        g_config.noteQuoteLazyContinuation = reader.Get<uint8_t>() != 0;
+        const auto extensions = reader.Get<uint32_t>();
+        if (extensions > 256) return false;
+        for (uint32_t i = 0; i < extensions; ++i) g_config.additionalNoteExtensions.push_back(reader.Text(128));
+        note_snapshot::CurrentEditTextSnapshot current;
+        current.targetPath = reader.Text(); current.bytes = WideToUTF8(reader.Text(32 * 1024 * 1024));
+        current.available = !current.targetPath.empty();
+        if (current.available) {
+            const auto identity = note::ResolveRuntimeNoteIdentityPath(current.targetPath);
+            current.identity = note::BuildSnapshotIdentity(identity.note_id, 0, 0, current.bytes);
+        }
+        workerCurrentEdit = std::move(current);
+        reader.End();
+        job.queryTermsLower = ParseSearchTermsLower(job.query, job.options);
+        if (job.queryTermsLower.empty()) return false;
+        const auto ui = GetSearchUiStrings();
+        if (range == SearchRange::WholeWorkspace) {
+            if (!write_checks::IsSafeLocalPath(WorkspaceClassesPath(g_workspaceRoot, g_config)))
+                RecordSearchSkipped(WorkspaceClassesPath(g_workspaceRoot, g_config), &job.skipped);
+            else if (!PrepareSearchRoots(range, includeExternal, job.roots, ui, &ctx)) job.roots.clear();
+        } else if (range != SearchRange::Folders) {
+            if (write_checks::IsSafeLocalPath(selectedRoot)) job.roots = CollectLectureSearchRoots(selectedRoot);
+            else RecordSearchSkipped(selectedRoot, &job.skipped);
+        }
+        AppendUniqueRoots(job.roots, folders);
+        for (auto it = job.roots.begin(); it != job.roots.end();) {
+            if (!write_checks::IsSafeLocalPath(*it) || !DirectoryExistsWin32(*it)) {
+                RecordSearchSkipped(*it, &job.skipped); it = job.roots.erase(it);
+            }
+            else ++it;
+        }
+        AddScopedStagedDiffsToSearchJob(job);
+        job.enumerationDone = false;
+        FPDF_InitLibrary();
+        FPDF_SetSandBoxPolicy(FPDF_POLICY_MACHINETIME_ACCESS, false);
+        struct PdfShutdown {
+            SearchJob& job;
+            ~PdfShutdown() {
+                if (job.pdf && job.pdf->ownsDoc && job.pdf->doc) FPDF_CloseDocument(job.pdf->doc);
+                FPDF_DestroyLibrary();
+            }
+        } shutdown{job};
+        size_t nextEntries = 5000, nextResults = 10000, nextDepth = 16;
+        uint64_t nextBytes = 512ull * 1024 * 1024;
+        auto nextTime = SearchClock::now() + std::chrono::seconds(3);
+        auto nextProgress = SearchClock::now();
+        size_t resultCount = 0;
+        auto progress = [&](uint8_t type) {
+            search::Writer output; output.Put<uint8_t>(type); WriteSearchProgress(output, job);
+            return channel.Send(output.bytes);
+        };
+        if (!progress('P')) return false;
+        while (!channel.Canceled()) {
+            std::vector<SearchResultItem> found;
+            const auto deadline = SearchClock::now() + kSearchWorkBudget;
+            if (!CollectNoteSearchResults(job, ui, deadline, found)) return false;
+            if (!job.enumerationDone) {
+                ProcessEnumeration(&ctx, ui, found, kSearchEnumStepsPerTick, deadline);
+                if (job.enumerationDone) nextTime = SearchClock::now() + std::chrono::seconds(15);
+            }
+            else {
+                for (unsigned attempt = 0; attempt < 4; ++attempt) {
+                    const auto target = job.nextTarget; job.nextTarget = (target + 1) % 4;
+                    if (target == 0 && !job.noteScan && job.noteIndex < job.noteFiles.size())
+                        ProcessNoteFiles(&ctx, ui, 1);
+                    else if (target == 1 && !job.noteScan && job.stagedNoteIndex < job.stagedNoteFiles.size())
+                        ProcessStagedNoteFiles(&ctx, ui, 1);
+                    else if (target == 2 && (job.pdf || job.pdfIndex < job.pdfFiles.size()))
+                        ProcessPdfPages(&ctx, ui, found, 1, deadline);
+                    else if (target == 3 && job.stagedAnnotIndex < job.stagedAnnotFiles.size())
+                        ProcessStagedAnnotationFiles(&ctx, ui, found, 1);
+                    else continue;
+                    break;
+                }
+            }
+            while (!diagnostics.empty() && found.size() < kSearchResultsPerTick) {
+                found.push_back(std::move(diagnostics.front())); diagnostics.pop_front();
+            }
+            for (auto& item : found) {
+                if (item.kind != SearchResultKind::Info)
+                    item.externalReadOnly = !IsSearchPathUnderAnyRoot(item.path, writableRoots);
+                search::Writer output; output.Put<uint8_t>('R'); WriteSearchItem(output, item);
+                if (!channel.Send(output.bytes)) return false;
+                ++resultCount;
+            }
+            const auto now = SearchClock::now();
+            if (diagnostics.empty() && IsSearchJobComplete(job)) return progress('D');
+            if (job.enumerated >= nextEntries || job.maxDepth >= nextDepth ||
+                job.candidateBytes >= nextBytes || resultCount >= nextResults || now >= nextTime) {
+                if (!progress('W') || !channel.WaitForContinue()) return false;
+                nextEntries = std::max(nextEntries * 4, job.enumerated * 4);
+                nextResults = std::max(nextResults * 4, resultCount * 4);
+                nextDepth = std::max(nextDepth * 2, job.maxDepth * 2);
+                nextBytes = std::max(nextBytes * 4, job.candidateBytes * 4);
+                nextTime = SearchClock::now() + std::chrono::seconds(30);
+            } else if (now >= nextProgress) {
+                if (!progress('P')) return false;
+                nextProgress = now + std::chrono::milliseconds(200);
+            }
+            if (!channel.Rest(8)) return false;
+        }
+    } catch (...) { return false; }
+    return false;
+}
 
 void ShowSearchWindow(HWND parent) {
     try {
@@ -3183,7 +3893,7 @@ void ShowSearchWindow(HWND parent) {
     const auto ui = GetSearchUiStrings();
     g_hSearchWnd = CreateWindowExW(WS_EX_APPWINDOW | WS_EX_LAYERED, kSearchWndClass, ui.title.c_str(),
                                    WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_SIZEBOX,
-                                   CW_USEDEFAULT, CW_USEDEFAULT, 760, 660,
+                                   CW_USEDEFAULT, CW_USEDEFAULT, 760, 720,
                                    nullptr, nullptr, g_hInst, parent);
     if (g_hSearchWnd) {
         PlaceOwnedPopupAtAppTopLeft(g_hSearchWnd, parent);
@@ -3220,7 +3930,7 @@ void ShowSearchWindowWithPreset(HWND parent, int rangeIndex, unsigned targetMask
     try {
     fault_injection::MaybeThrow(L"ShowSearchWindowWithPreset:start");
     // Keep this function independent from internal SearchCtx types by using control IDs.
-    constexpr int kSearchRangeCountPublic = 3;
+    constexpr int kSearchRangeCountPublic = 4;
     constexpr int kSearchTargetCountPublic = 3;
     constexpr int IDC_SEARCH_QUERY_PUBLIC = 4101;
     constexpr int IDC_SEARCH_RANGE_BASE_PUBLIC = 4110;

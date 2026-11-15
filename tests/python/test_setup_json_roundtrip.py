@@ -26,7 +26,7 @@ def production_sections(source: str) -> str:
         ("static std::optional<int> ParseJsonIntField(", "static std::optional<int> ParseJsonColor("),
         ("[[nodiscard]] static std::filesystem::path QuarantineCorruptSetupJson(", "static std::wstring WorkspaceConfigRootKeyForCompare("),
         ("static setup_json_policy::AutoUpdateDecision ResolveSetupJsonAutoUpdateDecision(", "static bool ReadExistingSetupJsonForAutoUpdate("),
-        ("// Locate only a top-level value,", "static const char* ToolModeKey("),
+        ("// Locate only a top-level value,", "static bool ParseShortcutKeyToken("),
         ("static std::filesystem::path ResolveSetupJsonPath(", "static bool WriteSetupJsonFile("),
         ("std::vector<std::wstring> LoadSetupTempExternalLectureDirs() {", "bool PersistSetupTempExternalLectureDirs("),
         ("static bool ReplaceOrInsertJsonArrayField(std::string& json,", "static bool RemoveJsonScalarOrArrayField("),

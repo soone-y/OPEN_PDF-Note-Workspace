@@ -475,7 +475,7 @@ if($LASTEXITCODE -ne 0){throw 'fixture packaging failed'}
         (site / "validate_public_site.py").write_text("raise SystemExit(0)\n", encoding="utf-8")
         policy = repository / "docs/internal"
         policy.mkdir()
-        (policy / "public_repo_release_allowlist_2026-08-24.txt").write_text("README.md\nREPO_VERSION.txt\nSTATISTICS.md\n.gitignore\ndocs/statistics/\ndocs/ja/\nsrc/\nlocales/\ntools/\nscripts/\nsite/\nthird_party/\nbuild.ps1\nrelease.ps1\n", encoding="utf-8")
+        (policy / "public_repo_release_allowlist_2026-11-13.txt").write_text("README.md\nREPO_VERSION.txt\nSTATISTICS.md\n.gitignore\ndocs/statistics/\ndocs/ja/\nsrc/\nlocales/\ntools/\nscripts/\nsite/\nthird_party/\nbuild.ps1\nrelease.ps1\n", encoding="utf-8")
         (repository / "third_party").mkdir()
         (repository / "third_party/vendor.bin").write_bytes(b"reviewed fixture artifact")
         (repository / ".gitignore").write_text("third_party/vendor.bin\n__pycache__/\n", encoding="utf-8")
