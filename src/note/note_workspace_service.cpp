@@ -46,10 +46,11 @@ NoteWorkspaceService::ResolveIndex(
     if (!snapshotIdentity.valid()) return nullptr;
     const bool asciiOnly = metadata.clro_ascii_only;
     const bool quoteLazyContinuation = metadata.quote_lazy_continuation;
+    const bool listImplicitContinuation = metadata.clro_list_implicit_continuation;
     {
         std::lock_guard<std::mutex> lock(index_mutex_);
         if (auto cached = FindCachedIndexLocked(
-                snapshotIdentity, targetPath, contentKind, asciiOnly, quoteLazyContinuation)) {
+                snapshotIdentity, targetPath, contentKind, asciiOnly, quoteLazyContinuation, listImplicitContinuation)) {
             return cached;
         }
     }
@@ -62,7 +63,7 @@ NoteWorkspaceService::ResolveIndex(
 
     std::lock_guard<std::mutex> lock(index_mutex_);
     if (auto cached = FindCachedIndexLocked(
-            snapshotIdentity, targetPath, contentKind, asciiOnly, quoteLazyContinuation)) {
+            snapshotIdentity, targetPath, contentKind, asciiOnly, quoteLazyContinuation, listImplicitContinuation)) {
         return cached;
     }
     InsertCachedIndexLocked(snapshotIdentity, std::move(targetPath),
@@ -85,7 +86,7 @@ NoteWorkspaceService::ResolveIndexFromKernel(
         std::lock_guard<std::mutex> lock(index_mutex_);
         if (auto cached = FindCachedIndexLocked(
                 snapshotIdentity, targetPath, contentKind, kernel.text_core().clro_ascii_only(),
-                kernel.text_core().quote_lazy_continuation())) {
+                kernel.text_core().quote_lazy_continuation(), kernel.text_core().clro_list_implicit_continuation())) {
             return cached;
         }
     }
@@ -98,7 +99,7 @@ NoteWorkspaceService::ResolveIndexFromKernel(
     std::lock_guard<std::mutex> lock(index_mutex_);
     if (auto cached = FindCachedIndexLocked(
             snapshotIdentity, targetPath, contentKind, kernel.text_core().clro_ascii_only(),
-            kernel.text_core().quote_lazy_continuation())) {
+            kernel.text_core().quote_lazy_continuation(), kernel.text_core().clro_list_implicit_continuation())) {
         return cached;
     }
     InsertCachedIndexLocked(snapshotIdentity, std::move(targetPath),
@@ -126,12 +127,13 @@ std::shared_ptr<const WorkspaceNoteIndexSnapshot>
 NoteWorkspaceService::FindCachedIndexLocked(
     const SnapshotIdentity& identity,
     const std::wstring& targetPath,
-    NoteContentKind contentKind, bool clroAsciiOnly, bool quoteLazyContinuation) {
+    NoteContentKind contentKind, bool clroAsciiOnly, bool quoteLazyContinuation, bool listImplicitContinuation) {
     for (CachedIndex& entry : index_cache_) {
         if (entry.target_path != targetPath ||
             entry.content_kind != contentKind ||
             entry.snapshot->text_model.meta.clro_ascii_only != clroAsciiOnly ||
             entry.snapshot->text_model.meta.quote_lazy_continuation != quoteLazyContinuation ||
+            entry.snapshot->text_model.meta.clro_list_implicit_continuation != listImplicitContinuation ||
             !SameSnapshotIdentity(entry.identity, identity)) {
             continue;
         }

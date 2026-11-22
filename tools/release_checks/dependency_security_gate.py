@@ -32,6 +32,9 @@ LOCAL_PATCHES = (
     ("third_party/md4c", "patches/0001-japanese-whitespace-and-punctuation.patch"),
     ("third_party/md4c", "patches/0002-explicit-quote-continuation.patch"),
     ("third_party/md4c", "patches/0003-double-underscore-underline.patch"),
+    ("third_party/md4c", "patches/0004-explicit-table-continuation.patch"),
+    ("third_party/md4c", "patches/0005-clro-line-boundaries.patch"),
+    ("third_party/md4c", "patches/0006-code-fence-source-extents.patch"),
     ("third_party/pdfium", "patches/0001-fix-ijg-notice-link.patch"),
 )
 

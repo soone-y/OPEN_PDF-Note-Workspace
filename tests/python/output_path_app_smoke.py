@@ -10,6 +10,7 @@ from ctypes import wintypes as w
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import time
@@ -87,6 +88,12 @@ def main():
     pdf = session / "sample.pdf"
     if args.file_operations or args.export_workflow:
         shutil.copy2(repo / "tests/fixtures/ui_automation_session/sample.pdf", pdf)
+    if args.export_workflow:
+        import fitz
+        second_pdf = session / "z-second.pdf"
+        with fitz.open() as second:
+            second.new_page().insert_text((72, 72), "Page from a different original PDF")
+            second.save(second_pdf)
     (workspace / "workspace.json").write_text(json.dumps({
         "classesDir": ".", "startupSelectFirstSession": True,
         "sessionFileLayout": "session_root", "sessionAutoOpenMode": "edit",
@@ -286,7 +293,7 @@ def main():
                 send(export, 0x111, 4210 | (1 << 16), reservations)
                 if send(normalize, 0xF0) != expected_check:
                     raise RuntimeError("Selecting a reservation did not display its normalization choice")
-            post(export, 0x111, 1)
+            post(export, 0x111, 4213)
             results = wait(lambda: find("ExportResultsDialog"))
             wait(lambda: u.IsWindowVisible(results) and u.GetDlgItem(results, 4901))
             if send(u.GetDlgItem(results, 4901), 0x18B) != 2:
@@ -298,6 +305,8 @@ def main():
                 raise RuntimeError("Queued OFF option did not preserve the CLRO source spelling")
             post(results, 0x10)
             wait(lambda: not find("ExportResultsDialog"))
+            post(export, 0x10)
+            wait(lambda: not find("UnifiedExportDialog"))
             export = open_markup()
             if send(u.GetDlgItem(export, 4060), 0xF0) != 0:
                 raise RuntimeError("Reopening export lost the user's last normalization choice")
@@ -352,6 +361,7 @@ def main():
             from pypdf import PdfReader
 
             source_pdf_bytes = pdf.read_bytes()
+            second_pdf_bytes = second_pdf.read_bytes()
             wait(lambda: send(lists[2], 0x18B) > 0)
             send(lists[2], 0x186, 0)
             send(main_window, 0x111, 1 << 16, lists[2])
@@ -385,6 +395,99 @@ def main():
 
             def click(control_id):
                 send(u.GetDlgItem(export, control_id), 0xF5)  # BM_CLICK
+
+            def assert_action_layout(window, rows):
+                u.GetWindowRect.argtypes = [w.HWND, ctypes.POINTER(w.RECT)]
+                u.GetClientRect.argtypes = [w.HWND, ctypes.POINTER(w.RECT)]
+                u.ClientToScreen.argtypes = [w.HWND, ctypes.POINTER(w.POINT)]
+                u.GetDC.argtypes = [w.HWND]
+                u.GetDC.restype = w.HDC
+                u.ReleaseDC.argtypes = [w.HWND, w.HDC]
+                gdi = ctypes.WinDLL("gdi32")
+                gdi.SelectObject.argtypes = [w.HDC, w.HGDIOBJ]
+                gdi.SelectObject.restype = w.HGDIOBJ
+                gdi.GetTextExtentPoint32W.argtypes = [w.HDC, w.LPCWSTR, ctypes.c_int, ctypes.POINTER(w.SIZE)]
+                gdi.GetDeviceCaps.argtypes = [w.HDC, ctypes.c_int]
+                gdi.DeleteObject.argtypes = [w.HGDIOBJ]
+
+                # The app's HFONT is private to its process. Build the same UI
+                # font locally using the installed faces in its preference list.
+                class LogFont(ctypes.Structure):
+                    _fields_ = [(name, w.LONG) for name in ("height", "width", "escapement", "orientation", "weight")] + [
+                        (name, w.BYTE) for name in ("italic", "underline", "strikeout", "charset", "output_precision",
+                                                    "clip_precision", "quality", "pitch_and_family")
+                    ] + [("face", w.WCHAR * 32)]
+
+                enum_fonts = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, w.DWORD, w.LPARAM)
+                gdi.EnumFontFamiliesExW.argtypes = [w.HDC, ctypes.POINTER(LogFont), enum_fonts, w.LPARAM, w.DWORD]
+                gdi.CreateFontIndirectW.argtypes = [ctypes.POINTER(LogFont)]
+                gdi.CreateFontIndirectW.restype = w.HGDIOBJ
+                found = False
+
+                @enum_fonts
+                def found_font(*_):
+                    nonlocal found
+                    found = True
+                    return 0
+
+                pref_list = (repo / "src/core/font_list.h").read_text(encoding="utf-8").split("kDefaultFontList[] = {", 1)[1].split("};", 1)[0]
+                screen = u.GetDC(None)
+                try:
+                    spec = LogFont()
+                    spec.charset = 1  # DEFAULT_CHARSET for enumeration.
+                    for face in re.findall(r'\{\s*L"[^"]+",\s*L"([^"]+)",\s*FontStyle::', pref_list):
+                        spec.face = face
+                        gdi.EnumFontFamiliesExW(screen, ctypes.byref(spec), found_font, 0, 0)
+                        if found:
+                            break
+                    spec.face = spec.face if found else "Segoe UI"
+                    spec.height = -((10 * gdi.GetDeviceCaps(screen, 90) + 36) // 72)  # LOGPIXELSY, 10 pt.
+                    spec.weight = 400
+                    spec.charset = 0  # Match CreateUIFont's zero-initialized LOGFONTW.
+                    ui_font = gdi.CreateFontIndirectW(ctypes.byref(spec))
+                finally:
+                    u.ReleaseDC(None, screen)
+                if not ui_font:
+                    raise RuntimeError("Could not recreate the app UI font")
+                body = w.RECT()
+                origin = w.POINT()
+                u.GetClientRect(window, ctypes.byref(body))
+                u.ClientToScreen(window, ctypes.byref(origin))
+                try:
+                    for row in rows:
+                        prior = None
+                        for control_id in row:
+                            control = u.GetDlgItem(window, control_id)
+                            bounds = w.RECT()
+                            if not control or not u.GetWindowRect(control, ctypes.byref(bounds)):
+                                raise RuntimeError(f"Missing output action {control_id}")
+                            dc = u.GetDC(control)
+                            font = gdi.SelectObject(dc, ui_font)
+                            caption = text(control)
+                            size = w.SIZE()
+                            try:
+                                if not font or not gdi.GetTextExtentPoint32W(dc, caption, len(caption), ctypes.byref(size)):
+                                    raise RuntimeError("Could not measure export button caption")
+                            finally:
+                                if font:
+                                    gdi.SelectObject(dc, font)
+                                u.ReleaseDC(control, dc)
+                            if (bounds.right - bounds.left < size.cx + 8 or
+                                    bounds.bottom - bounds.top < size.cy + 4 or
+                                    bounds.right > origin.x + body.right or bounds.bottom > origin.y + body.bottom or
+                                    (prior and (bounds.top != prior.top or bounds.left <= prior.right))):
+                                raise RuntimeError(
+                                    f"Clipped or misplaced output action {control_id}: {ascii(caption)}; "
+                                    f"bounds={bounds.left, bounds.top, bounds.right, bounds.bottom}, "
+                                    f"client={origin.x, origin.y, body.right, body.bottom}, text={size.cx, size.cy}"
+                                )
+                            prior = bounds
+                finally:
+                    gdi.DeleteObject(ui_font)
+
+            assert_action_layout(export, ((1, 4201), (4202, 4203, 4211), (4205, 4206, 4208, 4207, 4204),
+                                          (4209, 4213, 4212, 2)))
+            current_caption = text(u.GetDlgItem(export, 1))
 
             def preserve_rotation(enabled):
                 check = u.GetDlgItem(export, 4099)
@@ -534,23 +637,27 @@ def main():
                     kernel.CloseHandle(process_handle)
                 raise ctypes.WinError(ctypes.get_last_error())
             try:
-                tool = ToolInfo()
-                tool.size = ToolInfo.reserved.offset
-                tool.flags = 1  # TTF_IDISHWND
-                tool.hwnd = export
-                tool.id = u.GetDlgItem(export, 4111)
-                tool.text = remote + 256
-                if not kernel.WriteProcessMemory(process_handle, remote, ctypes.byref(tool), ctypes.sizeof(tool), None):
-                    raise ctypes.WinError(ctypes.get_last_error())
                 tip = wait(lambda: find("tooltips_class32", export))
-                if send(tip, 0x40D) != 1:  # TTM_GETTOOLCOUNT
-                    raise RuntimeError("Folder tooltip was not registered")
-                send(tip, 0x438, 0, remote)  # TTM_GETTEXTW
-                registered = ctypes.create_unicode_buffer(32768)
-                if not kernel.ReadProcessMemory(process_handle, remote + 256, registered, ctypes.sizeof(registered), None):
-                    raise ctypes.WinError(ctypes.get_last_error())
-                if registered.value != str(long_destination):
-                    raise RuntimeError("Folder tooltip did not retain the complete path")
+                if send(tip, 0x40D) != 2:  # TTM_GETTOOLCOUNT
+                    raise RuntimeError("Both output path tooltips must be registered")
+                for folder, name in ((long_destination, "raw.txt"), (long_destination, "長い出力名_" * 20 + ".txt"),
+                                     (destination, "changed.txt"), (long_destination, "raw.txt")):
+                    target(folder, name)
+                    for control_id, expected in ((4111, str(folder)), (4113, str(folder / name))):
+                        tool = ToolInfo()
+                        tool.size = ToolInfo.reserved.offset
+                        tool.flags = 1  # TTF_IDISHWND
+                        tool.hwnd = export
+                        tool.id = u.GetDlgItem(export, control_id)
+                        tool.text = remote + 256
+                        if not kernel.WriteProcessMemory(process_handle, remote, ctypes.byref(tool), ctypes.sizeof(tool), None):
+                            raise ctypes.WinError(ctypes.get_last_error())
+                        send(tip, 0x438, 0, remote)  # TTM_GETTEXTW
+                        registered = ctypes.create_unicode_buffer(32768)
+                        if not kernel.ReadProcessMemory(process_handle, remote + 256, registered, ctypes.sizeof(registered), None):
+                            raise ctypes.WinError(ctypes.get_last_error())
+                        if registered.value != expected:
+                            raise RuntimeError(f"Output tooltip {control_id} did not retain its complete updated path")
             finally:
                 kernel.VirtualFreeEx(process_handle, remote, 0, 0x8000)
                 kernel.CloseHandle(process_handle)
@@ -574,12 +681,21 @@ def main():
             send(export, 0x111, 4210 | (1 << 16), reservations)
             target(long_destination, "updated-raw.txt")
             click(4208)
-            post(export, 0x111, 1)
+            if text(u.GetDlgItem(export, 1)) != current_caption:
+                raise RuntimeError("Adding reservations changed the current-output button")
+            post(export, 0x111, 4213)
             results = wait(lambda: find("ExportResultsDialog"))
             wait(lambda: u.IsWindowVisible(results) and u.GetDlgItem(results, 4901))
             result_list = u.GetDlgItem(results, 4901)
-            if send(result_list, 0x18B) != 3 or find("UnifiedExportDialog"):
+            if send(result_list, 0x18B) != 3 or not find("UnifiedExportDialog") or count():
                 raise RuntimeError("Batch output did not finish with one complete result list")
+            assert_action_layout(results, ((4902, 4903, 4904),))
+            pdf_open = text(u.GetDlgItem(results, 4902))
+            send(result_list, 0x186, 2)
+            send(results, 0x111, 4901 | (1 << 16), result_list)
+            if pdf_open == text(u.GetDlgItem(results, 4902)):
+                raise RuntimeError("Results did not offer the appropriate open action for TXT")
+            assert_action_layout(results, ((4902, 4903, 4904),))
             paths = []
             for i in range(3):
                 buffer = ctypes.create_unicode_buffer(send(result_list, 0x18A, i) + 1)
@@ -590,6 +706,8 @@ def main():
                 raise RuntimeError(f"Reservation order/update changed destination: {ascii(paths)} != {ascii(expected_paths)}")
             post(results, 0x10)
             wait(lambda: not find("ExportResultsDialog"))
+            post(export, 0x10)
+            wait(lambda: not find("UnifiedExportDialog"))
             with fitz.open(pdf) as source, fitz.open(paths[0]) as output:
                 if len(output) != 3 or [p.get_text() for p in output] != [source[i].get_text() for i in (2, 0, 2)]:
                     raise RuntimeError("Reordered/repeated PDF pages changed order or content")
@@ -866,7 +984,7 @@ def main():
                 raise RuntimeError("Retry failed or explicit markup removal was ignored")
             click(4002)
             click(4021)
-            target(destination, "discard-on-close.txt")
+            target(destination, "retained-on-close.txt")
             click(4201)
             post(export, 0x10)
             wait(lambda: not find("UnifiedExportDialog"))
@@ -874,15 +992,109 @@ def main():
             export = wait(lambda: find("UnifiedExportDialog"))
             wait(lambda: u.IsWindowVisible(export) and u.GetDlgItem(export, 4210))
             reservations = u.GetDlgItem(export, 4210)
-            if count() or (destination / "discard-on-close.txt").exists():
-                raise RuntimeError("Closing the dialog did not discard only unexecuted reservations")
+            if count() != 1 or (destination / "retained-on-close.txt").exists():
+                raise RuntimeError("Closing the dialog did not retain the unexecuted reservation")
+            click(4204)
+            click(4001)
+            click(4011)
+            click(4082)
+            preserve_rotation(False)
+            set_text(u.GetDlgItem(export, 4031), "2n")
+            target(destination, "cross-source-a.pdf")
+            click(4201)
             post(export, 0x10)
             wait(lambda: not find("UnifiedExportDialog"))
-            if original.read_bytes() != original_bytes or pdf.read_bytes() != source_pdf_bytes:
-                raise RuntimeError("Export workflow changed a source document")
-            # Missing setting defaults ON. Saved quick preferences store only
-            # the boolean, while every invocation snapshots the live page angles.
+            send(lists[2], 0x186, 1)
+            send(main_window, 0x111, 1 << 16, lists[2])
+            post(main_window, 0x111, 1005)
+            export = wait(lambda: find("UnifiedExportDialog"))
+            page_spec = wait(lambda: u.IsWindowVisible(export) and u.GetDlgItem(export, 4031))
+            reservations = u.GetDlgItem(export, 4210)
+            if count() != 1 or text(page_spec) != "1":
+                raise RuntimeError("Switching PDF lost the prior reservation or opened the wrong source")
+            set_text(page_spec, "1n")
+            target(destination, "cross-source-b.pdf")
+            click(4201)
+            if count() != 2 or not u.IsWindowEnabled(u.GetDlgItem(export, 4212)):
+                raise RuntimeError("PDF-only reservations from both sources did not enable merge")
+            for index, name in enumerate((pdf.name, second_pdf.name)):
+                item = ctypes.create_unicode_buffer(send(reservations, 0x18A, index) + 1)
+                send(reservations, 0x189, index, ctypes.addressof(item))
+                if name not in item.value:
+                    raise RuntimeError("Reservation does not identify its PDF source")
 
+            # Export the second PDF directly while both jobs are still queued.
+            click(4001)
+            click(4011)
+            target(destination, "cross-source-current.pdf")
+            post(export, 0x111, 1)
+            results = wait(lambda: find("ExportResultsDialog"))
+            wait(lambda: u.IsWindowVisible(results) and u.GetDlgItem(results, 4901))
+            if send(u.GetDlgItem(results, 4901), 0x18B) != 1:
+                raise RuntimeError("Current output executed queued jobs")
+            post(results, 0x10)
+            wait(lambda: not find("ExportResultsDialog"))
+            post(main_window, 0x111, 1005)
+            export = wait(lambda: find("UnifiedExportDialog"))
+            wait(lambda: u.IsWindowVisible(export) and u.GetDlgItem(export, 4210))
+            reservations = u.GetDlgItem(export, 4210)
+            if count() != 2:
+                raise RuntimeError("Current output consumed queued jobs")
+            target(session, pdf.name)
+            post(export, 0x111, 4212)
+            dialog = picker()
+            set_text(u.GetDlgItem(dialog, 103), pdf.name)
+            post(dialog, 0x111, 1)
+            wait(lambda: not find("LocalPathBrowserDlg") and u.IsWindowEnabled(export))
+            if count() != 2 or find("SilentDialogClass") or pdf.read_bytes() != source_pdf_bytes:
+                raise RuntimeError("Merge accepted a queued original that was no longer open")
+
+            def cross_merge():
+                target(destination, "cross-source.pdf")
+                post(export, 0x111, 4212)
+                dialog = picker()
+                set_text(u.GetDlgItem(dialog, 103), "cross-source.pdf")
+                post(dialog, 0x111, 1)
+
+            moved_source = pdf.with_suffix(".hold")
+            pdf.rename(moved_source)
+            try:
+                cross_merge()
+                error = wait(lambda: find("SilentDialogClass"))
+                wait(lambda: u.IsWindowVisible(error) and pdf.name in text(u.GetDlgItem(error, 5101)))
+                post(error, 0x10)
+                wait(lambda: u.IsWindowEnabled(export))
+                if count() != 2 or (destination / "cross-source.pdf").exists():
+                    raise RuntimeError("Missing merge source changed the output or queue")
+            finally:
+                moved_source.rename(pdf)
+            cross_merge()
+            results = wait(lambda: find("ExportResultsDialog"))
+            wait(lambda: u.IsWindowVisible(results) and u.GetDlgItem(results, 4901))
+            post(results, 0x10)
+            wait(lambda: not find("ExportResultsDialog"))
+            expected = [PdfReader(pdf).pages[1].extract_text(), PdfReader(second_pdf).pages[0].extract_text()]
+            actual = [page.extract_text() for page in PdfReader(destination / "cross-source.pdf").pages]
+            with fitz.open(pdf) as first, fitz.open(second_pdf) as second, fitz.open(destination / "cross-source.pdf") as merged:
+                if [p.get_text() for p in merged] != [first[1].get_text(), second[0].get_text()]:
+                    raise RuntimeError("Independent engine found the wrong cross-source merge pages")
+            if actual != expected or count() or any((destination / f"cross-source-{part}.pdf").exists() for part in ("a", "b")):
+                raise RuntimeError("Cross-source merge changed order, queue, or per-job destinations")
+            target(destination, "discard-on-exit.pdf")
+            click(4201)
+            if count() != 1:
+                raise RuntimeError("Restart fixture reservation was not added")
+            post(export, 0x10)
+            wait(lambda: not find("UnifiedExportDialog"))
+            send(lists[2], 0x186, 0)
+            send(main_window, 0x111, 1 << 16, lists[2])
+            if (original.read_bytes() != original_bytes or pdf.read_bytes() != source_pdf_bytes or
+                    second_pdf.read_bytes() != second_pdf_bytes):
+                raise RuntimeError("Export workflow changed a source document")
+            # Recreate the temporary angles after switching back to this PDF.
+            send(main_window, 0x111, 1133)
+            send(main_window, 0x111, 1129)
+            send(main_window, 0x111, 1132)
             mixed_angles = [180,90,90,90,90]
             for enabled in (False, True):
                 post(main_window, 0x111, 1005)
@@ -941,6 +1153,9 @@ def main():
             post(main_window, 0x111, 1014)
             export = wait(lambda: find("UnifiedExportDialog"))
             wait(lambda: u.IsWindowVisible(export) and u.GetDlgItem(export, 4211))
+            reservations = u.GetDlgItem(export, 4210)
+            if count() or (destination / "discard-on-exit.pdf").exists():
+                raise RuntimeError("A reservation survived an application restart")
             post(export, 0x111, 4211)
             summary = wait(lambda: find("UnifiedSettingsShellClass"))
             wait(lambda: "出力" in text(u.GetDlgItem(summary, 7103)))
@@ -971,7 +1186,7 @@ def main():
             app.wait(timeout=15)
             if app.returncode != 0 or pdf.read_bytes() != source_pdf_bytes or original.read_bytes() != original_bytes:
                 raise RuntimeError("Restarted color-preset fixture failed or changed originals")
-            print("Export workflow passed: original/duplicate destination aliases rejected, selected destination refreshed, strict page input, reordered/repeated pages, crop, three-job batch, final results, long destination/tooltip registration, TXT defaults/options, PDF-only merge eligibility/order/crop/scale/rotation/rendering, merge cancellation/failure/retry, quick PDF default/ON/OFF/persistence, individual retention/integration, overwrite cancel, failure/retry, close/discard, source preservation", flush=True)
+            print("Export workflow passed: action layout, current and batch outputs, destination aliases, page validation, PDF-only merge options and cross-source order, missing-source recovery, original protection, overwrite cancellation, reservation retention on close and clearing on restart, quick PDF settings, and note integration", flush=True)
             return
         if args.file_operations:
             current = original

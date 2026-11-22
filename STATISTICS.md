@@ -9,33 +9,33 @@ Statistics and generated Pages are excluded. Code/comment lines are approximate 
 private-history-allowlisted は非公開履歴から許可範囲相当だけを計測した値です。公開済みsnapshot自体の値とは区別します。
 private-history-allowlisted denotes aggregate measurements of an allowlisted subset of private history, not the published snapshot itself.
 
-対象版 / Candidate version: **0.9.560**
+対象版 / Candidate version: **0.9.564**
 
-計測日時 / Measured at: 2026-11-15T10:49:19.819320+00:00
+計測日時 / Measured at: 2026-11-22T10:24:59.940723+00:00
 
 | 指標 / Metric | 値 / Value |
 | --- | ---: |
-| 計測対象file / Measured files | 1,012 |
-| 計測対象byte / Measured bytes | 27,691,155 |
-| アプリsource file / Application source files | 426 |
-| アプリsource行 / Application source lines | 196,744 |
-| code / comment lines（対応source） | 177,233 / 7,077 |
-| 分類対応file / Classified source files | 426 / 426 |
-| 空行 / Application text blank lines | 12,434 |
-| 字句計測対象 / Lexically measured C/C++ files | 426 |
-| C/C++ literal source bytes | 502,735 |
+| 計測対象file / Measured files | 1,035 |
+| 計測対象byte / Measured bytes | 27,979,612 |
+| アプリsource file / Application source files | 433 |
+| アプリsource行 / Application source lines | 198,447 |
+| code / comment lines（対応source） | 178,759 / 7,206 |
+| 分類対応file / Classified source files | 433 / 433 |
+| 空行 / Application text blank lines | 12,482 |
+| 字句計測対象 / Lexically measured C/C++ files | 433 |
+| C/C++ literal source bytes | 505,979 |
 | 検証証跡 / Verification evidence | UNMEASURED |
 
 ## 配布物 / Packages
 
 | Locale | Edition | ZIP byte | 非圧縮byte / Unpacked byte | 状態 / Status |
 | --- | --- | ---: | ---: | --- |
-| en | full | 123,954,212 | 331127428 | COMPLETE |
-| en | lite | 15,475,204 | 35552585 | COMPLETE |
-| ja | full | 124,574,061 | 331706432 | COMPLETE |
-| ja | lite | 16,082,195 | 36118184 | COMPLETE |
+| en | full | 123,889,650 | 331068460 | COMPLETE |
+| en | lite | 15,410,532 | 35493617 | COMPLETE |
+| ja | full | 124,504,175 | 331628430 | COMPLETE |
+| ja | lite | 16,013,695 | 36040694 | COMPLETE |
 
-Input SHA-256: `21d69e9d006fca424d76102a27fa7698df0fde0a2cc161fe8eb3d39dc6dca122`
+Input SHA-256: `7d5efafe207eda7db4dfbb16ab0499570499794493cc03a50cb82bf3936c27d8`
 
 Profile: `a1057b22e8bf78e5acf00e0adde040daf0533123c79d7231908dfcd9f6a48483`
 

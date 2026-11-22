@@ -7,6 +7,8 @@
 #include <type_traits>
 
 namespace search {
+inline constexpr uint32_t kRequestVersion = 2;
+
 // Private, versioned local protocol. Lengths are checked before allocation;
 // no pointers, HWNDs, or executable paths cross this boundary.
 class Writer {

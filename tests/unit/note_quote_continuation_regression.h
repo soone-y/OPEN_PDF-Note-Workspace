@@ -55,13 +55,15 @@ inline bool Run() {
             for (bool lazy : {false, true}) {
                 note::NoteMetadata metadata{file, L""};
                 metadata.quote_lazy_continuation = lazy;
+                metadata.clro_list_implicit_continuation = true;
+                const bool effectiveLazy = lazy || std::wstring_view(file) == L"quote.md";
                 const auto model = note::MakeNoteTextModel(metadata, test.raw, 17);
                 const auto doc = note::ParseNoteDocument(model);
                 const size_t offset = model.raw.find(L"TARGET");
-                check(DepthAt(doc, offset, note::BlockKind::Quote) == (lazy ? test.lazy_depth : test.strict_depth),
+                check(DepthAt(doc, offset, note::BlockKind::Quote) == (effectiveLazy ? test.lazy_depth : test.strict_depth),
                       "explicit/missing marker and nested quote depth");
                 // Without an outer quote marker, all its nested containers close.
-                const int listDepth = lazy && test.raw == std::wstring(L"> - item\nTARGET") ? 1 : test.list_depth;
+                const int listDepth = effectiveLazy && test.raw == std::wstring(L"> - item\nTARGET") ? 1 : test.list_depth;
                 check(DepthAt(doc, offset, note::BlockKind::List) == listDepth,
                       "list lazy continuation remains available");
                 check(note::ExportPlainText(model, doc, {}).find("TARGET") != std::string::npos &&
@@ -71,7 +73,7 @@ inline bool Run() {
     }
 
     const std::wstring raw = L"> quoted\nTARGET [link][ref]\n\n[ref]: local.md\n";
-    note::NoteMetadata metadata{L"quote.md", L""};
+    note::NoteMetadata metadata{L"quote.clro", L""};
     note::LocalNoteKernel kernel;
     kernel.Reset({2301}, metadata, raw, 10, 2, note::NoteContentKind::Markdown);
     (void)kernel.RefreshDerived();
@@ -99,9 +101,9 @@ inline bool Run() {
 
     note::NoteWorkspaceService service;
     const auto identity = note::BuildSnapshotIdentity({2302}, 10, 2, "quote-policy-fixture");
-    const auto strictIndex = service.ResolveIndex(identity, L"quote.md", metadata, raw, note::NoteContentKind::Markdown);
+    const auto strictIndex = service.ResolveIndex(identity, L"quote.clro", metadata, raw, note::NoteContentKind::Markdown);
     metadata.quote_lazy_continuation = true;
-    const auto lazyIndex = service.ResolveIndex(identity, L"quote.md", metadata, raw, note::NoteContentKind::Markdown);
+    const auto lazyIndex = service.ResolveIndex(identity, L"quote.clro", metadata, raw, note::NoteContentKind::Markdown);
     check(strictIndex && lazyIndex && strictIndex != lazyIndex &&
           DepthAt(strictIndex->document, raw.find(L"TARGET"), note::BlockKind::Quote) == 0 &&
           DepthAt(lazyIndex->document, raw.find(L"TARGET"), note::BlockKind::Quote) == 1,

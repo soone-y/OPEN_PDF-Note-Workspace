@@ -600,6 +600,8 @@ struct TaskCheckboxMetrics {
                                         int contentLeftPx,
                                         int contentRightPx,
                                         int spaceWidthPx,
+                                        const std::wstring& listMarker,
+                                        int listMarkerWidthPx,
                                         const TaskCheckboxMetrics& taskMetrics,
                                         uint32_t rowHeightPx,
                                         uint32_t totalHeightPx,
@@ -613,19 +615,17 @@ struct TaskCheckboxMetrics {
         std::vector<NoteRenderVisualDecoration> candidate;
         const Span sourceSpan = DecorationSourceSpan(sourceLine);
         if (sourceLine.decoration.has(NoteRenderSourceLineDecorationListItem) &&
-            !sourceLine.decoration.has(NoteRenderSourceLineDecorationTaskItem)) {
+            !sourceLine.decoration.has(NoteRenderSourceLineDecorationTaskItem) &&
+            !sourceLine.decoration.list_continuation) {
             const int markerRight = contentLeftPx - spaceWidthPx;
-            if (markerRight <= baseLeftPx) return false;
-            std::wstring marker = sourceLine.decoration.has(
-                NoteRenderSourceLineDecorationOrderedListItem)
-                ? std::to_wstring(sourceLine.decoration.ordered_list_number) + L"."
-                : L"•";
-            if (marker.empty()) return false;
+            const int64_t markerLeft = int64_t{markerRight} - listMarkerWidthPx;
+            if (listMarker.empty() || listMarkerWidthPx <= 0 || markerLeft < baseLeftPx) return false;
             candidate.push_back({NoteRenderVisualDecorationKind::ListMarker, sourceSpan,
-                                 baseLeftPx, 0, markerRight, rowHeightPx,
-                                 std::move(marker), false});
+                                 static_cast<int>(markerLeft), 0, markerRight, rowHeightPx,
+                                 listMarker, false});
         }
-        if (sourceLine.decoration.has(NoteRenderSourceLineDecorationTaskItem)) {
+        if (sourceLine.decoration.has(NoteRenderSourceLineDecorationTaskItem) &&
+            !sourceLine.decoration.list_continuation) {
             const int64_t boxRight = int64_t{contentLeftPx} - taskMetrics.gap_px;
             const int64_t boxLeft = boxRight - taskMetrics.side_px;
             if (taskMetrics.side_px <= 0 || boxLeft < baseLeftPx || boxRight <= boxLeft ||
@@ -776,6 +776,18 @@ struct TaskCheckboxMetrics {
         if (!sourcePlan.ResolveLine(lineIndex, &sourceLine) || UnsupportedExactGroup(sourceLine)) {
             return false;
         }
+        std::wstring listMarker;
+        SIZE listMarkerSize{};
+        if (sourceLine.decoration.has(NoteRenderSourceLineDecorationListItem) &&
+            !sourceLine.decoration.has(NoteRenderSourceLineDecorationTaskItem)) {
+            listMarker = sourceLine.decoration.has(NoteRenderSourceLineDecorationOrderedListItem)
+                ? std::to_wstring(sourceLine.decoration.ordered_list_number) + L"." : L"•";
+            // Decorations are painted with this base font, after run-specific
+            // fonts have been restored. Reserve their measured advance plus a
+            // space before flowing the body, including soft-wrapped rows.
+            if (!GetTextExtentPoint32W(hdc, listMarker.data(), static_cast<int>(listMarker.size()), &listMarkerSize) ||
+                listMarkerSize.cx <= 0) return false;
+        }
         const uint32_t baseHeight = std::max<LONG>(1, baseMetrics.tmHeight);
         uint32_t rowHeight = baseHeight;
         uint32_t markerFontHeight = baseHeight;
@@ -852,6 +864,10 @@ struct TaskCheckboxMetrics {
             }
             if (sourceLine.decoration.has(NoteRenderSourceLineDecorationTaskItem)) {
                 const int64_t minimumLeft = int64_t{markerLeft} + taskMetrics.side_px + taskMetrics.gap_px;
+                if (minimumLeft > std::numeric_limits<int>::max()) return false;
+                contentLeft = std::max(contentLeft, static_cast<int>(minimumLeft));
+            } else {
+                const int64_t minimumLeft = int64_t{markerLeft} + listMarkerSize.cx + spaceWidthPx;
                 if (minimumLeft > std::numeric_limits<int>::max()) return false;
                 contentLeft = std::max(contentLeft, static_cast<int>(minimumLeft));
             }
@@ -1003,7 +1019,8 @@ struct TaskCheckboxMetrics {
         if (!AddContainerDecorations(sourceLine, layoutKey, options, spaceWidthPx,
                                      totalHeightPx, &placement) ||
             !AddVisualDecorations(sourceLine, decorationBaseLeft, contentLeft,
-                                  contentRight, spaceWidthPx, taskMetrics, rowHeight, totalHeightPx,
+                                  contentRight, spaceWidthPx, listMarker, listMarkerSize.cx,
+                                  taskMetrics, rowHeight, totalHeightPx,
                                   placement.runs, &placement.decorations)) {
             return false;
         }

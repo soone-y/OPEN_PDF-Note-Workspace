@@ -36,12 +36,12 @@ static search::Writer SearchRequest(const std::filesystem::path& workspace,
                                    int range = 3, const std::wstring& current = L"",
                                    const std::wstring& currentText = L"") {
     search::Writer request;
-    request.Put<uint32_t>(1); request.Text(workspace.wstring()); request.Text(L"."); request.Text(L"__pdf_note_workspace__");
+    request.Put<uint32_t>(search::kRequestVersion); request.Text(workspace.wstring()); request.Text(L"."); request.Text(L"__pdf_note_workspace__");
     request.Put<int32_t>(range); request.Text(L""); request.Put<uint8_t>(0); request.Put<uint32_t>(0);
     request.Put<uint32_t>(static_cast<uint32_t>(folders.size()));
     for (const auto& path : folders) { request.Text(path.wstring()); request.Put<uint8_t>(1); }
     request.Put<uint32_t>(7); request.Text(L"needle"); request.Put<uint8_t>(1); request.Put<uint8_t>(1);
-    request.Put<uint8_t>(0); request.Put<uint8_t>(0); request.Put<uint32_t>(0);
+    search::WriteNoteSyntaxPreferences(request, WorkspaceConfig{}); request.Put<uint32_t>(0);
     request.Text(current); request.Text(currentText);
     return request;
 }

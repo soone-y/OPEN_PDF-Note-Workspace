@@ -1421,7 +1421,7 @@ static void CommitPendingTextBoxEdit(HWND hwnd) {
     // defaults, only to rebuild them for the same box again in BeginTextEdit.
     if (g_hMainWnd) UpdateToolbarUI(g_hMainWnd);
     if (g_preEditToolbarState.toolMode != ToolMode::TextBox)
-        EnsureEditingTextBoxVisible(hwnd, L"reedit_toolbar_layout");
+        EnsureEditingTextBoxVisible(hwnd, L"reedit_toolbar_layout", TextBoxRevealIntent::Layout);
     if (g_hPdfToolbar) {
         RedrawWindow(g_hPdfToolbar, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
     }
@@ -2329,42 +2329,16 @@ static std::wstring ReconstructRectSelectionText(std::vector<RectSelectionChar> 
     return out;
 }
 
-static constexpr unsigned long kPdfPermissionCopyContent = 0x10u;
-
-static std::optional<std::wstring> GetProtectedPdfCopyBlockMessage(FPDF_DOCUMENT doc) {
-    if (!doc) return std::nullopt;
-    std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
-    const int secRev = FPDF_GetSecurityHandlerRevision(doc);
-    if (secRev < 0) return std::nullopt;
-
-    const unsigned long userPerms = FPDF_GetDocUserPermissions(doc);
-    const bool canCopy = userPerms == 0xfffffffful || (userPerms & kPdfPermissionCopyContent) != 0;
-
-    std::wstring message = localization::Text(L"pdf.protected_copy.base");
-    if (!canCopy) {
-        message += localization::Text(L"pdf.protected_copy.source_disallows");
+[[nodiscard]] static bool CanCopySelectedPdfText(HWND owner) {
+    if (!g_pdf.doc || !g_pdf.hasSelection) return true;
+    const wchar_t* restriction;
+    {
+        std::lock_guard<std::recursive_mutex> pdfiumLock(g_pdfiumMutex);
+        restriction = pdf_permissions::BlockMessage(g_pdf.doc, pdf_permissions::Operation::CopyText);
     }
-    message += localization::Text(L"pdf.protected_copy.guidance");
-    return message;
-}
-
-static bool CanCopySelectedPdfText(HWND owner) {
-    if (auto blockedMessage = GetProtectedPdfCopyBlockMessage(g_pdf.doc)) {
-        if (PromptPasswordAndReopenCurrentPdf(owner ? owner : g_hMainWnd,
-                                              localization::Text(L"pdf.interaction.f9d8ec40980e"),
-                                              *blockedMessage)) {
-            if (auto reblockedMessage = GetProtectedPdfCopyBlockMessage(g_pdf.doc)) {
-                ShowSilentMessageDialog(owner ? owner : g_hMainWnd,
-                                        localization::Text(L"pdf.interaction.f9d8ec40980e"),
-                                        *reblockedMessage,
-                                        SoftNoticeKind::Warning);
-                return false;
-            }
-            return true;
-        }
-        return false;
-    }
-    return true;
+    if (!restriction) return true;
+    ShowPdfSoftNotice(owner, localization::Text(restriction), SoftNoticeKind::Warning);
+    return false;
 }
 
 static bool CopyTextToClipboard(HWND hwnd, const std::wstring& text) {

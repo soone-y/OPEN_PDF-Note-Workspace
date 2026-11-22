@@ -27,6 +27,8 @@ static void RenderPdf(HWND hwnd, HDC hdc, const RECT& client, const RECT& paintR
             g_hUIFont, g_theme);
     } else empty_view_guide::Clear(hwnd, g_pdf.kind == DocKind::None);
     if (!g_pdf.pages.empty()) {
+        const bool filterLowZoomPdf = g_pdf.kind == DocKind::Pdf &&
+            g_pdf.scale < kPdfRenderMinScale && !g_zoomAnimating;
         BITMAPINFO bmi{};
         bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
         for (size_t i = 0; i < g_pdf.pages.size(); ++i) {
@@ -62,7 +64,8 @@ static void RenderPdf(HWND hwnd, HDC hdc, const RECT& client, const RECT& paintR
                 if (scaled) {
                     const bool downsampledFullBitmap =
                         !page.bitmapCoarse && srcW > drawW && srcH > drawH;
-                    useHalftoneStretch = !downsampledFullBitmap;
+                    // Keep the coverage of thin strokes when reducing a low-zoom PDF.
+                    useHalftoneStretch = filterLowZoomPdf || !downsampledFullBitmap;
                     oldMode = SetStretchBltMode(memDC, useHalftoneStretch ? HALFTONE : COLORONCOLOR);
                     if (useHalftoneStretch) {
                         SetBrushOrgEx(memDC, 0, 0, &oldOrg);
@@ -149,10 +152,10 @@ struct PdfScrollbarTrackState {
 static PdfScrollbarTrackState g_pdfScrollbarTrack;
 static constexpr UINT kPdfScrollbarTrackIntervalMs = 24;
 
-static bool TryGetPdfScrollbarPointTarget(HWND hwnd, int bar, double maxPos, double* outTarget) {
+static bool TryGetPdfScrollbarPointTarget(HWND hwnd, int bar, double minPos, double maxPos, double* outTarget) {
     if (!hwnd || !outTarget) return false;
-    *outTarget = 0.0;
-    if (maxPos <= 0.0) return true;
+    *outTarget = minPos;
+    if (maxPos <= minPos) return true;
 
     POINT pt{};
     if (!GetCursorPos(&pt)) return false;
@@ -174,7 +177,7 @@ static bool TryGetPdfScrollbarPointTarget(HWND hwnd, int bar, double maxPos, dou
     int cursor = vertical ? pt.y : pt.x;
     double ratio = static_cast<double>(std::clamp(cursor, trackStart, trackEnd) - trackStart) /
                    static_cast<double>(trackLen);
-    *outTarget = std::clamp(ratio * maxPos, 0.0, maxPos);
+    *outTarget = std::clamp(minPos + ratio * (maxPos - minPos), minPos, maxPos);
     return true;
 }
 
@@ -192,8 +195,13 @@ static void ApplyPdfScrollbarTrackPosition(HWND hwnd, int bar, double target) {
     GetClientRect(hwnd, &rc);
     int viewH = rc.bottom - rc.top;
     int viewW = rc.right - rc.left;
-    double maxPos = (bar == SB_VERT) ? MaxScrollY(viewH) : MaxScrollX(viewW);
-    target = std::clamp(target, 0.0, maxPos);
+    SCROLLINFO si{};
+    si.cbSize = sizeof(si);
+    si.fMask = SIF_RANGE | SIF_PAGE;
+    if (!GetScrollInfo(hwnd, bar, &si)) return;
+    const double minPos = si.nMin;
+    const double maxPos = std::max(si.nMin, si.nMax - static_cast<int>(si.nPage) + 1);
+    target = std::clamp(target, minPos, maxPos);
 
     double& pos = (bar == SB_VERT) ? g_pdf.scrollY : g_pdf.scrollX;
     if (std::abs(pos - target) < 0.5) {
@@ -222,12 +230,15 @@ static bool TickPdfScrollbarTrack(HWND hwnd) {
     }
 
     double target = 0.0;
-    RECT rc{};
-    GetClientRect(hwnd, &rc);
-    int viewH = rc.bottom - rc.top;
-    int viewW = rc.right - rc.left;
-    double maxPos = (g_pdfScrollbarTrack.bar == SB_VERT) ? MaxScrollY(viewH) : MaxScrollX(viewW);
-    if (!TryGetPdfScrollbarPointTarget(hwnd, g_pdfScrollbarTrack.bar, maxPos, &target)) {
+    SCROLLINFO si{};
+    si.cbSize = sizeof(si);
+    si.fMask = SIF_RANGE | SIF_PAGE;
+    if (!GetScrollInfo(hwnd, g_pdfScrollbarTrack.bar, &si)) {
+        CancelPdfScrollbarTrack(hwnd);
+        return true;
+    }
+    const double maxPos = std::max(si.nMin, si.nMax - static_cast<int>(si.nPage) + 1);
+    if (!TryGetPdfScrollbarPointTarget(hwnd, g_pdfScrollbarTrack.bar, si.nMin, maxPos, &target)) {
         CancelPdfScrollbarTrack(hwnd);
         return true;
     }

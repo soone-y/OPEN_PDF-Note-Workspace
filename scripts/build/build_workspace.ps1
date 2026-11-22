@@ -888,7 +888,9 @@ try {
             }
             $isCSource = ([System.IO.Path]::GetExtension($src).ToLowerInvariant() -eq ".c")
             $activeCompiler = if ($isCSource) { $cCompiler } else { $compiler }
+            # Match the viewer's language standards instead of compiler defaults.
             $sourceFlags = @()
+            $sourceFlags += if ($isCSource) { "-std=c11" } else { "-std=c++17" }
             if ($isCSource -and $src -eq "third_party/md4c/src/md4c.c") {
                 $sourceFlags += "-DMD4C_USE_UTF16"
             }

@@ -220,17 +220,58 @@ def check_text_color_overlays(directory: Path) -> None:
     print("PASS: text color overlays: 48/48 cases, 3 modes, Latin/Japanese, 4 rotations, 2 scales, background colors, glyph rendering, preserved text, external edit/reload")
 
 
+def write_permission_fixtures(directory: Path) -> None:
+    from pypdf import PdfWriter
+    from pypdf.constants import UserAccessPermissions
+    from pypdf.generic import ArrayObject, ByteStringObject, DictionaryObject, NameObject, TextStringObject
+
+    directory.mkdir(parents=True, exist_ok=True)
+    for name, user_password, permissions in (
+        ("permissions_copy_and_print", "reader", 0x14),
+        ("permissions_print_only", "", 0x04),
+        ("permissions_no_copy", "reader", 0x00),
+    ):
+        writer = PdfWriter()
+        writer.add_blank_page(200, 200)
+        writer.encrypt(user_password, "owner", algorithm="RC4-128",
+                       permissions_flag=UserAccessPermissions(0xFFFFF0C0 | permissions))
+        writer.write(directory / f"{name}.pdf")
+
+    # Model a populated signature field. The policy reacts to the signature's
+    # presence and makes no assertion about certificate trust or validity.
+    writer = PdfWriter()
+    writer.add_blank_page(200, 200)
+    signature = DictionaryObject({
+        NameObject("/Type"): NameObject("/Sig"),
+        NameObject("/Contents"): ByteStringObject(b"test-signature"),
+    })
+    field = DictionaryObject({
+        NameObject("/FT"): NameObject("/Sig"),
+        NameObject("/T"): TextStringObject("Audit signature"),
+        NameObject("/V"): signature,
+    })
+    writer.root_object[NameObject("/AcroForm")] = DictionaryObject({
+        NameObject("/Fields"): ArrayObject([field]),
+    })
+    writer.write(directory / "permissions_signature.pdf")
+    del field[NameObject("/V")]
+    writer.write(directory / "permissions_unsigned_field.pdf")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     modes = parser.add_mutually_exclusive_group(required=True)
     modes.add_argument("--fixtures", type=Path)
     modes.add_argument("--merged-pdf", type=Path)
     modes.add_argument("--shape-fixtures", type=Path)
+    modes.add_argument("--write-permission-fixtures", type=Path)
     args = parser.parse_args()
     if args.merged_pdf:
         check_merged(args.merged_pdf)
     elif args.shape_fixtures:
         check(args.shape_fixtures, shapes_only=True)
+    elif args.write_permission_fixtures:
+        write_permission_fixtures(args.write_permission_fixtures)
     else:
         check(args.fixtures)
         check_text_color_overlays(args.fixtures)

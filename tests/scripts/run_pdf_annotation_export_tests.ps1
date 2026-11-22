@@ -18,6 +18,8 @@ try {
     try {
         $env:PATH = "$(Join-Path $repoRoot 'third_party/pdfium/bin');$(Split-Path -Parent $compiler.Source);$previousPath"
         $fixtureDir = Join-Path $testDir 'pdf_annotation_export'
+        & $python.Source (Join-Path $repoRoot 'tests/python/pdf_annotation_interop_check.py') --write-permission-fixtures $fixtureDir
+        if ($LASTEXITCODE -ne 0) { throw 'PDF permission fixture generation failed.' }
         & $testExe $fixtureDir
         if ($LASTEXITCODE -ne 0) { throw 'PDF annotation export tests failed.' }
         & $python.Source (Join-Path $repoRoot 'tests/python/pdf_annotation_interop_check.py') --fixtures $fixtureDir

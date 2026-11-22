@@ -5,7 +5,7 @@
 #include <windows.h>
 #include <richedit.h>
 #include <commctrl.h>
-#include "ui/bottom_space_frame.h"
+#include "ui/native_note_bottom_space.h"
 #include <cstdlib>
 #include <iostream>
 
@@ -15,22 +15,43 @@ void Expect(bool condition, const char* message) {
     ++checks;
     if (!condition) { std::cerr << "FAIL: " << message << '\n'; std::exit(1); }
 }
-struct NativeFrameCase {
-    ui::BottomSpaceFrame frame;
-    int fixedDip = 96;
-};
-LRESULT CALLBACK NativeFrameProc(HWND window, UINT msg, WPARAM wp, LPARAM lp,
-                                UINT_PTR, DWORD_PTR data) {
-    auto& state = *reinterpret_cast<NativeFrameCase*>(data);
-    if (msg == WM_NCCALCSIZE && lp) {
-        const LRESULT result = DefSubclassProc(window, msg, wp, lp);
-        RECT& client = wp ? reinterpret_cast<NCCALCSIZE_PARAMS*>(lp)->rgrc[0]
-            : *reinterpret_cast<RECT*>(lp);
-        state.frame.Apply(client, note::BottomSpacePx(0, state.fixedDip, 400, 25,
-            96, 16, client.bottom - client.top));
-        return state.frame.padding_px > 0 ? 0 : result;
+LONG NativeLength(HWND edit) {
+    GETTEXTLENGTHEX query{GTL_NUMCHARS | GTL_PRECISE, 1200};
+    return static_cast<LONG>(SendMessageW(edit, EM_GETTEXTLENGTHEX, reinterpret_cast<WPARAM>(&query), 0));
+}
+LONG SpaceAfterAt(HWND edit, LONG position) {
+    CHARRANGE before{};
+    SendMessageW(edit, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&before));
+    const CHARRANGE range{position, position};
+    SendMessageW(edit, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&range));
+    PARAFORMAT2 paragraph{};
+    paragraph.cbSize = sizeof(paragraph);
+    SendMessageW(edit, EM_GETPARAFORMAT, 0, reinterpret_cast<LPARAM>(&paragraph));
+    SendMessageW(edit, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&before));
+    return paragraph.dySpaceAfter;
+}
+void CheckBottomPixels(HWND edit) {
+    HDC dc = GetDC(edit);
+    HDC memory = CreateCompatibleDC(dc);
+    HBITMAP bitmap = CreateCompatibleBitmap(dc, 600, 400);
+    Expect(dc && memory && bitmap, "native pixel fixture created");
+    HGDIOBJ previous = SelectObject(memory, bitmap);
+    RECT bounds{0, 0, 600, 400};
+    FillRect(memory, &bounds, static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
+    SendMessageW(edit, WM_VSCROLL, SB_TOP, 0);
+    SendMessageW(edit, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(memory), PRF_CLIENT | PRF_ERASEBKGND);
+    int pixels = 0;
+    for (int y = 304; y < 400; ++y) {
+        for (int x = 0; x < 120; ++x) {
+            const COLORREF pixel = GetPixel(memory, x, y);
+            if (pixel != CLR_INVALID && pixel != RGB(255, 255, 255)) ++pixels;
+        }
     }
-    return DefSubclassProc(window, msg, wp, lp);
+    Expect(pixels > 100, "body glyphs paint inside the former white footer area");
+    SelectObject(memory, previous);
+    DeleteObject(bitmap);
+    DeleteDC(memory);
+    ReleaseDC(edit, dc);
 }
 void CheckNativeRawSpace() {
     const HWND foreground = GetForegroundWindow();
@@ -58,51 +79,70 @@ void CheckNativeRawSpace() {
         return value;
     };
     const auto source = readText();
+    SendMessageW(edit, EM_SETMODIFY, FALSE, 0);
+    SendMessageW(edit, EM_SETEVENTMASK, 0, ENM_CHANGE | ENM_SELCHANGE);
     SendMessageW(edit, EM_SETSEL, 17, 23);
-    NativeFrameCase state;
-    Expect(SetWindowSubclass(edit, NativeFrameProc, 1, reinterpret_cast<DWORD_PTR>(&state)) != FALSE,
-        "native frame subclass installed");
-    SetWindowPos(edit, nullptr, 0, 0, 0, 0,
-        SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-    RECT format{};
-    GetClientRect(edit, &format);
-    Expect(format.bottom == 304 && state.frame.available_height_px == 400, "native client reserves actual footer");
-    SendMessageW(edit, EM_SETRECTNP, 0, reinterpret_cast<LPARAM>(&format));
-    SendMessageW(edit, EM_REQUESTRESIZE, 0, 0);
+    ui::NativeNoteBottomSpace space;
+    Expect(space.Apply(edit, 96, 96), "native trailing space applied");
+    RECT client{}, format{};
+    GetClientRect(edit, &client);
+    SendMessageW(edit, EM_GETRECT, 0, reinterpret_cast<LPARAM>(&format));
+    Expect(client.bottom == 400 && format.bottom == 400, "padding retains the full client and text rectangle");
     DWORD start = 0, end = 0;
     SendMessageW(edit, EM_GETSEL, reinterpret_cast<WPARAM>(&start), reinterpret_cast<LPARAM>(&end));
-    Expect(start == 17 && end == 23, "native format change preserves selection");
-    Expect(readText() == source, "native format change preserves text");
-    RECT applied{};
-    SendMessageW(edit, EM_GETRECT, 0, reinterpret_cast<LPARAM>(&applied));
-    Expect(applied.bottom == format.bottom, "native raw footer reserved");
-    const int textLength = GetWindowTextLengthW(edit);
-    SendMessageW(edit, EM_SETSEL, textLength, textLength);
+    Expect(start == 17 && end == 23, "display spacing preserves selection");
+    Expect(readText() == source && !SendMessageW(edit, EM_GETMODIFY, 0, 0), "display spacing preserves text and modified flag");
+    Expect(SendMessageW(edit, EM_GETEVENTMASK, 0, 0) == (ENM_CHANGE | ENM_SELCHANGE),
+        "display spacing restores native notifications");
+    Expect(SpaceAfterAt(edit, 0) == 0 && SpaceAfterAt(edit, NativeLength(edit)) == 1440,
+        "only final paragraph owns the padding");
+    CheckBottomPixels(edit);
+    SendMessageW(edit, EM_SETSEL, -1, -1);
     SendMessageW(edit, EM_SCROLLCARET, 0, 0);
-    // Hidden controls need an explicit scroll; no foreground/focus is taken.
     SendMessageW(edit, WM_VSCROLL, SB_BOTTOM, 0);
-    CHARRANGE caret{};
-    SendMessageW(edit, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&caret));
-    POINTL point{};
-    SendMessageW(edit, EM_POSFROMCHAR, reinterpret_cast<WPARAM>(&point), caret.cpMin);
-    if (point.y < applied.top || point.y >= applied.bottom) {
-        std::cerr << "native caret y=" << point.y << " format=" << applied.top << ',' << applied.bottom
-                  << " offset=" << caret.cpMin << '\n';
-    }
-    Expect(point.y >= applied.top && point.y < applied.bottom, "native end caret stays above footer");
-    SendMessageW(edit, WM_VSCROLL, SB_BOTTOM, 0);
+    space.RevealCaret(edit, 96, font);
+    POINTL caret{};
+    SendMessageW(edit, EM_POSFROMCHAR, reinterpret_cast<WPARAM>(&caret), NativeLength(edit));
+    Expect(caret.y >= 0 && caret.y + 19 <= 304, "end caret has scrollable space below it");
     POINT before{}, after{};
     SendMessageW(edit, EM_GETSCROLLPOS, 0, reinterpret_cast<LPARAM>(&before));
     SendMessageW(edit, WM_VSCROLL, SB_LINEDOWN, 0);
     SendMessageW(edit, EM_GETSCROLLPOS, 0, reinterpret_cast<LPARAM>(&after));
     Expect(before.y > 0 && before.y == after.y, "native lower scroll limit stable");
-    state.fixedDip = 0;
-    SetWindowPos(edit, nullptr, 0, 0, 0, 0,
-        SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-    RECT restored{};
-    GetClientRect(edit, &restored);
-    Expect(restored.bottom == 400 && state.frame.padding_px == 0, "disabling restores full native client");
-    Expect(readText() == source, "native resize retains source");
+    const LONG previousEnd = NativeLength(edit);
+    SendMessageW(edit, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L"\r\nnext\r\nlast"));
+    Expect(space.Apply(edit, 96, 96), "newline updates final paragraph spacing");
+    Expect(SpaceAfterAt(edit, previousEnd) == 0 && SpaceAfterAt(edit, previousEnd + 1) == 0 &&
+        SpaceAfterAt(edit, NativeLength(edit)) == 1440, "newlines never leave gaps between body paragraphs");
+    for (int line = 0; line < 3; ++line) {
+        SendMessageW(edit, EM_SETSEL, -1, -1);
+        SendMessageW(edit, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L"\r\nline"));
+        Expect(space.Apply(edit, 96, 96), "successive newlines update the tail");
+        space.RevealCaret(edit, 96, font);
+        SendMessageW(edit, EM_POSFROMCHAR, reinterpret_cast<WPARAM>(&caret), NativeLength(edit));
+
+        Expect(caret.y >= 0 && caret.y + 19 <= 304, "successive newlines retain native caret margin");
+    }
+    SendMessageW(edit, EM_EMPTYUNDOBUFFER, 0, 0);
+    SendMessageW(edit, EM_SETSEL, -1, -1);
+    const auto beforeTyping = readText();
+    SendMessageW(edit, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L"X"));
+    Expect(space.Apply(edit, 48, 96), "spacing preference changes during editing");
+    Expect(SendMessageW(edit, EM_GETMODIFY, 0, 0) != 0, "padding keeps the edited note dirty");
+    Expect(SendMessageW(edit, EM_UNDO, 0, 0) && readText() == beforeTyping,
+        "undo replays text without undoing display formatting");
+    Expect(space.Apply(edit, 48, 96) && SendMessageW(edit, EM_REDO, 0, 0) && readText() == beforeTyping + L"X",
+        "display formatting preserves the redo queue");
+    Expect(space.Apply(edit, 48, 96) && SpaceAfterAt(edit, NativeLength(edit)) == 720,
+        "undo and redo retain the current padding preference");
+    const auto edited = readText();
+    Expect(space.Apply(edit, 0, 96) && SpaceAfterAt(edit, NativeLength(edit)) == 0,
+        "zero removes trailing space");
+    Expect(readText() == edited, "disabling padding keeps edited text");
+    space.Invalidate();
+    Expect(SetWindowTextW(edit, L"short\r\nnote") && space.Apply(edit, 96, 96) &&
+        SpaceAfterAt(edit, 0) == 0 && SpaceAfterAt(edit, NativeLength(edit)) == 1440,
+        "replacement notes receive one final padding paragraph");
     Expect(GetForegroundWindow() == foreground && !IsWindowVisible(owner), "native check stays in background");
     DestroyWindow(owner);
     DeleteObject(font);

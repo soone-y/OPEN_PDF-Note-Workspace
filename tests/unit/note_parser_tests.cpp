@@ -26,6 +26,14 @@
 #include "note/note_file_policy.h"
 #include "note_clro_fullwidth_regression.h"
 #include "note_m_heading_regression.h"
+#include "note_list_marker_regression.h"
+#include "note_empty_container_regression.h"
+#include "note_clro_line_boundary_regression.h"
+#include "note_fence_export_regression.h"
+#include "note_syntax_preferences_regression.h"
+#include "note_markdown_shortcut_regression.h"
+#include "note_list_continuation_regression.h"
+#include "note_table_continuation_regression.h"
 #include "note_quote_continuation_regression.h"
 #include "note_underscore_underline_regression.h"
 #include "note/note_layout.h"
@@ -498,6 +506,8 @@ bool ApplyTextEditKeepsLineStartsInSync(std::wstring text, note::TextEdit edit) 
 int main() {
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
     Expect(note_underscore_test::Run(), "CLRO double underscores underline while Markdown keeps strong emphasis, with matching display and exports");
+    Expect(note_list_continuation_test::Run(), "CLRO lists require explicit markers by default and opt into Markdown continuation without changing source or history");
+    Expect(note_table_continuation_test::Run(), "CLRO table rows require pipes while Markdown and multiline markup/tag ranges retain their grammar");
     Expect(note_quote_test::Run(), "quote continuation defaults off, opt-in preserves lists, references, cache policy and undo/redo");
     {
         const auto fullwidth = note_fullwidth_test::Run();
@@ -4530,6 +4540,13 @@ int main() {
         gdiInput.owner_input.editor_text_core_current = true;
         gdiInput.owner_input.visible_lines = {{0}, {gdiWrappedCore.logical_line_count()}};
         note::NoteRenderFinalGdiMeasurementProvider gdiProvider(gdiMeasurementDc);
+        Expect(note_list_marker_test::Run(gdiMeasurementDc), "ordered list markers fit the measured gutter and preserve body spacing across fonts, sizes, nesting and wrapping");
+        Expect(note_empty_container_test::Run(gdiMeasurementDc, UTF8ToWide), "empty list/quote markers retain structured frames with only the editing row raw, including the distribution sample");
+        Expect(note_markdown_shortcut_test::Run(), "Ctrl+B toggles parsed asterisk bold, unifies mixed selections and preserves single-step history");
+        Expect(note_syntax_preferences_test::Run(), "CLRO syntax preferences agree across metadata, child transport, search and export");
+        Expect(note_fence_export_test::Run(gdiMeasurementDc), "empty fenced code and Markdown title exports preserve complete source ownership");
+        Expect(note_clro_line_boundary_test::RunLongVowelRule(gdiMeasurementDc), "CLRO exact long-vowel rule preserves prose, code/math, exports and editing transitions");
+        Expect(note_clro_line_boundary_test::Run(gdiMeasurementDc), "CLRO physical lines bound row markup while explicitly paired markup and tags retain multiline scope");
         const auto mHeadings = note_m_heading_test::Run(gdiMeasurementDc);
         Expect(mHeadings.cases == 38 && mHeadings.parsing && mHeadings.literals && mHeadings.lineHeight,
                "m/m1..m5 heading aliases preserve literal syntax, six tiers, fullwidth settings and line-height values");

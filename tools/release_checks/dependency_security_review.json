@@ -66,11 +66,11 @@
       "artifacts": [
         {
           "path": "third_party/md4c/src/md4c.c",
-          "sha256": "9fa5d4c40e7a0ebad08a28466975fd218946147947647276dd2b0677057de4c3"
+          "sha256": "c22a3c91bb6146e2d479be23e6343c51000165b6a3f30a3945fbda31560a713e"
         },
         {
           "path": "third_party/md4c/src/md4c.h",
-          "sha256": "7a1aff5d2b595953008a3ce33d598c627687cec7e612bd2edb06d40a4fbccc29"
+          "sha256": "a7643c905ab71c09342dc84ab28562541c78c599b241e9f95ab91a1463b63a5b"
         }
       ],
       "sources": [
@@ -80,7 +80,7 @@
         "https://osv.dev/vulnerability/OSV-2022-126"
       ],
       "decision": "pass",
-      "required_action": "The tracked upstream commit matches the upstream default-branch head at review time. The upstream security page listed no advisories. Keep the pinned UTF-16 source and the three required local patches. LibreOffice's separate UTF-8 MD4C retains its allocation-failure backport."
+      "required_action": "The tracked upstream commit matches the upstream default-branch head at review time. The upstream security page listed no advisories. Keep the pinned UTF-16 source and the six required local patches. LibreOffice's separate UTF-8 MD4C retains its allocation-failure backport. 2026-11-16: extended patch 0002 with an independent explicit-list policy. Prefix probes are bounded by the source prefix, and quote-only implicit parent intervals have a separate cache. Literal block boundaries and allocation/callback ownership are retained. CLRO enables explicit-list/quote policy by preference; MD uses normal implicit continuation. Artifact hashes include this local change. The release security review validity date is unchanged. 2026-11-16: patch 0004 requires a literal ASCII pipe on CLRO table body rows. The probe stops at the current newline and uses no allocations or callback changes. Inline and tagged multiline ranges are preserved. Release review validity is unchanged. 2026-11-16: patch 0005 disables Setext look-behind heading inference for CLRO. Other callers keep their existing flag policy. The guard adds no allocations, callback changes or source rewrites. Release review validity is unchanged. 2026-11-17: patch 0006 adds exact fenced-code source extents, including empty/unclosed bodies. MD_BLOCK_CODE_DETAIL is an app-local ABI extension requiring a consistent parser/consumer rebuild. Internal leaf metadata gains one offset without new allocations or callbacks. Release review validity is unchanged."
     },
     {
       "name": "zlib runtime",

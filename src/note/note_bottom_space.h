@@ -7,7 +7,7 @@
 
 namespace note {
 
-// Display-only preferences. Never add source characters or paragraph formats.
+// Display-only preferences. Source characters and serialized formatting stay intact.
 enum class BottomSpaceMode { Fixed = 0, Font = 1, Viewport = 2 };
 
 [[nodiscard]] inline int BottomSpacePx(int mode, int fixedDip, int fontPercent,

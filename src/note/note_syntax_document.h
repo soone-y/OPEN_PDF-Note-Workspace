@@ -79,6 +79,7 @@ public:
         NoteSyntaxDocumentLocalPatchWork* outWork = nullptr) noexcept;
 
     [[nodiscard]] bool valid() const noexcept { return valid_; }
+    [[nodiscard]] const NoteMetadata& metadata() const noexcept { return metadata_; }
     [[nodiscard]] size_t node_count(NoteSyntaxDocumentNodeKind kind) const noexcept;
 
     // Uses the persistent interval index.  It is the exact equivalent of the

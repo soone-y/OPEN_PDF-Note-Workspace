@@ -12,6 +12,7 @@
 #include "ui/alpha_polygon.h"
 #include "core/atomic_write.h"
 #include "core/localization.h"
+#include "core/pdf_permissions.h"
 #include "core/secure_memory.h"
 #include "ui/dashed_shape_outline.h"
 #include "ui/window_corners.h"
@@ -281,6 +282,7 @@ struct ViewerState {
     double selectionRightPt = 0.0;
     double selectionBottomPt = 0.0;
     std::wstring selectedText;
+    bool selectedTextIncludesPdf = false;
     PdfRegionSelection regionText;
 };
 
@@ -305,6 +307,7 @@ void ClearTextSelection() {
     g_state.selectingRect = false;
     g_state.hasRectSelection = false;
     g_state.regionText = {};
+    g_state.selectedTextIncludesPdf = false;
     g_state.selectionPage = -1;
     g_state.selectionLeftPt = 0.0;
     g_state.selectionTopPt = 0.0;
@@ -2081,11 +2084,16 @@ void ApplyReadonlyGrayscaleToBgra(std::vector<unsigned char>& pixels) {
     }
 }
 
-bool RenderPageToCache(FPDF_DOCUMENT document, int pageIndex, int width, int height, RenderedPage& out) {
-    if (!document || pageIndex < 0 || width < kMinRenderPx || height < kMinRenderPx) return false;
+[[nodiscard]] bool RenderPageToCache(FPDF_DOCUMENT document, int pageIndex, int width, int height, RenderedPage& out) {
+    if (!document || pageIndex < 0 || width < kMinRenderPx || height < kMinRenderPx ||
+        width > kMaxRenderPx || height > kMaxRenderPx) return false;
     const size_t pixel_count = static_cast<size_t>(width) * static_cast<size_t>(height);
     if (pixel_count > kMaxRenderedPageBytes / 4u) return false;
 
+    const int stride = width * 4;
+    std::vector<unsigned char> pixels;
+    try { pixels.resize(pixel_count * 4u); }
+    catch (const std::bad_alloc&) { return false; }
     FPDF_PAGE page = FPDF_LoadPage(document, pageIndex);
     if (!page) return false;
 
@@ -2094,18 +2102,51 @@ bool RenderPageToCache(FPDF_DOCUMENT document, int pageIndex, int width, int hei
     out.rawWidth = crop.right - crop.left; out.rawHeight = crop.top - crop.bottom;
     out.originX = crop.left; out.originY = crop.bottom;
     out.displayRotation = page_rotation::Normalize(std::max(0, FPDFPage_GetRotation(page)) + g_state.viewRotation);
-    std::vector<unsigned char> pixels(pixel_count * 4u);
-    const int stride = width * 4;
-    FPDF_BITMAP bitmap = FPDFBitmap_CreateEx(width, height, FPDFBitmap_BGRA, pixels.data(), stride);
-    if (!bitmap) {
-        FPDF_ClosePage(page);
-        return false;
-    }
+    const auto render = [&](std::vector<unsigned char>& target, int w, int h, int flags) {
+        FPDF_BITMAP bitmap = FPDFBitmap_CreateEx(w, h, FPDFBitmap_BGRA, target.data(), w * 4);
+        if (!bitmap) return false;
+        FPDFBitmap_FillRect(bitmap, 0, 0, w, h, 0xFFFFFFFFu);
+        FPDF_RenderPageBitmap(bitmap, page, 0, 0, w, h, g_state.viewRotation, flags);
+        FPDFBitmap_Destroy(bitmap);
+        return true;
+    };
 
-    FPDFBitmap_FillRect(bitmap, 0, 0, width, height, 0xFFFFFFFFu);
-    FPDF_RenderPageBitmap(bitmap, page, 0, 0, width, height, g_state.viewRotation, FPDF_ANNOT | FPDF_LCD_TEXT);
-    FPDFBitmap_Destroy(bitmap);
+    const auto extent = page_rotation::Extent(FPDF_GetPageWidthF(page), FPDF_GetPageHeightF(page),
+        g_state.viewRotation);
+    bool reduced = false;
+    // Below one pixel per PDF point, render at double size, then average each
+    // 2x2 block so a thin stroke contributes to the displayed pixel.
+    if (width < extent.width && height < extent.height &&
+        width <= kMaxRenderPx / 2 && height <= kMaxRenderPx / 2 &&
+        pixel_count <= kMaxRenderedPageBytes / (4u * 5u)) {
+        try {
+            std::vector<unsigned char> highResolution(pixel_count * 16u);
+            reduced = render(highResolution, width * 2, height * 2, FPDF_ANNOT);
+            if (reduced) {
+                const size_t sourceStride = static_cast<size_t>(stride) * 2;
+                for (int y = 0; y < height; ++y) {
+                    const auto* top = highResolution.data() + static_cast<size_t>(y) * 2 * sourceStride;
+                    const auto* bottom = top + sourceStride;
+                    auto* row = pixels.data() + static_cast<size_t>(y) * stride;
+                    for (int x = 0; x < width; ++x) {
+                        for (int channel = 0; channel < 4; ++channel) {
+                            const int sum = top[channel] + top[channel + 4] +
+                                bottom[channel] + bottom[channel + 4];
+                            row[channel] = static_cast<unsigned char>((sum + 2) / 4);
+                        }
+                        top += 8;
+                        bottom += 8;
+                        row += 4;
+                    }
+                }
+            }
+        } catch (const std::bad_alloc&) {
+            // The display-size buffer is already allocated. Use it directly.
+        }
+    }
+    const bool rendered = reduced || render(pixels, width, height, FPDF_ANNOT | FPDF_LCD_TEXT);
     FPDF_ClosePage(page);
+    if (!rendered) return false;
 
     if (g_state.showGrayscale) {
         ApplyReadonlyGrayscaleToBgra(pixels);
@@ -2656,8 +2697,10 @@ std::wstring BuildSelectedText(int pageIndex,
                                double left,
                                double top,
                                double right,
-                               double bottom) {
+                               double bottom,
+                               bool& includesPdfText) {
     std::wstring body = ExtractPdfTextInSelection(pageIndex, left, top, right, bottom);
+    includesPdfText = !body.empty();
     std::wstring ann = ExtractAnnotationTextInSelection(pageIndex, left, top, right, bottom);
     if (body.empty()) return ann;
     if (ann.empty()) return body;
@@ -2706,12 +2749,22 @@ bool CopyUnicodeTextToClipboard(HWND hwnd, const std::wstring& text) {
     return true;
 }
 
-bool CopyCurrentSelection(HWND hwnd) {
+void CopyCurrentSelection(HWND hwnd) {
     try {
-        std::wstring text = g_state.regionText.HasText() ? g_state.regionText.SelectedText() : g_state.selectedText;
+        const bool regionTextSelected = g_state.regionText.HasText();
+        if (regionTextSelected || g_state.selectedTextIncludesPdf) {
+            const auto* restriction = pdf_permissions::BlockMessage(
+                g_state.pdf ? g_state.pdf->document : nullptr, pdf_permissions::Operation::CopyText);
+            if (restriction) {
+                g_state.status = localization::Text(restriction);
+                return;
+            }
+        }
+        std::wstring text = regionTextSelected ? g_state.regionText.SelectedText() : g_state.selectedText;
         if (text.empty()) text = CurrentSelectedAnnotationText();
-        return CopyUnicodeTextToClipboard(hwnd, text);
-    } catch (const std::bad_alloc&) { return false; }
+        if (CopyUnicodeTextToClipboard(hwnd, text)) return;
+    } catch (const std::bad_alloc&) {}
+    g_state.status = localization::Text(L"readonly.selection.copy_failed");
 }
 
 struct PdfFileWriter {
@@ -3057,6 +3110,12 @@ void AddClropItemToPdfPage(FPDF_DOCUMENT doc, FPDF_PAGE page, const clrop::Item&
 bool ExportAnnotatedPdf(HWND hwnd) {
     if (!g_state.pdf || !g_state.pdf->document) {
         g_state.status = localization::Text(L"readonly.pdf.export.no_pdf");
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return false;
+    }
+    if (const auto* restriction = pdf_permissions::BlockMessage(
+            g_state.pdf->document, pdf_permissions::Operation::ExportPdf)) {
+        g_state.status = localization::Text(restriction);
         InvalidateRect(hwnd, nullptr, FALSE);
         return false;
     }
@@ -3497,6 +3556,7 @@ bool BeginTextSelection(HWND hwnd, POINT pt) {
     g_state.hasRectSelection = false;
     g_state.regionText = {};
     g_state.selectedText.clear();
+    g_state.selectedTextIncludesPdf = false;
     g_state.selectedPage = -1;
     g_state.selectedItem = -1;
     g_state.selectionPage = layout.pageIndex;
@@ -3634,7 +3694,8 @@ bool FinishTextSelection(HWND hwnd) {
                                              g_state.selectionLeftPt,
                                              g_state.selectionTopPt,
                                              g_state.selectionRightPt,
-                                             g_state.selectionBottomPt);
+                                             g_state.selectionBottomPt,
+                                             g_state.selectedTextIncludesPdf);
     if (!PrepareRegionTextSelection())
         g_state.status = localization::Text(L"readonly.selection.region_unavailable");
     else g_state.status = localization::Text(L"readonly.selection.region_ready");
@@ -4386,8 +4447,7 @@ LRESULT CALLBACK ViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
         }
         break;
     case WM_COPY:
-        if (!CopyCurrentSelection(hwnd))
-            g_state.status = localization::Text(L"readonly.selection.copy_failed");
+        CopyCurrentSelection(hwnd);
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
     case WM_WINDOWPOSCHANGING: {

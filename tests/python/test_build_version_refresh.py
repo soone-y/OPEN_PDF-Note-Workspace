@@ -89,6 +89,31 @@ function Write-BuildFailureTail {}
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(info.read_text(encoding="utf-8"), "original metadata")
 
+    def test_workspace_compile_commands_pin_standards_for_each_language(self):
+        source = (ROOT / "scripts/build/build_workspace.ps1").read_text(encoding="utf-8-sig")
+        start = source.index('            $isCSource = ')
+        end = source.index('            $sw = ', start)
+        result = self.run_ps(r'''
+$compiler='g++'; $cCompiler='gcc'; $includes=@('-Isrc'); $flags=@('-O2','-Wall')
+$objPath='output.o'; $depPath='output.o.d'
+$cases=@(@{Source='src/recovery/stage_recovery_process.cpp';Compiler='g++';Standard='-std=c++17';Md4c=$false},
+         @{Source='third_party/md4c/src/md4c.c';Compiler='gcc';Standard='-std=c11';Md4c=$true},
+         @{Source='src/example.C';Compiler='gcc';Standard='-std=c11';Md4c=$false})
+foreach($case in $cases) {
+    $src=$case.Source
+''' + source[start:end] + r'''
+    $standards=@($cmdArgs | Where-Object { $_ -like '-std=*' })
+    if($activeCompiler -cne $case.Compiler -or $standards.Count -ne 1 -or $standards[0] -cne $case.Standard) {
+        throw "Compiler or language standard mismatch for $src"
+    }
+    if(($cmdArgs -contains '-DMD4C_USE_UTF16') -ne $case.Md4c) { throw 'MD4C UTF-16 flag mismatch' }
+    if($cmdArgs -notcontains $src -or $cmdArgs -notcontains '-O2' -or $cmdArgs -notcontains '-Isrc') {
+        throw 'Compile inputs or common flags were lost'
+    }
+}
+''')
+        self.assertEqual(result.returncode, 0, result.stdout.decode("utf-8", errors="replace"))
+
     def test_unchanged_target_relinks_for_newer_shared_source_manifest(self):
         for driver in ("build_workspace.ps1", "build_readonly_viewer.ps1"):
             with self.subTest(driver=driver):

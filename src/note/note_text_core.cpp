@@ -1,4 +1,5 @@
 #include "note/note_text_core.h"
+#include "note/note_clro_markdown.h"
 
 #include <exception>
 #include <limits>
@@ -7,6 +8,7 @@
 
 namespace note {
 bool NoteTextCore::SetClroAsciiOnly(bool value) noexcept {
+    value = value && IsClroMarkdownFile(metadata_.file_name);
     if (metadata_.clro_ascii_only == value) return false;
     metadata_.clro_ascii_only = value;
     materialized_model_current_ = false;
@@ -14,8 +16,17 @@ bool NoteTextCore::SetClroAsciiOnly(bool value) noexcept {
 }
 
 bool NoteTextCore::SetQuoteLazyContinuation(bool value) noexcept {
+    value = value && IsClroMarkdownFile(metadata_.file_name);
     if (metadata_.quote_lazy_continuation == value) return false;
     metadata_.quote_lazy_continuation = value;
+    materialized_model_current_ = false;
+    return true;
+}
+
+bool NoteTextCore::SetClroListImplicitContinuation(bool value) noexcept {
+    value = value && IsClroMarkdownFile(metadata_.file_name);
+    if (metadata_.clro_list_implicit_continuation == value) return false;
+    metadata_.clro_list_implicit_continuation = value;
     materialized_model_current_ = false;
     return true;
 }

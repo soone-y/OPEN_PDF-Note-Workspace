@@ -6,7 +6,7 @@ Choose a form from the quick reference first. Detailed steps, aliases, and combi
 
 Use **Note bottom space** in Note settings or the bottom-right status assist. Choose a fixed size (pixels at 100% scaling), a percentage of text size, or a percentage of the note viewport height. The default is 32 fixed pixels. Set the selected value to 0 to disable it. Short panes limit the space to leave at least one text line.
 
-Structured display can scroll past the end. Typing, inserting a newline, or moving the caret automatically scrolls far enough to keep the configured space below the caret. Wheel scrolling alone does not pull the view back to the caret. Raw display reserves space below the editing area. No blank lines are added, and saved or exported text is unchanged.
+Structured display can scroll past the end. Typing, inserting a newline, or moving the caret automatically scrolls far enough to keep the configured space below the caret. Wheel scrolling alone does not pull the view back to the caret. Raw display also uses the full text viewport and provides scrollable space below the last paragraph. No blank lines are added, and saved or exported text is unchanged.
 
 ## Syntax quick reference
 
@@ -41,11 +41,17 @@ Structured display can scroll past the end. Typing, inserting a newline, or movi
 | `T` | Matrices, cases, alignment | `\begin{pmatrix}...\end{pmatrix}` and related environments |
 | `T` | Symbols and functions | `\alpha`, `\sum`, `\sin`, etc.; full supported list later |
 
+## CLRO syntax settings
+
+**Settings → Note → CLRO syntax** groups ASCII-only tags, implicit list continuation, and quote continuation without `>`. All three default to OFF. The lower-right status assist pane uses the same labels and lets you toggle each setting by clicking. These preferences apply to display, search, and export for open and subsequently opened `.clro` notes.
+
 ## Fullwidth punctuation (.clro)
 
-The Note settings include **CLRO: ASCII syntax only (disable Japanese color names)**, OFF by default. When ON, use ASCII tag delimiters, names, equals signs, quotes and separators, and English color names or numeric RGB values. `<c=red>` and `<c=#ff0000>` work; fullwidth forms such as `＜ｃ＝red＞` and the Japanese color aliases listed below do not apply color decoration. Japanese prose and font names, and the saved source, are preserved. This preference applies to `.clro` notes.
+**ASCII tags only (disable Japanese color names)** defaults to OFF. When ON, use ASCII tag delimiters, names, equals signs, quotes and separators, and English color names or numeric RGB values. `<c=red>` and `<c=#ff0000>` work; fullwidth forms such as `＜ｃ＝red＞` and the Japanese color aliases listed below do not apply color decoration. Japanese prose and font names, and the saved source, are preserved. This preference applies to `.clro` notes.
 
 In `.clro` notes, fullwidth syntax is supported within style tags. Use halfwidth Markdown markers for headings, emphasis, strikethrough, lists, tables, links, code, and containers. Fullwidth prose such as `～(example)`, `～～`, and `＊＊` retains its literal appearance.
+
+In `.clro`, an exact standalone line of three Japanese long-vowel marks (three consecutive `U+30FC` characters) also forms a horizontal rule. Lines containing surrounding whitespace, other text, or four or more marks remain literal. Code and math retain their original text. This notation works regardless of the ASCII-only tag setting. Markdown export converts it to `---` when syntax normalization is ON.
 
 Existing style tags accept fullwidth brackets, slashes, equals signs, and quotes, for example `＜u＞underline＜／＞` and `＜char＝＂red＂＞red＜／char＞`. Letters in tag and attribute names may also be fullwidth: `<ｃ＝red>red text</>`, `<Ｃ=red>red text</>`, and `＜ｂａｃｋ＝lightyellow＞background＜／＞`. Halfwidth/fullwidth letters may be mixed; name matching is case-insensitive. Prose, attribute values (including color names, font names, and link IDs), link destinations, and code content retain their original characters. For example, the value `ｒｅｄ` is distinct from the color name `red`.
 
@@ -65,7 +71,7 @@ Code blocks contain text you can copy. Compare source and display as you try an 
 
 ### Paragraphs, headings, and rules `M`
 
-Separate paragraphs with a blank line. Ordinary newlines belong to the paragraph. For an explicit hard break, end a line with two spaces or a `\`. Visual wrapping does not insert newlines into the document.
+In `.clro`, each physical newline is a displayed line boundary, including in HTML export. Heading, list, and quote prefixes decorate their own line. Blank lines separate paragraphs, and paired syntax can span multiple lines. `.md` and `.markdown` use Markdown paragraph and line-break rules, with two trailing spaces or a trailing `\` for an explicit break. Visual wrapping does not insert newlines into the document.
 
 ```text
 # Main heading
@@ -82,7 +88,7 @@ Next paragraph.
 ---
 ```
 
-Put a space after the heading's `#` characters. `***` and `___` also form rules. A line of `===` below text can form a heading, but this app treats `---` as a horizontal rule. Prefer hash headings for clarity.
+Put a space after the heading's `#` characters. In `.clro`, use `#` or a line-leading `<m>` heading tag. Following lines of `-`, `--`, `=`, or `===` do not infer a heading from preceding text. `.md` and `.markdown` also support underline-style headings. This app treats `---`, `***`, and `___` as horizontal rules.
 
 Automatic heading indentation uses the initial left padding as the first tier's baseline. Body text under level 1 has no extra indent; level 2 adds one step, level 3 adds two, and so on. An explicit `<d=…>` setting uses its specified indentation.
 
@@ -105,7 +111,9 @@ Automatic heading indentation uses the initial left padding as the first tier's 
 > Another quoted paragraph
 ```
 
-By default, only lines with `>` belong to a quote. A line without `>` ends the quote even without a blank line. Enable “Allow quote continuation without >” in the Note settings to accept unmarked paragraph continuation lines. You can also toggle “Quote continuation without >” in the lower-right status assist. This preference applies to Markdown-family note display and export.
+In `.clro`, lists apply by default to lines with an explicit `-`, `*`, `+`, or numbered marker. An unmarked following line is ordinary text, including an indented line. Enter inserts the next marker, increments numbers, and resets tasks to unchecked `[ ]`. Enter on an empty item removes its prefix and ends the list. Enable “Allow implicit list continuation” in Note settings to include unmarked lines according to Markdown rules. The option defaults to OFF and is also available in the lower-right status assist. Fenced code contents retain their literal interpretation.
+
+In `.clro`, quote continuation without `>` defaults to OFF. Enable “Allow quote continuation without >” in Note settings to accept unmarked paragraph continuation lines. You can also toggle it in the lower-right status assist. These continuation settings apply to `.clro` display, search, and export. `.md` uses Markdown quote and list continuation rules.
 
 Use `-`, `*`, or `+` for bullets and `1.` or `1)` for numbering, followed by a space. Indent nested content to the parent's content position. Set task status in the source with `[ ]`, `[x]`, or `[X]`. Quotes may contain headings and lists.
 
@@ -122,6 +130,10 @@ Use `-`, `*`, or `+` for bullets and `1.` or `1)` for numbering, followed by a s
 | `\*text\*` | Literal punctuation |
 
 Do not put spaces between emphasis markers and their text. In `.clro`, `__text__` adds underline and `___text___` combines italic and underline. You can also use `<u>text</>`. HTML export preserves the underline, and TXT export removes the markers while keeping their text. Markdown export preserves the original `__`, which standard Markdown interprets as bold. When inline code contains backticks, enclose it in a longer run of backticks.
+
+Ctrl+B toggles asterisk-based bold. An entirely bold selection loses bold; a mixed selection becomes entirely bold. A caret inside the bold text or immediately after its closing markers also removes bold. Each Ctrl+B command is a separate undo/redo step from surrounding typing and deletion.
+
+Paired inline markup can span multiple lines within the same paragraph. Paired decoration tags also continue across line breaks and may span blank lines. An unclosed decoration tag, such as bold or color, is treated as input in progress, with a provisional scope through the document end. Entering its closing tag updates the scope to that position. Explicit heading-scope closes and a following heading of the same or higher tier end the scopes belonging to that heading.
 
 ### Show code and syntax literally `M`
 
@@ -147,6 +159,8 @@ Tilde fences (`~~~`) also work. Closing fences use the same character and at lea
 ```
 
 Place the separator row after the header and use `|` between cells. Write `\|` for a literal pipe inside a cell. Columns normally align in composed view; editing switches the whole table to source. Use horizontal scrolling for a wide table.
+
+In `.clro`, a table ends before a line containing no ASCII `|`. You can begin ordinary text or the next block on that line without a blank line. `.md` and `.markdown` use their existing Markdown table continuation rules.
 
 ### Links and image references `M`
 
@@ -293,7 +307,7 @@ The color's `#` is optional. `hicont`, `hi-contrast`, `highcontrast`, or `high-c
 
 ### Compatibility headings and scope endings `c`
 
-At the start of a line, `<m>` forms the highest heading tier, followed by `<m1>` through `<m5>`. `<m>Heading</>` corresponds to `# Heading`; `<m1>Heading</m1>` corresponds to `## Heading`. Use `</>` or a matching named closing tag, or omit the close at the end of the line. An opening tag on its own can use the immediately following text line as its title, without a blank separator. `<m6>` and higher are not heading names. With CLRO's ASCII-only setting OFF, digits in tag names may also be fullwidth: `＜ｍ１＞Heading＜／ｍ１＞`. Numbers in prose and attribute values stay unchanged.
+At the start of a line, `<m>` forms the highest heading tier, followed by `<m1>` through `<m5>`. `<m>Heading</>` corresponds to `# Heading`; `<m1>Heading</m1>` corresponds to `## Heading`. Use `</>` or a matching named closing tag, or omit the close at the end of the line. In `.clro`, an unpaired opening tag applies to its own line. To enclose a multiline heading, put the matching close at the end of its last line, such as `<m>`, several text lines, then `</m>`. `.md` and `.markdown` also interpret the text line immediately after a standalone opening tag as a compatibility heading. `<m6>` and higher are not heading names. With CLRO's ASCII-only setting OFF, digits in tag names may also be fullwidth: `＜ｍ１＞Heading＜／ｍ１＞`. Numbers in prose and attribute values stay unchanged.
 
 Standalone `<h1>heading</>` through `<h6>heading</>` lines remain supported. `</#>`, `</##>`, and corresponding levels close heading-related indentation and formatting scopes. `<m=5>`, `<m+5>`, and similar valued forms retain their line-height meaning. Bare `<m>` within a line also retains its legacy line-height meaning; use heading tags at the start of a line.
 

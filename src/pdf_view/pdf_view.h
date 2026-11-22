@@ -30,6 +30,7 @@ bool LoadPdfDocument(HWND pdfWnd, const std::wstring& path);
 [[nodiscard]] bool StartPendingPdfInitialRender(HWND pdfWnd);
 // Test-only entry, called with the isolated multi-page automation fixture.
 [[nodiscard]] bool RunPdfInitialViewportWorkProbe(HWND pdfWnd, std::wstring* outError);
+[[nodiscard]] bool RunPdfScrollStabilityProbe(HWND pdfWnd, std::wstring* trace, std::wstring* outError);
 [[nodiscard]] bool RunPdfWorkerConcurrencyProbe(HWND pdfWnd, const std::wstring& alternatePdf,
                                                std::wstring* outError);
 // Test-only, disposable UI fixture; no source PDF or staged data is saved.
@@ -60,9 +61,6 @@ bool LoadAnnotationsForCurrentPdf(HWND owner);
 bool OpenPdfWithAnnotations(HWND owner, const std::wstring& path);
 [[nodiscard]] bool OpenMovedPdfWithAnnotations(HWND owner, const std::wstring& source,
                                                const std::wstring& destination);
-bool PromptPasswordAndReopenCurrentPdf(HWND owner, const std::wstring& title,
-                                       const std::wstring& blockedMessage,
-                                       const std::wstring& confirmation = L"");
 void CommitActiveTextEditing(bool commit);
 void ClearPdfTextSelection();
 void ClearPdfAnnotationSelection();

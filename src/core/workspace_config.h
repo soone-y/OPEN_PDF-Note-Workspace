@@ -115,6 +115,7 @@ struct WorkspaceConfig {
     bool noteRenderEnabled = true;
     bool clroAsciiOnly = false;
     bool noteQuoteLazyContinuation = false;
+    bool clroListImplicitContinuation = false;
     int noteBottomSpaceMode = 0;
     int noteBottomSpaceFixedDip = 32;
     int noteBottomSpaceFontPercent = 400;

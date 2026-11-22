@@ -62,6 +62,7 @@ bool HandleMainPdfZoomShortcutInLoop(HWND owner, const MSG& msg);
 #include "workspace/main_workspace_logs.h"
 #include "ui/menus/menu_build.h"
 #include "app/startup_instance.h"
+#include "app/startup_last_open.h"
 #include "app/main_window_liveness_policy.h"
 #include "app/main_window_recovery_notice.h"
 #include "ui/core/wheel_routing.h"
@@ -201,10 +202,11 @@ static std::wstring BuildManagedAbnormalExitReportText(bool noteHadDirty,
                                                        bool annotHadDirty,
                                                        bool annotStageOk);
 static bool PrepareWorkspaceRestart(HWND hWnd);
-bool SaveStartupLastOpenTarget();
+[[nodiscard]] bool SaveStartupLastOpenTarget();
 static bool SaveSessionLastOpenMap();
 void LoadSessionLastOpenMap();
 static bool RestoreStartupLastOpenSelection(HWND hWnd);
+static void RebuildFileListBox(HWND list, const std::vector<FileEntry>& files);
 void ShowOtherPackageHeadlessProcessDiagnostics(HWND hWnd);
 std::optional<std::wstring> PickFileUnder(HWND owner,
                                                  const std::filesystem::path& initial,
@@ -315,18 +317,15 @@ static bool PromptStayOrOpenDiffManager(HWND hWnd,
 
 std::unordered_map<std::wstring, std::wstring> g_lastNoteBySession;
 std::unordered_map<std::wstring, std::wstring> g_lastPdfBySession;
-std::wstring g_lastStartupLecturePathSaved;
-std::wstring g_lastStartupSessionPathSaved;
+std::wstring g_lastStartupTargetSaved;
+static bool s_restoringStartupLastOpen = false;
 const wchar_t kLectureSettingsDirName[] = L"__pdf_note_workspace__";
 static constexpr wchar_t kLectureLastOpenFileName[] = L"lecture_last_open.txt";
 static HBRUSH s_hShortcutTagBrush = nullptr;
 static COLORREF s_shortcutTagBrushColor = CLR_INVALID;
 
 
-struct StartupLastOpenTarget {
-    std::wstring lecturePath;
-    std::wstring sessionPath;
-};
+using StartupLastOpenTarget = startup_last_open::Target;
 
 std::vector<TempExternalLecture> g_tempExternalLectures;
 
@@ -1145,6 +1144,7 @@ void ApplyOwnerDrawUi(HWND hWnd);
 
 void UpdateSessionLastOpenTargetsAfterOpen() {
     RememberCurrentSessionFiles();
+    (void)SaveStartupLastOpenTarget();
 }
 
 static std::filesystem::path LectureSettingsDir() {
@@ -1161,7 +1161,10 @@ static std::filesystem::path SessionLastOpenFilePath() {
 static std::filesystem::path StartupLastOpenTargetFilePath() {
     auto settingsDir = LectureSettingsDir();
     if (settingsDir.empty()) return {};
-    return settingsDir / L"__tmp__" / L"startup_last_open.txt";
+    const auto path = settingsDir / L"__tmp__" / L"startup_last_open.txt";
+    const auto local = identity_path_scope::LocalPath(path.wstring());
+    if (!local || !identity_path_scope::NoReparseAncestors(*local)) return {};
+    return path;
 }
 
 static std::filesystem::path PdfViewPositionsFilePath() {
@@ -1170,47 +1173,11 @@ static std::filesystem::path PdfViewPositionsFilePath() {
 }
 
 static std::wstring EscapeSessionLastOpenField(const std::wstring& src) {
-    std::wstring out;
-    out.reserve(src.size());
-    for (wchar_t ch : src) {
-        switch (ch) {
-        case L'\\': out += L"\\\\"; break;
-        case L'\t': out += L"\\t"; break;
-        case L'\n': out += L"\\n"; break;
-        case L'\r': out += L"\\r"; break;
-        default: out.push_back(ch); break;
-        }
-    }
-    return out;
+    return startup_last_open::Escape(src);
 }
 
 static std::wstring UnescapeSessionLastOpenField(const std::wstring& src) {
-    std::wstring out;
-    out.reserve(src.size());
-    bool esc = false;
-    for (wchar_t ch : src) {
-        if (!esc) {
-            if (ch == L'\\') {
-                esc = true;
-            } else {
-                out.push_back(ch);
-            }
-            continue;
-        }
-        switch (ch) {
-        case L'\\': out.push_back(L'\\'); break;
-        case L't': out.push_back(L'\t'); break;
-        case L'n': out.push_back(L'\n'); break;
-        case L'r': out.push_back(L'\r'); break;
-        default:
-            out.push_back(L'\\');
-            out.push_back(ch);
-            break;
-        }
-        esc = false;
-    }
-    if (esc) out.push_back(L'\\');
-    return out;
+    return startup_last_open::Unescape(src);
 }
 
 static bool ParseSessionLastOpenLine(const std::wstring& line,
@@ -1235,16 +1202,6 @@ static bool ParseSessionLastOpenLine(const std::wstring& line,
     *outPdf = UnescapeSessionLastOpenField(fields[1]);
     *outNote = UnescapeSessionLastOpenField(fields[2]);
     return !outKey->empty();
-}
-
-static bool ParseStartupLastOpenLine(const std::wstring& line,
-                                     StartupLastOpenTarget* out) {
-    if (!out) return false;
-    size_t split = line.find(L'\t');
-    if (split == std::wstring::npos) return false;
-    out->lecturePath = UnescapeSessionLastOpenField(line.substr(0, split));
-    out->sessionPath = UnescapeSessionLastOpenField(line.substr(split + 1));
-    return !out->lecturePath.empty();
 }
 
 #include "app/main_startup_last_open.cppinc"
@@ -3408,15 +3365,6 @@ static int FindFileEntryIndexByPath(const std::vector<FileEntry>& files, const s
     return -1;
 }
 
-static bool SelectStartupLastOpenFileListItem(HWND list,
-                                               const std::vector<FileEntry>& files,
-                                               const std::wstring& path) {
-    if (!list) return false;
-    const int idx = FindFileEntryIndexByPath(files, path);
-    if (idx < 0) return false;
-    return SetListboxSelAndNotify(list, idx);
-}
-
 static bool IsStartupLastOpenFileInList(const std::vector<FileEntry>& files,
                                         const std::wstring& path) {
     return FindFileEntryIndexByPath(files, path) >= 0;
@@ -3455,6 +3403,16 @@ static void ShowStartupLastOpenPartialNotice(HWND hWnd, const std::vector<std::w
     ShowSoftNotice(hWnd ? hWnd : g_hMainWnd, msg, SoftNoticeKind::Warning);
 }
 
+static void SelectFirstSessionForInitialSample(HWND) {
+    if (!g_config.startupSelectFirstSession) return;
+    std::error_code ec;
+    const auto path = StartupLastOpenTargetFilePath();
+    // Explicit sample opt-in applies only before any restart record exists.
+    if (path.empty() || std::filesystem::exists(path, ec) || ec) return;
+    EnsureListboxSelection(g_hLectureList);
+    EnsureListboxSelection(g_hSessionList);
+}
+
 static bool RestoreStartupLastOpenSelection(HWND hWnd) {
     // A workspace-only launch leaves saved targets intact for a later restart.
     if (!g_config.restoreLastSession) return false;
@@ -3479,109 +3437,87 @@ static bool RestoreStartupLastOpenSelection(HWND hWnd) {
 
     if (!hWnd || !g_hLectureList) return finish(L"skip=no_window");
     if (!LoadStartupLastOpenTarget(&target)) return finish(L"skip=no_target");
+    if (target.pdfPath.empty() && target.notePath.empty()) return finish(L"skip=closed_files");
+    // Persisted paths do not grant permission to touch network/reparse paths.
+    for (const auto* value : {&target.lecturePath, &target.sessionPath, &target.pdfPath, &target.notePath}) {
+        if (value->empty()) continue;
+        const auto local = identity_path_scope::LocalPath(*value);
+        if (!local || !identity_path_scope::NoReparseAncestors(*local))
+            return finish(L"skip=unsafe_target");
+    }
+    // Selection notifications must neither auto-open a closed counterpart nor
+    // overwrite the durable snapshot with an intermediate navigation state.
+    struct RestoreScope {
+        RestoreScope() { s_restoringStartupLastOpen = true; }
+        ~RestoreScope() { s_restoringStartupLastOpen = false; }
+    } restoring;
 
     std::error_code ec;
-    std::filesystem::path lecturePath(target.lecturePath);
-    if (!std::filesystem::exists(lecturePath, ec) || ec ||
-        !std::filesystem::is_directory(lecturePath, ec) || ec) {
-        missing.push_back(localization::Text(L"main.ui.543315c60276").c_str());
-        return finish(L"missing=lecture");
-    }
-
-    int lectureIdx = FindLectureIndexByPath(target.lecturePath);
-    if (lectureIdx < 0) {
-        missing.push_back(localization::Text(L"main.ui.62f3135b063c").c_str());
-        return finish(L"missing=lecture_index");
-    }
-
-    bool lectureChanged = SetListboxSelAndNotify(g_hLectureList, lectureIdx);
-    if (!lectureChanged &&
-        NormalizePathKeyForList(g_currentLecturePath) != NormalizePathKeyForList(target.lecturePath)) {
-        NotifyListboxSelChange(g_hLectureList);
-    }
-    lectureRestored =
-        NormalizePathKeyForList(g_currentLecturePath) == NormalizePathKeyForList(target.lecturePath);
-    if (!lectureRestored) {
-        missing.push_back(localization::Text(L"main.ui.aade6aefdb51").c_str());
-        return finish(L"failed=lecture_select");
-    }
-
-    if (target.sessionPath.empty()) {
-        return finish(L"end=lecture_only");
-    }
-
-    std::filesystem::path sessionPath(target.sessionPath);
-    ec.clear();
-    if (!std::filesystem::exists(sessionPath, ec) || ec ||
-        !std::filesystem::is_directory(sessionPath, ec) || ec) {
-        missing.push_back(localization::Text(L"main.ui.e697706531f2").c_str());
-        return finish(L"missing=session_path");
-    }
-
-    if (g_sessions.empty()) {
-        sessionRestored = SessionKeyFromPath(g_currentSessionPath) == SessionKeyFromPath(target.sessionPath);
-        if (!sessionRestored) missing.push_back(localization::Text(L"main.ui.6fff0bdf3f78").c_str());
-        return finish(sessionRestored ? L"end=direct_session" : L"missing=session_list");
-    }
-
-    int sessionIdx = FindSessionIndexByPath(target.sessionPath);
-    if (sessionIdx < 0) {
-        missing.push_back(localization::Text(L"main.ui.ca5fb960f714").c_str());
-        return finish(L"missing=session_index");
-    }
-
-    bool sessionChanged = SetListboxSelAndNotify(g_hSessionList, sessionIdx);
-    if (!sessionChanged &&
-        SessionKeyFromPath(g_currentSessionPath) != SessionKeyFromPath(target.sessionPath)) {
-        NotifyListboxSelChange(g_hSessionList);
-    }
-    sessionRestored = SessionKeyFromPath(g_currentSessionPath) == SessionKeyFromPath(target.sessionPath);
-    if (!sessionRestored) {
-        missing.push_back(localization::Text(L"main.ui.3f14862af168").c_str());
-        return finish(L"failed=session_select");
+    if (!target.lecturePath.empty()) {
+        const std::filesystem::path lecturePath(target.lecturePath);
+        if (!std::filesystem::is_directory(lecturePath, ec) || ec)
+            return finish(L"missing=lecture");
+        const int lectureIdx = FindLectureIndexByPath(target.lecturePath);
+        if (lectureIdx < 0) return finish(L"missing=lecture_index");
+        const bool changed = SetListboxSelAndNotify(g_hLectureList, lectureIdx);
+        if (!changed && NormalizePathKeyForList(g_currentLecturePath) != NormalizePathKeyForList(target.lecturePath))
+            NotifyListboxSelChange(g_hLectureList);
+        lectureRestored = NormalizePathKeyForList(g_currentLecturePath) == NormalizePathKeyForList(target.lecturePath);
+        if (!lectureRestored) return finish(L"failed=lecture_select");
     }
 
     SessionEntry targetSession;
-    if (sessionIdx >= 0 && sessionIdx < static_cast<int>(g_sessions.size())) {
-        targetSession = g_sessions[static_cast<size_t>(sessionIdx)];
-    } else {
-        targetSession.displayName = std::filesystem::path(target.sessionPath).filename().wstring();
+    if (!target.sessionPath.empty()) {
+        if (!lectureRestored) return finish(L"missing=session_parent");
+        const std::filesystem::path sessionPath(target.sessionPath);
+        ec.clear();
+        if (!std::filesystem::is_directory(sessionPath, ec) || ec) {
+            missing.push_back(localization::Text(L"main.ui.e697706531f2").c_str());
+            return finish(L"missing=session_path");
+        }
+        targetSession.displayName = sessionPath.filename().wstring();
         targetSession.path = target.sessionPath;
+        if (!g_sessions.empty()) {
+            const int sessionIdx = FindSessionIndexByPath(target.sessionPath);
+            if (sessionIdx < 0) {
+                missing.push_back(localization::Text(L"main.ui.ca5fb960f714").c_str());
+                return finish(L"missing=session_index");
+            }
+            const bool changed = SetListboxSelAndNotify(g_hSessionList, sessionIdx);
+            if (!changed && SessionKeyFromPath(g_currentSessionPath) != SessionKeyFromPath(target.sessionPath))
+                NotifyListboxSelChange(g_hSessionList);
+            targetSession = g_sessions[static_cast<size_t>(sessionIdx)];
+        }
+        sessionRestored = SessionKeyFromPath(g_currentSessionPath) == SessionKeyFromPath(target.sessionPath);
+        if (!sessionRestored) {
+            missing.push_back(localization::Text(L"main.ui.3f14862af168").c_str());
+            return finish(L"failed=session_select");
+        }
     }
 
-    std::wstring preferredPdf = PreferredPdfForSession(targetSession);
-    std::wstring preferredNote = PreferredNoteForSession(targetSession);
-    const bool hasPreferredPdf = !preferredPdf.empty();
-    const bool hasPreferredNote = !preferredNote.empty();
-
-    if (ParseSessionAutoOpenMode(g_config.sessionAutoOpenMode) == SessionAutoOpenMode::Off) {
+    std::wstring preferredPdf = target.pdfPath;
+    std::wstring preferredNote = target.notePath;
+    if (!targetSession.path.empty()) {
         LoadFiles(targetSession, preferredPdf, preferredNote);
-        const bool selectedPdf = SelectStartupLastOpenFileListItem(g_hPdfList, g_pdfFiles, preferredPdf);
-        const bool selectedNote = SelectStartupLastOpenFileListItem(g_hNoteList, g_noteFiles, preferredNote);
-        SyncLeftPaneSelection();
-        pdfRestored = hasPreferredPdf &&
-            IsStartupLastOpenFileInList(g_pdfFiles, preferredPdf);
-        noteRestored = hasPreferredNote &&
-            IsStartupLastOpenFileInList(g_noteFiles, preferredNote);
-        if (hasPreferredPdf && !selectedPdf) missing.push_back(L"PDF");
-        if (hasPreferredNote && !selectedNote) missing.push_back(localization::Text(L"main.ui.6e2cda623cf3").c_str());
-        RefreshMainWindowUiState(hWnd);
-        return finish(L"end=selected_files_only");
+    } else {
+        AppendPinnedTemporaryFilesToCurrentLists();
+        RebuildFileListBox(g_hPdfList, g_pdfFiles);
+        RebuildFileListBox(g_hNoteList, g_noteFiles);
     }
-
-    LoadFiles(targetSession, preferredPdf, preferredNote);
-
-    if (hasPreferredPdf) {
-        if (CanOpenPdfListPathInApp(preferredPdf)) {
+    // Enumeration may suggest newest files. Restart uses only its snapshot,
+    // independently of the directory-selection auto-open setting.
+    preferredPdf = target.pdfPath;
+    preferredNote = target.notePath;
+    if (!preferredPdf.empty()) {
+        if (IsStartupLastOpenFileInList(g_pdfFiles, preferredPdf) && CanOpenPdfListPathInApp(preferredPdf)) {
             pdfRestored = OpenPdfIfDifferent(hWnd, preferredPdf);
             if (pdfRestored) StartAutoOpenedPdfBeforeNote();
-        } else {
-            pdfRestored = IsStartupLastOpenFileInList(g_pdfFiles, preferredPdf);
         }
         if (!pdfRestored) missing.push_back(L"PDF");
     }
-    if (hasPreferredNote) {
-        noteRestored = OpenNoteIfDifferent(hWnd, preferredNote);
+    if (!preferredNote.empty()) {
+        noteRestored = IsStartupLastOpenFileInList(g_noteFiles, preferredNote) &&
+                       OpenNoteIfDifferent(hWnd, preferredNote);
         if (!noteRestored) missing.push_back(localization::Text(L"main.ui.6e2cda623cf3").c_str());
     }
     SyncLeftPaneSelection();
@@ -3897,6 +3833,7 @@ static bool PrepareContextDisplayClose(HWND owner, const wchar_t* operationJa,
 }
 
 static void FinishContextDisplayClose(HWND owner) {
+    (void)SaveStartupLastOpenTarget();
     SyncLeftPaneSelection();
     RefreshMainWindowUiState(owner);
     RefreshStatusDisplay(owner);
@@ -5378,7 +5315,6 @@ static void OnLectureSelChange(HWND hWnd) {
         g_currentSessionPath.clear();
         g_currentLecturePath = nextLecture;
         LoadSessions(g_currentLecturePath);
-        SaveStartupLastOpenTarget();
         timing.Mark(L"LoadSessions");
         if (g_sessions.empty()) {
             // Direct files mode: list PDF/notes directly under the selected lecture directory.
@@ -5412,6 +5348,7 @@ static void OnLectureSelChange(HWND hWnd) {
         RefreshMainWindowUiState(hWnd);
         file_output::ScheduleIntegrateAfterSwitch(hWnd);
         ClearHierarchyTemporaryFileDisplaysIfSafe();
+        (void)SaveStartupLastOpenTarget();
         timing.Mark(L"ScheduleIntegrateAfterSwitch");
     }
     timing.Mark(L"FlushDeferredMainWindowUiRefresh");
@@ -5514,6 +5451,7 @@ static void OnSessionSelChange(HWND hWnd) {
         LoadFiles(target, preferredPdf, preferredNote);
         timing.Mark(L"LoadFiles");
         if (!keepPinnedNote) AutoOpenSingleSessionFiles(hWnd);
+        (void)SaveStartupLastOpenTarget();
         timing.Mark(L"AutoOpenPdf");
         timing.Mark(L"AutoOpenNote");
         SyncLeftPaneSelection();
@@ -5643,6 +5581,7 @@ static void StartAutoOpenedPdfBeforeNote() {
 }
 
 void AutoOpenSingleSessionFiles(HWND hWnd) {
+    if (s_restoringStartupLastOpen) return;
     if (ParseSessionAutoOpenMode(g_config.sessionAutoOpenMode) == SessionAutoOpenMode::Off) {
         return;
     }

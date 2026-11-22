@@ -20,59 +20,59 @@
   },
   "current": {
     "release": {
-      "version": "0.9.560",
+      "version": "0.9.564",
       "published_at": null,
       "public_url": null,
       "tag": null
     },
     "measurement": {
       "profile_key": "a1057b22e8bf78e5acf00e0adde040daf0533123c79d7231908dfcd9f6a48483",
-      "measured_at": "2026-11-15T10:49:19.819320+00:00",
+      "measured_at": "2026-11-22T10:24:59.940723+00:00",
       "source_kind": "release-candidate",
-      "input_sha256": "21d69e9d006fca424d76102a27fa7698df0fde0a2cc161fe8eb3d39dc6dca122",
+      "input_sha256": "7d5efafe207eda7db4dfbb16ab0499570499794493cc03a50cb82bf3936c27d8",
       "allowlist_sha256": "965d255e393da1bc3b06524cd8c18d7ca03e144cb3c14c165db2424abc47225e"
     },
     "inventory": {
       "status": "COMPLETE",
-      "files": 1012,
-      "size_bytes": 27691155,
-      "text_files": 963,
+      "files": 1035,
+      "size_bytes": 27979612,
+      "text_files": 986,
       "binary_files": 49,
-      "lines": 362907,
-      "blank_lines": 25114,
+      "lines": 367882,
+      "blank_lines": 25353,
       "legacy_text_files": 1,
       "groups": {
         "application": {
-          "files": 426,
-          "size_bytes": 8956798
+          "files": 433,
+          "size_bytes": 9050245
         },
         "tests_source": {
-          "files": 194,
-          "size_bytes": 3349272
+          "files": 202,
+          "size_bytes": 3471564
         },
         "tests_fixture": {
           "files": 27,
           "size_bytes": 2041521
         },
         "tools": {
-          "files": 118,
-          "size_bytes": 1434621
+          "files": 123,
+          "size_bytes": 1473980
         },
         "dependencies": {
           "files": 73,
-          "size_bytes": 9267170
+          "size_bytes": 9272574
         },
         "dependency_patches": {
-          "files": 54,
-          "size_bytes": 110799
+          "files": 57,
+          "size_bytes": 121168
         },
         "documents": {
           "files": 67,
-          "size_bytes": 626184
+          "size_bytes": 640258
         },
         "resources": {
           "files": 11,
-          "size_bytes": 1020460
+          "size_bytes": 1023972
         },
         "samples": {
           "files": 35,
@@ -94,7 +94,7 @@
         },
         ".c": {
           "files": 3,
-          "size_bytes": 273401
+          "size_bytes": 277455
         },
         ".cjs": {
           "files": 1,
@@ -113,12 +113,12 @@
           "size_bytes": 1705
         },
         ".cpp": {
-          "files": 190,
-          "size_bytes": 6111341
+          "files": 191,
+          "size_bytes": 6182129
         },
         ".cppinc": {
-          "files": 64,
-          "size_bytes": 3565217
+          "files": 65,
+          "size_bytes": 3586280
         },
         ".csv": {
           "files": 2,
@@ -137,8 +137,8 @@
           "size_bytes": 216
         },
         ".h": {
-          "files": 278,
-          "size_bytes": 1494267
+          "files": 293,
+          "size_bytes": 1596059
         },
         ".html": {
           "files": 4,
@@ -162,7 +162,7 @@
         },
         ".json": {
           "files": 24,
-          "size_bytes": 1582953
+          "size_bytes": 1587706
         },
         ".lib": {
           "files": 1,
@@ -173,12 +173,12 @@
           "size_bytes": 377
         },
         ".md": {
-          "files": 74,
-          "size_bytes": 710812
+          "files": 75,
+          "size_bytes": 732019
         },
         ".patch": {
-          "files": 54,
-          "size_bytes": 110799
+          "files": 57,
+          "size_bytes": 121168
         },
         ".pdf": {
           "files": 9,
@@ -194,11 +194,11 @@
         },
         ".ps1": {
           "files": 85,
-          "size_bytes": 570684
+          "size_bytes": 571003
         },
         ".py": {
-          "files": 130,
-          "size_bytes": 2378496
+          "files": 131,
+          "size_bytes": 2427652
         },
         ".rc": {
           "files": 1,
@@ -213,8 +213,8 @@
           "size_bytes": 12924
         },
         ".txt": {
-          "files": 31,
-          "size_bytes": 166935
+          "files": 32,
+          "size_bytes": 170634
         },
         ".xcf": {
           "files": 1,
@@ -230,77 +230,77 @@
         },
         "<none>": {
           "files": 9,
-          "size_bytes": 6895
+          "size_bytes": 8152
         }
       }
     },
     "source_scale": {
       "status": "COMPLETE",
       "application": {
-        "files": 426,
-        "text_files": 426,
-        "size_bytes": 8956798,
-        "lines": 196744,
-        "blank_lines": 12434,
-        "code_lines": 177233,
-        "comment_lines": 7077,
-        "classified_files": 426
+        "files": 433,
+        "text_files": 433,
+        "size_bytes": 9050245,
+        "lines": 198447,
+        "blank_lines": 12482,
+        "code_lines": 178759,
+        "comment_lines": 7206,
+        "classified_files": 433
       },
       "tests_source": {
-        "files": 194,
-        "text_files": 194,
-        "size_bytes": 3349272,
-        "lines": 56132,
-        "blank_lines": 3044,
-        "code_lines": 52312,
-        "comment_lines": 776,
-        "classified_files": 194
+        "files": 202,
+        "text_files": 202,
+        "size_bytes": 3471564,
+        "lines": 58163,
+        "blank_lines": 3100,
+        "code_lines": 54267,
+        "comment_lines": 796,
+        "classified_files": 202
       },
       "tools": {
-        "files": 118,
-        "text_files": 118,
-        "size_bytes": 1434621,
-        "lines": 31709,
-        "blank_lines": 3291,
-        "code_lines": 25828,
-        "comment_lines": 351,
-        "classified_files": 103
+        "files": 123,
+        "text_files": 123,
+        "size_bytes": 1473980,
+        "lines": 32471,
+        "blank_lines": 3362,
+        "code_lines": 26381,
+        "comment_lines": 362,
+        "classified_files": 106
       },
       "src_tree": {
-        "files": 442,
-        "size_bytes": 9239823
+        "files": 449,
+        "size_bytes": 9333270
       }
     },
     "lexical": {
       "status": "COMPLETE",
-      "files": 426,
-      "source_bytes": 8956798,
+      "files": 433,
+      "source_bytes": 9050245,
       "bytes": {
-        "code": 5836265,
-        "literal": 502735,
-        "comment": 425230,
-        "whitespace": 2192568
+        "code": 5898544,
+        "literal": 505979,
+        "comment": 434757,
+        "whitespace": 2210965
       },
       "literal_bytes": {
-        "string": 426461,
-        "character": 14593,
-        "number": 61681,
+        "string": 429207,
+        "character": 14730,
+        "number": 62042,
         "other": 0
       },
       "literal_counts": {
-        "string": 18489,
-        "character": 3420,
-        "number": 34954,
+        "string": 18626,
+        "character": 3452,
+        "number": 35282,
         "other": 0
       },
-      "lexical_items": 1645602,
-      "string_payload_source_bytes": 374993,
+      "lexical_items": 1664151,
+      "string_payload_source_bytes": 377361,
       "string_purpose": "UNCLASSIFIED"
     },
     "localization": {
       "status": "COMPLETE",
-      "ja_ids": 3313,
-      "en_ids": 3313,
+      "ja_ids": 3339,
+      "en_ids": 3339,
       "en_missing_ids": 0
     },
     "packages": [
@@ -308,9 +308,9 @@
         "status": "COMPLETE",
         "locale": "en",
         "edition": "full",
-        "sha256": "0395eac910b44a5d1c8c0c98dadef51e6498d8fd55aff8f66e530ff9481f0162",
-        "zip_bytes": 123954212,
-        "unpacked_bytes": 331127428,
+        "sha256": "5ce8ad9a762d59f89831e241079b0328985de6a304f10a1533230c9b21b23050",
+        "zip_bytes": 123889650,
+        "unpacked_bytes": 331068460,
         "file_count": 1431,
         "basis": "archive-bytes"
       },
@@ -318,9 +318,9 @@
         "status": "COMPLETE",
         "locale": "en",
         "edition": "lite",
-        "sha256": "133713fe3c47e2b7e322b9f4f36c96dd7ac8de13b1ca615d06f739a450e700ac",
-        "zip_bytes": 15475204,
-        "unpacked_bytes": 35552585,
+        "sha256": "486f349b3564c9a72a8259c705f6eb0af337113428916f4d97308479e7690573",
+        "zip_bytes": 15410532,
+        "unpacked_bytes": 35493617,
         "file_count": 92,
         "basis": "archive-bytes"
       },
@@ -328,9 +328,9 @@
         "status": "COMPLETE",
         "locale": "ja",
         "edition": "full",
-        "sha256": "4678b1cb0a68eab3f8d0f02948dde8b64813b4320436ea830179625bb5edc4c1",
-        "zip_bytes": 124574061,
-        "unpacked_bytes": 331706432,
+        "sha256": "4d015611057f68e9ee8b2164729a165b3944e50cb766327c2c4a2b37baf38b6e",
+        "zip_bytes": 124504175,
+        "unpacked_bytes": 331628430,
         "file_count": 1434,
         "basis": "archive-bytes"
       },
@@ -338,9 +338,9 @@
         "status": "COMPLETE",
         "locale": "ja",
         "edition": "lite",
-        "sha256": "2825223a6dbeabc6a8bc6610d6daebae19d7250c191c3e1f7b5e474b4028fd40",
-        "zip_bytes": 16082195,
-        "unpacked_bytes": 36118184,
+        "sha256": "f4e08646143e0b9bc7618ee0ce48603d7e427fe6b55007ba22cb0bd3900cafe1",
+        "zip_bytes": 16013695,
+        "unpacked_bytes": 36040694,
         "file_count": 95,
         "basis": "archive-bytes"
       }
@@ -354,7 +354,7 @@
       "status": "UNMEASURED",
       "reason": "not-selected"
     },
-    "record_id": "87ded03d7117fd8f4a327d8ac231a0061899465fdc5c63e7c5b5f75ec73c1381",
+    "record_id": "a978356068eac0b602982955707a354dfb12d51ffcaec9d544a3873ab1c25154",
     "comparison": {
       "status": "NOT_APPLICABLE",
       "reason": "profile-or-source-kind-changed",

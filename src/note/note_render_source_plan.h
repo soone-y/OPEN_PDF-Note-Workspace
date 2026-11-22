@@ -60,6 +60,7 @@ struct NoteRenderSourceLineDecoration {
     int ordered_list_number = 0;
     bool task_checked = false;
     uint32_t container_depth = 0;
+    bool list_continuation = false;
 
     [[nodiscard]] bool has(NoteRenderSourceLineDecorationFlag flag) const noexcept {
         return (flags & static_cast<uint32_t>(flag)) != 0;

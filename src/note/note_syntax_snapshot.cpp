@@ -261,6 +261,15 @@ NoteSyntaxSnapshotLocalPatchResult NoteSyntaxSnapshot::BuildLocalPlainTextPatch(
         const auto afterLocation = NoteSourceLineMap::LineAt(
             currentLineMap, changedLocation->line_index);
         if (!afterLocation.has_value()) return NoteSyntaxSnapshotLocalPatchResult::InvalidEdit;
+        // The CLRO long-vowel alias changes block ownership without any
+        // ASCII delimiter in the edit. Reject the plain-leaf shortcut on
+        // either side of that exact row shape (conservatively also for MD).
+        constexpr std::wstring_view longVowelRule = L"\u30FC\u30FC\u30FC";
+        if (beforeLine == longVowelRule ||
+            (afterLocation->line.content_length == longVowelRule.size() &&
+             currentTextCore.RangeMatches(afterLocation->start, longVowelRule))) {
+            return NoteSyntaxSnapshotLocalPatchResult::RequiresFullSnapshot;
+        }
         const bool needsRowProof = beforeLine.find(L":::") != std::wstring::npos ||
             beforeLine.find(L'<') != std::wstring::npos;
         const bool interiorPlainLeafProof = IsStableInteriorPlainRowEdit(

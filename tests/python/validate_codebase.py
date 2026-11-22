@@ -45,6 +45,24 @@ BASELINE_ALLOWED_THROWING_FS = {
     "src/search/search.cpp:if (!TryGetCurrentLectureRoot(lecturePath) || !std::filesystem::exists(lecturePath)) {",
 }
 
+# This development-only probe deliberately reports filesystem exceptions through
+# wmain's nonzero exit. Allow only the reviewed calls while that boundary stays
+# intact; neither other calls in the probe nor application code are exempt.
+MICROTEX_PROBE_PATH = "tools/dev/microtex_trial/probe.cpp"
+MICROTEX_CAUGHT_FS_LINES = {
+    'if (std::filesystem::weakly_canonical(std::filesystem::u8path(tex::LaTeX::getResRootPath())) !=',
+    'std::filesystem::weakly_canonical(std::filesystem::u8path(resources))) {',
+    'std::filesystem::exists(outputPath)) throw std::runtime_error("Use absolute paths and a fresh output");',
+    '(!std::filesystem::is_directory(resources) ||',
+}
+MICROTEX_EXCEPTION_BOUNDARY = re.compile(
+    r"int wmain\(int argc, wchar_t\*\* argv\)\s*\{\s*try\s*\{"
+    r".*?: RunMicrotex\(input, resources\.u8string\(\), surface, pixels, style == L\"display\", iterations\);"
+    r".*?\} catch \(const std::exception& error\)\s*\{\s*"
+    r"std::cerr << error\.what\(\) << '\\n';\s*return 1;\s*\}\s*\}\s*\Z",
+    re.DOTALL,
+)
+
 
 def compile_python_files() -> list[str]:
     errors: list[str] = []
@@ -127,7 +145,9 @@ def find_new_throwing_filesystem_calls() -> list[str]:
     errors: list[str] = []
     for path in iter_source_files():
         rel = path.relative_to(REPO_ROOT).as_posix()
-        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        lines = text.splitlines()
+        caught_probe = rel == MICROTEX_PROBE_PATH and MICROTEX_EXCEPTION_BOUNDARY.search(text)
         for index, raw_line in enumerate(lines):
             line = raw_line.strip()
             if not line or line.startswith("//") or not RISKY_FS_CALL_RE.search(line):
@@ -146,6 +166,8 @@ def find_new_throwing_filesystem_calls() -> list[str]:
                 continue
             key = f"{rel}:{line}"
             if key in BASELINE_ALLOWED_THROWING_FS:
+                continue
+            if caught_probe and line in MICROTEX_CAUGHT_FS_LINES:
                 continue
             errors.append(f"{rel}:{index + 1}: {line}")
     return errors
@@ -530,7 +552,13 @@ def find_annotation_shortcut_regressions() -> list[str]:
             'ShouldPromptForPdfPassword() && reloadPromptCount++ < 3': "startup-driven PDF failures must not open retry dialogs",
         },
         "src/note_view/note_view_note_ops.cppinc": {
-            'ShouldPromptForPdfPassword()': "startup-driven note recovery must not open a modal dialog",
+            # Recovery policy from 348090f8: resume this process's stage without
+            # a prompt, but ask before adopting a stage from an earlier process.
+            'IsNoteStageCreatedDuringCurrentProcess(storageSnapshot.stagePath)': "note recovery must distinguish stages created during the current process",
+            'return !ec && writeTime >= g_noteRecoveryProcessStartTime;': "note recovery must classify stage age only after a successful timestamp read",
+            'if (hasCachedEditForTarget || stageCreatedDuringCurrentProcess)': "current-session note edits must resume without a recovery prompt",
+            'ShowSilentDialog(hWnd, options) == SilentDialogResult::Yes': "adopting an earlier note stage must require explicit confirmation",
+            'options.defaultResult = SilentDialogResult::No;': "note recovery must preserve the original by default",
             'ShouldNotifyDocumentOpenLockFailure()': "startup-driven note errors must remain silent",
         },
         "src/main.cpp": {
@@ -1015,10 +1043,6 @@ def find_annotation_layer_regressions() -> list[str]:
     errors: list[str] = []
     required_by_file = {
         "src/pdf_view/interaction_overlay.cppinc": {
-            "static void DrawAnnotations(HDC hdc, const RECT& client)": "annotation viewer drawing must stay centralized in DrawAnnotations",
-            "if (ann.type == Annotation::Type::TextColor)": "TextColor annotations must have a distinct viewer drawing branch",
-            "TintRectTextPixels(hdc, qr, ann.color": "TextColor selection quads must recolor text pixels instead of filling an opaque rectangle",
-            "TintRectTextPixels(hdc, r, ann.color": "TextColor fallback rectangles must still use text-pixel tinting",
             "} else if (ann.type == Annotation::Type::MarkerText)": "MarkerText annotations must have a distinct viewer drawing branch",
             "FillTextMarker(hdc, qr, ann.color, aUse, displayMode)": "MarkerText quads must use the saved display choice without classifying background pixels",
             "FillTextMarker(hdc, r, ann.color, aUse, displayMode)": "MarkerText fallback rectangles must use the same display choice",
@@ -1063,6 +1087,28 @@ def find_annotation_layer_regressions() -> list[str]:
             if needle not in text:
                 errors.append(f"{rel}: {message}")
 
+    overlay_path = "src/pdf_view/interaction_overlay.cppinc"
+    overlay = (REPO_ROOT / overlay_path).read_text(encoding="utf-8", errors="ignore")
+    draw = re.search(r"static void DrawAnnotations\(HDC hdc, const RECT& client, "
+                     r"const pdf_magnifier::Transform& paint\)\s*\{(?P<body>.*?)^\}", overlay, re.S | re.M)
+    if not draw:
+        errors.append(f"{overlay_path}: annotation viewer drawing must stay centralized in DrawAnnotations")
+    else:
+        text_color = re.search(r"if \(ann.type == Annotation::Type::TextColor\)\s*\{(.*?)"
+                               r"\} else if \(ann.type == Annotation::Type::MarkerText\)", draw["body"], re.S)
+        if not text_color:
+            errors.append(f"{overlay_path}: TextColor annotations must have a distinct viewer drawing branch")
+        else:
+            tint_branch = text_color[1]
+            for needle, message in {
+                "TintRectTextPixels(hdc, rectangle, ann.color": "TextColor must tint text pixels in the normal view",
+                "pdf_text_coverage::Paint(hdc, rectangle, ann.color": "TextColor must tint text pixels in the magnified view",
+                "tint(qr);": "TextColor selection quads must use the shared pixel tint",
+                "tint(r);": "TextColor fallback rectangles must use the shared pixel tint",
+            }.items():
+                if needle not in tint_branch:
+                    errors.append(f"{overlay_path}: {message}")
+
     file_output = (REPO_ROOT / "src/file_output/file_output.cpp").read_text(encoding="utf-8", errors="ignore")
     if not re.search(
         r"\bstatic\s+bool\s+ExportPdfPagesImpl\s*\([^{}]*\)\s*\{\s*"
@@ -1094,10 +1140,10 @@ def find_pdf_textbox_visibility_regressions() -> list[str]:
             "EnsureEditingTextBoxVisible(hwnd, L\"new_text_box\")": "new TextBox creation must reveal the edit area",
             "EnsureEditingTextBoxVisible(hwnd, L\"text_input\")": "ordinary character input must reveal a growing edit box",
             "EnsureEditingTextBoxVisible(hwnd, L\"ime_composition\")": "IME composition must reveal a growing edit box before candidate positioning",
-            "EnsureEditingTextBoxVisible(hwnd, L\"ime_endcomposition\")": "IME end composition must keep the final edit box visible",
-            "EnsureEditingTextBoxVisible(hwnd, L\"editing_font_enlarge\")": "editing font enlargement must reveal the resized edit box",
-            "EnsureEditingTextBoxVisible(hwnd, L\"editing_font_shrink\")": "editing font shrink must keep the edit box visible",
-            "EnsureEditingTextBoxVisible(hwnd, L\"textbox_font_update\")": "toolbar font update must reveal the resized edit box",
+            "EnsureEditingTextBoxVisible(hwnd, L\"ime_endcomposition\", TextBoxRevealIntent::Layout)": "IME completion must respect paused view following",
+            "EnsureEditingTextBoxVisible(hwnd, L\"editing_font_enlarge\", TextBoxRevealIntent::EditCommand)": "font enlargement must respect paused view following",
+            "EnsureEditingTextBoxVisible(hwnd, L\"editing_font_shrink\", TextBoxRevealIntent::EditCommand)": "font shrink must respect paused view following",
+            "EnsureEditingTextBoxVisible(hwnd, L\"textbox_font_update\", TextBoxRevealIntent::EditCommand)": "toolbar font changes must respect paused view following",
             "EnsureEditingTextBoxVisible(hwnd, L\"paste_text\")": "pasted text must reveal a growing edit box",
             "EnsureEditingTextBoxVisible(hwnd, L\"cut_text\")": "cut text must keep the edit box repaint/IME path consistent",
             "EnsureEditingTextBoxVisible(hwnd, L\"delete_key\")": "delete key edits must keep the edit box repaint/IME path consistent",
@@ -1108,7 +1154,7 @@ def find_pdf_textbox_visibility_regressions() -> list[str]:
             "EnsureEditingTextBoxVisible(hwnd, L\"ctx_paste_text\")": "context-menu paste must reveal a growing edit box",
         },
         "src/pdf_view/zoom_flow.cppinc": {
-            "EnsureEditingTextBoxVisible(pdfWnd, L\"zoom_edit_box\")": "zoom-time TextBox remeasure must keep the active edit box visible",
+            "EnsureEditingTextBoxVisible(pdfWnd, L\"zoom_edit_box\", TextBoxRevealIntent::Layout)": "zoom layout must respect paused view following",
         },
     }
     for rel, needles in required_by_file.items():
@@ -1194,11 +1240,12 @@ def find_existing_pdf_annotation_policy_regressions() -> list[str]:
             "FPDF_CreateNewDocument()": "PDF export must create a new destination document",
             "dest = pdf_annotation_export::CreateDocument()": "annotated PDF export must create an empty output copy with valid default font resources",
             "FPDF_ImportPages(dest, srcDoc": "PDF export must copy pages into the destination document before adding app annotations",
-            "AddAnnotationsToPage(annots": "PDF export must add only application annotations to the destination copy",
+            "AddAnnotationsToPage(*annots, fontCache, dest, page, spec.pageIndex,": "PDF export must add only application annotations to the destination copy",
             "pdf_annotation_export::Finalize(page)": "PDF output must finalize annotation references before saving, without depending on preview rendering",
             "pdf_annotation_export::CanScaleExisting(page, exportScale)": "native annotated input must reject unsupported non-unit scaling before saving",
             "PickSavePath(owner, GetUiText().menuExportPdf.c_str()": "PDF export must require an explicit output path",
-            "IsSamePath(std::filesystem::path(outPath), std::filesystem::path(CurrentLogicalPdfPath()))": "PDF export must reject overwriting the currently opened original PDF path",
+            "IsSamePath(target, CurrentLogicalPdfPath())": "PDF export must reject overwriting the currently opened original PDF path",
+            "part.source && IsSamePath(target, part.source->path)": "PDF export must reject overwriting any reserved source PDF path",
             "WarnExportOverwriteOriginal(owner, /*isPdf=*/true);": "attempted original overwrite must produce a quiet warning instead of replacing the source PDF",
             "atomic_write::AtomicReplaceFile(dest, tmp": "PDF export output must be written via atomic replace at the chosen destination",
         },
@@ -1298,7 +1345,7 @@ def find_slide_crop_export_regressions() -> list[str]:
             "FPDFPage_SetCropBox(page, left, bottom, right, top)": "slide crop export must set the visible CropBox",
             "ExtractPdfCropRectFromPageToken": "page-spec parsing must accept crop rectangles for manual correction/export",
             "page[left:bottom:right:top]": "invalid crop syntax must fail with a clear local message",
-            "IsSamePath(std::filesystem::path(outPath), std::filesystem::path(CurrentLogicalPdfPath()))": "slide crop PDF export must keep rejecting original-path overwrite",
+            "IsSamePath(target, CurrentLogicalPdfPath())": "slide crop PDF export must keep rejecting original-path overwrite",
             "atomic_write::AtomicReplaceFile(dest, tmp": "slide crop PDF export must keep atomic destination replacement",
         },
         "src/ui/dialogs/export_dialog.cpp": {
@@ -1500,38 +1547,28 @@ def find_startup_last_open_regressions() -> list[str]:
     errors: list[str] = []
     required_by_file = {
         "src/main.cpp": {
-            "TraceStartupLastOpenRestore": "startup last-open restore must keep step-by-step trace evidence",
-            "StartupLastOpenRestore": "startup last-open restore must use a stable preview_trace area",
-            "ShowStartupLastOpenPartialNotice": "startup last-open restore must report partial restore failures via a quiet visual notice",
-            "FindFileEntryIndexByPath": "startup last-open restore must validate PDF/Note targets separately against loaded file lists",
-            "SelectStartupLastOpenFileListItem": "startup last-open restore must select last-open PDF/Note entries when auto-open is off",
-            "end=selected_files_only": "startup last-open restore must have an explicit selection-only path for sessionAutoOpenMode=off",
-            "end=open_files": "startup last-open restore must keep the explicit open-files path for view mode",
-            "OpenPdfIfDifferent(hWnd, preferredPdf)": "startup last-open restore must open the preferred PDF independently",
-            "OpenNoteIfDifferent(hWnd, preferredNote)": "startup last-open restore must open the preferred note independently",
+            "TraceStartupLastOpenRestore": "startup restore must retain step-by-step evidence",
+            "StartupLastOpenRestore": "startup restore must retain its stable trace area",
+            "FindFileEntryIndexByPath": "startup files must be validated against loaded lists",
+            "end=open_files": "startup restore must retain an explicit completion trace",
+            "ShowStartupLastOpenPartialNotice": "partial restore must use a quiet notice",
+            "skip=closed_files": "closed files must skip directory restoration",
+            "s_restoringStartupLastOpen": "restore must suppress intermediate persistence and auto-open",
+            "preferredPdf = target.pdfPath;": "restart PDF must come from the snapshot",
+            "preferredNote = target.notePath;": "restart note must come from the snapshot",
+            "OpenPdfIfDifferent(hWnd, preferredPdf)": "restart must open the PDF independently",
+            "OpenNoteIfDifferent(hWnd, preferredNote)": "restart must open the note independently",
         },
         "src/features/automation/main_ui_automation.cppinc": {
-            "selectedOnlyRestored": "UI automation must cover startup last-open selection-only restore",
-            "Startup restore did not select the last-open PDF/Note when auto-open was off.": "UI automation must fail if selection-only restore does not select the last-open files",
+            "startup_restore:open_closed_matrix_ok cases=": "UI automation must cover the open/closed matrix",
+            "write_failure_retry=1": "UI automation must cover record write failure and retry",
         },
     }
     for rel, needles in required_by_file.items():
-        path = REPO_ROOT / rel
-        text = path.read_text(encoding="utf-8", errors="ignore")
+        text = (REPO_ROOT / rel).read_text(encoding="utf-8")
         for needle, message in needles.items():
             if needle not in text:
                 errors.append(f"{rel}: {message}")
-    main_text = (REPO_ROOT / "src/main.cpp").read_text(encoding="utf-8", errors="ignore")
-    automation_text = (REPO_ROOT / "src/features/automation/main_ui_automation.cppinc").read_text(encoding="utf-8", errors="ignore")
-    select_pos = automation_text.find('g_config.sessionAutoOpenMode = L"off";')
-    view_pos = automation_text.find('g_config.sessionAutoOpenMode = L"view";', select_pos)
-    if select_pos < 0 or view_pos < 0 or select_pos > view_pos:
-        errors.append("src/main.cpp: UI automation must verify selection-only restore before view/open restore")
-    restore_pos = main_text.find("static bool RestoreStartupLastOpenSelection")
-    load_pos = main_text.find("LoadFiles(targetSession, preferredPdf, preferredNote);", restore_pos)
-    select_file_pos = main_text.find("SelectStartupLastOpenFileListItem", load_pos)
-    if restore_pos < 0 or load_pos < 0 or select_file_pos < 0 or select_file_pos < load_pos:
-        errors.append("src/main.cpp: startup last-open file list selection must happen after session files are loaded")
     return errors
 
 def find_note_input_latency_regressions() -> list[str]:

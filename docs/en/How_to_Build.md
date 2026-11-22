@@ -13,6 +13,8 @@ This document is for developers building from source. To use a release package, 
 
 Dependencies are vendored in the repository. The build and the application must not make external network connections.
 
+Full, Lite, and read-only viewer builds explicitly select C++17 and C11, independently of the compiler's default language standard.
+
 ## Build
 
 ```powershell

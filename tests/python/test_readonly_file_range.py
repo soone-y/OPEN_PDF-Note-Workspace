@@ -15,7 +15,10 @@ class ReadonlyFileRangeTests(unittest.TestCase):
                                   '-I', str(directory), '-I', str(ROOT / 'src'),
                                   str(ROOT / 'tests/unit/readonly_file_range_tests.cpp'),
                                   '-static-libgcc', '-static-libstdc++', '-o', str(exe)],
-                                 cwd=ROOT, timeout=60, capture_output=True, text=True)
+                                 # Hosted Windows runners can spend over a minute
+                                 # compiling/linking this small standalone test.
+                                 # Keep a finite bound and propagate timeout as an error.
+                                 cwd=ROOT, timeout=180, capture_output=True, text=True)
         self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
         return subprocess.run([str(exe)], cwd=ROOT, timeout=15, capture_output=True, text=True)
 

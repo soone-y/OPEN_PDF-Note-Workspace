@@ -74,6 +74,7 @@ struct NoteMetadata {
     // Parsing preference only; never rewrites canonical text or storage.
     bool clro_ascii_only = false;
     bool quote_lazy_continuation = false;
+    bool clro_list_implicit_continuation = false;
 };
 
 struct NoteTextModel {
@@ -178,6 +179,8 @@ struct BlockNode {
     std::wstring info_string;
     size_t fence_marker_count = 0;
     bool fence_closed = false;
+    // Parser-owned fenced-code syntax extent. `span` remains the literal body.
+    Span code_fence_span{};
 };
 
 struct InlineNode {

@@ -8,44 +8,49 @@ static bool LoadStartupLastOpenTarget(StartupLastOpenTarget* out) {
     std::ifstream ifs(path, std::ios::binary);
     if (!ifs) return false;
     std::string buf((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
-    if (buf.empty()) return false;
+    if (ifs.bad() || buf.empty()) return false;
     std::wstring line = UTF8ToWide(buf);
     while (!line.empty() && (line.back() == L'\n' || line.back() == L'\r')) {
         line.pop_back();
     }
-    if (!ParseStartupLastOpenLine(line, out)) return false;
-    g_lastStartupLecturePathSaved = out->lecturePath;
-    g_lastStartupSessionPathSaved = out->sessionPath;
+    if (!startup_last_open::Parse(line, out)) return false;
+    g_lastStartupTargetSaved = startup_last_open::Serialize(*out);
     return true;
 }
 
-bool SaveStartupLastOpenTarget() {
-    if (g_currentLecturePath.empty()) return false;
-    std::wstring lecturePath = g_currentLecturePath;
-    std::wstring sessionPath = g_currentSessionPath;
-    if (lecturePath == g_lastStartupLecturePathSaved &&
-        sessionPath == g_lastStartupSessionPathSaved) {
-        return true;
-    }
+[[nodiscard]] bool SaveStartupLastOpenTarget() {
+    // UI-thread navigation is best effort; exit/root switching checks failure
+    // before clearing state. Only a successful write advances this cache.
+    if (s_restoringStartupLastOpen || g_workspaceRoot.empty()) return true;
+    StartupLastOpenTarget target{g_currentLecturePath, g_currentSessionPath,
+                                CurrentLogicalPdfPath(), g_currentNotePath};
+    // With resume disabled, an untouched workspace-only launch preserves the
+    // previous record. An explicit close after opening still records "closed".
+    if (!g_config.restoreLastSession && g_lastStartupTargetSaved.empty() &&
+        target.lecturePath.empty() && target.sessionPath.empty() &&
+        target.pdfPath.empty() && target.notePath.empty()) return true;
     auto path = StartupLastOpenTargetFilePath();
     if (path.empty()) return false;
+    const std::wstring line = startup_last_open::Serialize(target);
     std::error_code ec;
+    if (line == g_lastStartupTargetSaved && std::filesystem::is_regular_file(path, ec) && !ec)
+        return true;
+    ec.clear();
     std::filesystem::create_directories(path.parent_path(), ec);
     if (ec) return false;
-    std::wstring line = EscapeSessionLastOpenField(lecturePath) + L"\t" +
-                        EscapeSessionLastOpenField(sessionPath) + L"\n";
     std::filesystem::path preferredTmp;
     std::filesystem::path quarantineDir;
     if (!g_workspaceRoot.empty()) {
         std::filesystem::path resource = std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__";
         preferredTmp = resource / L"__tmp__";
         quarantineDir = resource / L"__escape__";
+        const auto localQuarantine = identity_path_scope::LocalPath(quarantineDir.wstring());
+        if (!localQuarantine || !identity_path_scope::NoReparseAncestors(*localQuarantine)) return false;
     }
     std::wstring err;
     if (!write_checks::ObservedWriteUtf8(g_workspaceRoot, path, WideToUTF8(line), preferredTmp, quarantineDir, &err)) {
         return false;
     }
-    g_lastStartupLecturePathSaved = std::move(lecturePath);
-    g_lastStartupSessionPathSaved = std::move(sessionPath);
+    g_lastStartupTargetSaved = line;
     return true;
 }

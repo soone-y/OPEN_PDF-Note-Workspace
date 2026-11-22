@@ -1,0 +1,86 @@
+diff --git a/src/md4c.c b/src/md4c.c
+--- a/src/md4c.c
++++ b/src/md4c.c
+@@ -5386,6 +5386,7 @@
+ #define MD_BLOCK_CONTAINER          (MD_BLOCK_CONTAINER_OPENER | MD_BLOCK_CONTAINER_CLOSER)
+ #define MD_BLOCK_LOOSE_LIST         0x04
+ #define MD_BLOCK_SETEXT_HEADER      0x08
++#define MD_BLOCK_CODE_FENCE_CLOSED  0x10
+
+ struct MD_BLOCK_tag {
+     MD_BLOCKTYPE type  :  8;
+@@ -5404,6 +5405,7 @@
+      * MD_BLOCK_OL:     Start item number.
+      */
+     MD_SIZE n_lines;
++    OFF source_end;  /* Leaf source extent, including an accepted closing fence. */
+ };
+
+ struct MD_CONTAINER_tag {
+@@ -5541,6 +5543,15 @@
+     MD_CHECK(md_build_attribute(ctx, STR(beg), lang_end - beg, 0, &det->lang, lang_build));
+
+     det->fence_char = fence_ch;
++    det->fence_begin = fence_line->beg;
++    det->fence_end = block->source_end;
++    det->fence_closed = ((block->flags & MD_BLOCK_CODE_FENCE_CLOSED) != 0);
++    /* Keep a final empty body row inside an unclosed block's source extent. */
++    if(!det->fence_closed && det->fence_end < ctx->size && ISNEWLINE(det->fence_end)) {
++        if(CH(det->fence_end) == _T('\r') && det->fence_end + 1 < ctx->size && CH(det->fence_end + 1) == _T('\n'))
++            det->fence_end++;
++        det->fence_end++;
++    }
+
+ abort:
+     return ret;
+@@ -5599,9 +5610,9 @@
+             break;
+
+         case MD_BLOCK_CODE:
++            memset(&det.code, 0, sizeof(MD_BLOCK_CODE_DETAIL));
+             /* For fenced code block, we may need to set the info string. */
+             if(block->data != 0) {
+-                memset(&det.code, 0, sizeof(MD_BLOCK_CODE_DETAIL));
+                 clean_fence_code_detail = true;
+                 MD_CHECK(md_setup_fenced_code_detail(ctx, block, &det.code, &info_build, &lang_build));
+             }
+@@ -5844,6 +5855,7 @@
+     block->flags = 0;
+     block->data = line->data;
+     block->n_lines = 0;
++    block->source_end = line->end;
+
+     ctx->current_block = block;
+     return 0;
+@@ -6008,6 +6020,7 @@
+         line->end = analysis->end;
+     }
+     ctx->current_block->n_lines++;
++    ctx->current_block->source_end = analysis->end;
+
+     return 0;
+ }
+@@ -6803,6 +6816,9 @@
+              * which we transform into MD_LINE_BLANK. */
+             if(line->indent < ctx->code_indent_offset) {
+                 if(md_is_closing_code_fence(ctx, CH(pivot_line->beg), off, &off)) {
++                    MD_ASSERT(ctx->current_block != NULL && ctx->current_block->type == MD_BLOCK_CODE);
++                    ctx->current_block->source_end = off;
++                    ctx->current_block->flags |= MD_BLOCK_CODE_FENCE_CLOSED;
+                     line->type = MD_LINE_BLANK;
+                     ctx->last_line_has_list_loosening_effect = false;
+                     break;
+diff --git a/src/md4c.h b/src/md4c.h
+--- a/src/md4c.h
++++ b/src/md4c.h
+@@ -323,6 +323,10 @@
+     MD_ATTRIBUTE info;
+     MD_ATTRIBUTE lang;
+     MD_CHAR fence_char;         /* The character used for fenced code block; or zero for indented code block. */
++    /* App source coordinates, independent of whether the body emits text. */
++    MD_OFFSET fence_begin;
++    MD_OFFSET fence_end;
++    int fence_closed;
+ } MD_BLOCK_CODE_DETAIL;
+
+ /* Detailed info for MD_BLOCK_TABLE. */

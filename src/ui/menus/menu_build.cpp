@@ -12,6 +12,7 @@
 #include "bridge/view_bridge.h"
 #include "settings/settings.h"
 #include "ui/dialogs/pending_write_retry.h"
+#include "ui/dialogs/export_dialog.h"
 #include "workspace/file_ops.h"
 
 #include <windows.h>
@@ -196,7 +197,8 @@ HMENU BuildMenuBarForState(const MainMenuStateSnapshot& menuState) {
     const UINT exportNoteFlags = MenuStringState(!g_currentNotePath.empty());
     AppendMenuW(exportMenu, exportPdfFlags, ID_FILE_EXPORT_PDF_QUICK, shortcutText(L"menu.export.quick_pdf", ShortcutAction::QuickPdf).c_str());
     AppendMenuW(exportMenu, exportNoteFlags, ID_FILE_EXPORT_NOTE_TEXT_QUICK, shortcutText(L"menu.export.quick_note", ShortcutAction::QuickNote).c_str());
-    const UINT exportDialogFlags = MenuStringState(CurrentLogicalPdfDocument() != nullptr || !g_currentNotePath.empty());
+    const UINT exportDialogFlags = MenuStringState(CurrentLogicalPdfDocument() != nullptr ||
+                                                  !g_currentNotePath.empty() || HasUnifiedExportReservations());
     AppendMenuW(exportMenu, exportDialogFlags, ID_FILE_EXPORT_COMBINED, shortcutText(L"menu.export.dialog", ShortcutAction::Export).c_str());
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(exportMenu), ui.menuExport.c_str());
 

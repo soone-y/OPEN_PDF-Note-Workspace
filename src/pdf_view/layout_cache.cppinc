@@ -63,9 +63,8 @@ static void ClampPdfScroll(int viewH, int viewW, bool observeTravel) {
     }
 
     if (g_hPdfView) {
-        auto clampPos = [](double pos, double maxPos) {
-            if (maxPos <= 0.0) return 0;
-            double v = std::clamp(pos, 0.0, maxPos);
+        auto clampPos = [](double pos, double minPos, double maxPos) {
+            double v = std::clamp(pos, minPos, maxPos);
             return static_cast<int>(std::round(v));
         };
         int contentH = static_cast<int>(std::round(contentHPad));
@@ -79,10 +78,13 @@ static void ClampPdfScroll(int viewH, int viewW, bool observeTravel) {
             si.nPage = static_cast<UINT>(std::max(0, viewH));
             si.nPos = 0;
         } else {
-            si.nMin = 0;
-            si.nMax = std::max(0, contentH - 1);
+            // Use the same coordinates as the viewport, including its edge
+            // margin. Clipping the thumb to [0, range] loses the real position
+            // when changing from wheel/pan to native scrollbar input.
+            si.nMin = static_cast<int>(minY);
+            si.nMax = contentH - 1 + static_cast<int>(kScrollOvershootPx);
             si.nPage = static_cast<UINT>(viewH);
-            si.nPos = clampPos(g_pdf.scrollY, static_cast<double>(contentH - viewH));
+            si.nPos = clampPos(g_pdf.scrollY, minY, maxBoundY);
         }
         SetScrollInfo(g_hPdfView, SB_VERT, &si, TRUE);
 
@@ -92,10 +94,10 @@ static void ClampPdfScroll(int viewH, int viewW, bool observeTravel) {
             si.nPage = static_cast<UINT>(std::max(0, viewW));
             si.nPos = 0;
         } else {
-            si.nMin = 0;
-            si.nMax = std::max(0, contentW - 1);
+            si.nMin = static_cast<int>(minX);
+            si.nMax = contentW - 1 + static_cast<int>(kScrollOvershootPx);
             si.nPage = static_cast<UINT>(viewW);
-            si.nPos = clampPos(g_pdf.scrollX, static_cast<double>(contentW - viewW));
+            si.nPos = clampPos(g_pdf.scrollX, minX, maxBoundX);
         }
         SetScrollInfo(g_hPdfView, SB_HORZ, &si, TRUE);
     }
@@ -1235,6 +1237,7 @@ static void InvalidatePdfRenderGeneration() {
 }
 
 static void MarkPdfVirtualScrollInput() {
+    if (g_pdf.editingText) g_pdfTextEditViewFollow.Suspend();
     ULONGLONG now = preview_trace::TickNow();
     g_pdfVirtualLastScrollInputTick = now;
     g_pdfVirtualLastViewportChangeTick = now;

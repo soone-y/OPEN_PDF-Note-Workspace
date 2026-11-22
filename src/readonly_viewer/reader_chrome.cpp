@@ -181,7 +181,11 @@ LRESULT DrawTree(NMTVCUSTOMDRAW& draw) {
         const bool hot = (draw.nmcd.uItemState & CDIS_HOT) != 0;
         draw.clrText = selected ? kAccent : kInk;
         draw.clrTextBk = selected ? kSelection : (hot ? RGB(210, 224, 235) : kSidebar);
-        return CDRF_NEWFONT;
+        return CDRF_NEWFONT | CDRF_NOTIFYPOSTPAINT;
+    }
+    if (draw.nmcd.dwDrawStage == CDDS_ITEMPOSTPAINT && (draw.nmcd.uItemState & CDIS_SELECTED)) {
+        RECT marker = draw.nmcd.rc; marker.right = marker.left + Px(draw.nmcd.hdr.hwndFrom, 3);
+        Fill(draw.nmcd.hdc, marker, kAccent);
     }
     return CDRF_DODEFAULT;
 }

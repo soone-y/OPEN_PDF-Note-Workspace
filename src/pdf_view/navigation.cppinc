@@ -232,7 +232,10 @@ static bool GetEditingTextBoxClientRect(RECT* out) {
     return out->right > out->left && out->bottom > out->top;
 }
 
-static bool EnsureEditingTextBoxVisible(HWND hwnd, const wchar_t* reason);
+static pdf_text_edit::ViewFollow g_pdfTextEditViewFollow;
+enum class TextBoxRevealIntent { TextInput, EditCommand, Layout };
+static bool EnsureEditingTextBoxVisible(HWND hwnd, const wchar_t* reason,
+                                      TextBoxRevealIntent intent = TextBoxRevealIntent::TextInput);
 
 static void InvalidateEditingTextBoxRect(HWND hwnd, const RECT* before = nullptr) {
     if (!hwnd) return;
@@ -378,6 +381,7 @@ void ClearPdfState() {
     g_pdf.imageDpiX = kDpi;
     g_pdf.imageDpiY = kDpi;
     g_pdf.editingText = false;
+    g_pdfTextEditViewFollow.Reset();
     EndPdfTextInputAccessibility(g_hPdfView);
     g_pdf.editPage = -1;
     g_pdf.editText.clear();
@@ -426,8 +430,11 @@ void ClearPdfState() {
 
 #include "pdf_view/layout_cache.cppinc"
 
-static bool EnsureEditingTextBoxVisible(HWND hwnd, const wchar_t* reason) {
+static bool EnsureEditingTextBoxVisible(HWND hwnd, const wchar_t* reason, TextBoxRevealIntent intent) {
     if (!hwnd || !g_pdf.editingText || g_pdf.editPage < 0) return false;
+    const auto now = GetTickCount64();
+    if (intent != TextBoxRevealIntent::TextInput && !g_pdfTextEditViewFollow.Following(now)) return false;
+    if (intent != TextBoxRevealIntent::Layout) g_pdfTextEditViewFollow.Input(now);
 
     RECT client{};
     if (!GetClientRect(hwnd, &client)) return false;

@@ -1027,8 +1027,8 @@ static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
             break;
         }
         std::vector<ExportDialogResult> dialogResults;
-        if (!ShowUnifiedExportDialog(hWnd, preset, dialogResults)) break;
-        ExecuteUnifiedExports(hWnd, dialogResults);
+        if (ShowUnifiedExportDialog(hWnd, preset, dialogResults)) ExecuteUnifiedExports(hWnd, dialogResults);
+        RefreshMainMenuBar(hWnd);
         break;
     }
     case ID_WRITE_CHECKS:

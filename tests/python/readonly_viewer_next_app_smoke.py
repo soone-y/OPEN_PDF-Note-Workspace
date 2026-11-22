@@ -171,8 +171,10 @@ def main():
                        help='Check full reading space and the menu commands that replace the toolbar.')
     scope.add_argument('--search-overview-only', action='store_true',
                        help='Check search-hit scrollbar marks and view/tab cancellation in an isolated copy.')
+    scope.add_argument('--navigation-only', action='store_true',
+                       help='Check folder navigation and independent next-startup registrations, including ON with zero targets.')
     args = parser.parse_args()
-    protect_entry_point(interactive=not (args.pdf_rotation_only or args.file_range_only or args.focus_only))
+    protect_entry_point(interactive=not (args.pdf_rotation_only or args.file_range_only or args.focus_only or args.navigation_only))
     exe = args.exe.resolve(strict=True)
     global WINDOW_CLASS
     WINDOW_CLASS = 'PdfReadonlyViewerWindow' if args.variant == 'standard' else 'PdfReadonlyViewerNextWindow'
@@ -231,13 +233,12 @@ def main():
         tree = u.GetDlgItem(hwnd, 101)
         root_item = send(tree, 0x110A, 0)
         item = send(tree, 0x110A, 4, root_item)
-        # Parent, md4c, mingw-w64, pdfium, project, manifest, README.
-        for _ in range(4): item = send(tree, 0x110A, 1, item)
+        # md4c, mingw-w64, pdfium, project, manifest, README.
+        for _ in range(3): item = send(tree, 0x110A, 1, item)
         require(item, 'project license folder present in native list')
         send(tree, 0x110B, 9, item)
         root_item = send(tree, 0x110A, 0)
         item = send(tree, 0x110A, 4, root_item)
-        item = send(tree, 0x110A, 1, item)
         send(tree, 0x110B, 9, item)
         require('Soone-Y' in text(editor) and 'Permission' in text(editor), 'original project license readable')
         screenshot(hwnd, output / 'licenses.png')
@@ -277,6 +278,150 @@ def main():
                 process.terminate(); process.wait(timeout=5)
                 raise RuntimeError('Owned test process did not close')
             require(process.returncode == 0, f'prototype exit {process.returncode}')
+
+    if args.navigation_only:
+        catalog = json.loads((root / 'locales' / f'{locale}.json').read_text(encoding='utf-8'))
+        session_name = 'readonly_setup.json' if args.variant == 'standard' else 'reader_next_setup.json'
+        session = runtime_bin / session_name
+        shared = runtime_bin / 'pdf_note_workspace_setup.json'
+        initial = {'format': 'readonly_viewer_session_v1', 'persistenceEnabled': False,
+                   'folder': {'path': '', 'persistent': False}, 'selectedTab': -1, 'tabs': []}
+        navigation = output / 'navigation'
+        for directory in ('pdf', 'note', 'ordinary'):
+            (navigation / directory).mkdir(parents=True)
+        loose = navigation / 'loose.md'; loose.write_text('# Loose document\n', encoding='utf-8')
+        note = navigation / 'note/memo.md'; note.write_text('# Grouped note\n', encoding='utf-8')
+        shutil.copyfile(pdf, navigation / 'pdf/lecture.pdf')
+        sources = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in navigation.rglob('*') if path.is_file()}
+        shared.write_text(json.dumps({'readonlyViewer': {**initial, 'persistenceEnabled': True,
+            'folder': {'path': str(navigation), 'persistent': True},
+            'tabs': [{'path': str(pdf), 'persistent': True}]}}), encoding='utf-8')
+        session.write_text(json.dumps(initial), encoding='utf-8')
+
+        def saved(): return json.loads(session.read_text(encoding='utf-8'))
+        def startup_menu(hwnd):
+            menu = u.GetSubMenu(u.GetMenu(hwnd), 2)
+            require(menu, 'next-startup menu exists')
+            send(hwnd, 0x0117, menu)
+            return menu
+        def empty_targets():
+            state = saved()
+            require(state['persistenceEnabled'] and state['tabs'] == [] and not state['folder']['persistent'],
+                    'ON with zero documents and zero folders remains valid')
+        def check_empty(hwnd):
+            require(send(u.GetDlgItem(hwnd, 103), 0x1304) == 0, 'zero targets never opens a legacy PDF')
+            menu = startup_menu(hwnd)
+            require(u.GetMenuState(menu, 117, 0) & 8, 'zero-target preference remains ON')
+        def enable_empty(hwnd):
+            startup_menu(hwnd)
+            send(hwnd, 0x0111, 117)
+            empty_targets()
+            require(text(u.GetDlgItem(hwnd, 817)) == catalog['readonly.startup.empty_enabled'], 'zero targets has a clear status')
+            menu = startup_menu(hwnd)
+            require(not (u.GetMenuState(menu, 118, 0) & 8), 'current PDF/note is never registered merely by enabling')
+            tree = u.GetDlgItem(hwnd, 101)
+            require(send(tree, 0x1105) == 7, 'navigation list excludes the parent-folder pseudo-file')
+            first = send(tree, 0x110A, 4, send(tree, 0x110A, 0))
+            require(send(tree, 0x1127, first, 0x10) & 0x10, 'PDF storage group is bold')
+            note_group = send(tree, 0x110A, 1, first)
+            send(tree, 0x110B, 9, send(tree, 0x110A, 4, note_group))
+            require('Grouped note' in text(u.GetDlgItem(hwnd, 104)), 'grouped document opens its actual path')
+            ordinary = send(tree, 0x110A, 1, note_group)
+            send(tree, 0x110B, 9, ordinary)
+            require(send(tree, 0x1105) == 1, 'empty folder does not contain a parent pseudo-file')
+            send(hwnd, 0x0111, 819)
+            require(send(tree, 0x1105) == 7, 'back button restores the file groups')
+            require(send(tree, 0x110A, 9) != send(tree, 0x110A, 0), 'returning to the folder reselects the open document')
+            screenshot(hwnd, output / 'navigation-wide.png')
+            dpi = u.GetDpiForWindow(hwnd)
+            require(u.SetWindowPos(hwnd, None, 0, 0, 480 * dpi // 96, 620 * dpi // 96, 0x0016), 'narrow navigation window')
+            require(not u.IsWindowVisible(tree) and u.IsWindowVisible(u.GetDlgItem(hwnd, 127)), 'narrow layout exposes documents picker')
+            errors = []
+            def open_picker():
+                try: send(hwnd, 0x0111, 127)
+                except Exception as error: errors.append(error)
+            thread = threading.Thread(target=open_picker); thread.start()
+            time.sleep(0.3)
+            require(thread.is_alive(), 'temporary documents picker stays open for selection')
+            u.PostMessageW(hwnd, 0x001F, 0, 0)  # WM_CANCELMODE closes the owned menu.
+            thread.join(timeout=5)
+            require(not thread.is_alive() and not errors, 'picker cancellation completes without opening another tab')
+            require(send(u.GetDlgItem(hwnd, 103), 0x1304) == 2, 'cancel retains open documents')
+            screenshot(hwnd, output / 'navigation-narrow.png')
+        run(loose, enable_empty)
+        empty_targets()
+        run(None, check_empty, restore_session=True)
+        empty_targets()
+
+        def register_and_disable(hwnd):
+            startup_menu(hwnd)
+            send(hwnd, 0x0111, 118); send(hwnd, 0x0111, 120)
+            require(len(saved()['tabs']) == 1 and saved()['folder']['persistent'], 'explicit document and folder selections are saved')
+            send(hwnd, 0x0111, 117)
+            require(not saved()['persistenceEnabled'] and len(saved()['tabs']) == 1, 'OFF preserves registrations')
+            send(hwnd, 0x0111, 402)  # Closing the tab is separate from removing its registration.
+        run(loose, register_and_disable)
+        def disabled_start(hwnd):
+            require(send(u.GetDlgItem(hwnd, 103), 0x1304) == 0, 'OFF never opens registered documents')
+            startup_menu(hwnd); send(hwnd, 0x0111, 117)
+            require(send(u.GetDlgItem(hwnd, 103), 0x1304) == 0, 'enabling affects next startup, not the current tabs')
+        run(None, disabled_start, restore_session=True)
+        def restored_and_remove(hwnd):
+            require(send(u.GetDlgItem(hwnd, 103), 0x1304) == 1 and 'Loose document' in text(u.GetDlgItem(hwnd, 104)), 'registered document reopens after OFF/ON')
+            menu = startup_menu(hwnd)
+            targets = u.GetSubMenu(menu, 5)
+            require(targets, 'registered-target list exists')
+            send(hwnd, 0x0117, targets)
+            send(hwnd, 0x0126, 1, targets)  # Remove the document (folder is first).
+            send(hwnd, 0x0117, targets)
+            send(hwnd, 0x0126, 0, targets)  # Remove the folder.
+            empty_targets()
+        run(None, restored_and_remove, restore_session=True)
+        run(None, check_empty, restore_session=True)
+
+        def failed_save(hwnd):
+            menu = startup_menu(hwnd)
+            kernel = ct.WinDLL('kernel32', use_last_error=True)
+            kernel.CreateFileW.argtypes = [wt.LPCWSTR, wt.DWORD, wt.DWORD, ct.c_void_p, wt.DWORD, wt.DWORD, wt.HANDLE]
+            kernel.CreateFileW.restype = wt.HANDLE
+            kernel.CloseHandle.argtypes = [wt.HANDLE]
+            handle = kernel.CreateFileW(str(session), 0x80000000, 1, None, 3, 0, None)
+            require(handle not in (None, ct.c_void_p(-1).value), 'hold settings open without replacement permission')
+            try:
+                before = session.read_bytes()
+                send(hwnd, 0x0111, 117)
+                require(u.GetMenuState(menu, 117, 0) & 8, 'save failure rolls back the ON/OFF checkbox')
+                require(session.read_bytes() == before, 'failed save retains previous settings bytes')
+                require(text(u.GetDlgItem(hwnd, 817)) == catalog['readonly.startup.save_failed'], 'save failure is visible')
+            finally: kernel.CloseHandle(handle)
+        run(loose, failed_save)
+        empty_targets()
+        session.unlink()  # Owned test copy: exercise migration when no dedicated preferences exist.
+        def legacy_preferences(hwnd):
+            require(send(u.GetDlgItem(hwnd, 103), 0x1304) == 1 and u.IsWindowVisible(u.GetDlgItem(hwnd, 1002)),
+                    'legacy shared preferences reopen the registered PDF when no dedicated settings exist')
+            startup_menu(hwnd)
+        run(None, legacy_preferences, restore_session=True)
+        require(saved()['persistenceEnabled'] and saved()['tabs'][0]['path'] == str(pdf),
+                'legacy registrations migrate to dedicated preferences')
+        invalid = b'{"persistenceEnabled":'
+        session.write_bytes(invalid)
+        def invalid_preferences(hwnd):
+            send(hwnd, 0x0111, 117)
+            require(text(u.GetDlgItem(hwnd, 817)) == catalog['readonly.startup.unreadable'], 'malformed preferences block overwriting')
+        run(loose, invalid_preferences)
+        require(session.read_bytes() == invalid, 'malformed existing settings remain recoverable')
+        for path, digest in {**originals, **sources}.items():
+            require(hashlib.sha256(path.read_bytes()).hexdigest() == digest, 'source documents remain unchanged')
+        report = {'scope': 'navigation', 'passed': evidence, 'locale': locale,
+                  'on_with_zero_targets': True, 'legacy_targets_not_resurrected': True,
+                  'disabled_registrations_retained': True, 'save_failure_rollback': True,
+                  'originals_unchanged': True, 'exe_sha256': hashlib.sha256(exe.read_bytes()).hexdigest(),
+                  'not_verified': ['physical keyboard focus', 'OS DPI switching', 'audible silence', 'power loss']}
+        (output / 'report.json').write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
+        print('PASS: navigation and next-startup selections; ON/zero, OFF retention, target removal, save failure and malformed input')
+        print(f'Evidence: {output}')
+        return
 
     if args.focus_only:
         class CopyData(ct.Structure):
@@ -348,8 +493,44 @@ def main():
             for control in (101, 103, 107, 810, 813, 817, 818):
                 require(visible(control), f'normal mode restores control {control}')
 
+            dpi = u.GetDpiForWindow(hwnd)
+            class MinMaxInfo(ct.Structure):
+                _fields_ = [(name, wt.POINT) for name in
+                            ('reserved', 'max_size', 'max_position', 'min_track', 'max_track')]
+            limits = MinMaxInfo()
+            send(hwnd, 0x0024, 0, ct.addressof(limits))
+            require(limits.min_track.x == (480 * dpi + 48) // 96, 'window tracking minimum is 480px at 100% scaling')
+            for logical_width in (480, 640, 930):
+                requested = (logical_width * dpi + 48) // 96
+                require(u.SetWindowPos(hwnd, None, 0, 0, requested, (620 * dpi + 48) // 96, 0x0016),
+                        'resize reader to a narrow or restored width')
+                outer = wt.RECT()
+                require(u.GetWindowRect(hwnd, ct.byref(outer)), 'resized reader bounds')
+                require(outer.right - outer.left == requested, 'minimum width allows requested 480px at 100% scaling')
+                require(visible(101) == (logical_width == 930), 'sidebar hides temporarily and returns on widening')
+                require(visible(103) and visible(810), 'narrow normal view retains tabs and search')
+                for tab_index, viewport in ((0, 104), (1, 1002)):
+                    send(hwnd, 0x8000 + 4, 401, tab_index)
+                    row = []
+                    for control in (103, viewport, 106, 107, 108, 124, 111, 112, 810, 811, 812, 813, 814, 815):
+                        if not visible(control):
+                            continue
+                        rect = wt.RECT()
+                        require(u.GetWindowRect(u.GetDlgItem(hwnd, control), ct.byref(rect)), 'narrow control bounds')
+                        require(outer.left <= rect.left < rect.right <= outer.right and
+                                outer.top <= rect.top < rect.bottom <= outer.bottom,
+                                f'control {control} fits at width {logical_width}')
+                        if control in (106, 107, 108, 124, 111, 112, 813, 814, 815):
+                            row.append(rect)
+                    row.sort(key=lambda rect: rect.left)
+                    require(all(left.right <= right.left for left, right in zip(row, row[1:])),
+                            'mode, range and zoom buttons do not overlap')
+                    if logical_width == 480:
+                        screenshot(hwnd, output / f'narrow-{tab_index}.png')
+            send(hwnd, 0x8000 + 4, 401, 0)
+
         run(md, focus_check)
-        print('PASS: full focus viewport, menu switching, temporary search and restored controls')
+        print('PASS: full focus viewport, menu switching, temporary search, narrow widths and restored controls')
         print(f'Evidence: {output}')
         return
 
@@ -990,8 +1171,7 @@ def main():
         send(hwnd, 0x0111, 116); require(u.IsWindowVisible(u.GetDlgItem(hwnd, 101)), 'sidebar restored')
         file_tree = u.GetDlgItem(hwnd, 101)
         root_item = send(file_tree, 0x110A, 0)
-        parent_item = send(file_tree, 0x110A, 4, root_item)
-        binary_item = send(file_tree, 0x110A, 1, parent_item)
+        binary_item = send(file_tree, 0x110A, 4, root_item)
         require(binary_item != 0, 'file tree contains binary input')
         send(file_tree, 0x110B, 9, binary_item)
         require(send(u.GetDlgItem(hwnd, 103), 0x1304) == 2, 'file tree opens a second tab')
@@ -1055,17 +1235,64 @@ def main():
 
     def folder_navigation(hwnd):
         tree = u.GetDlgItem(hwnd, 101)
-        root_item = send(tree, 0x110A, 0); parent_item = send(tree, 0x110A, 4, root_item)
-        directory_item = send(tree, 0x110A, 1, parent_item)
+        root_item = send(tree, 0x110A, 0)
+        directory_item = send(tree, 0x110A, 4, root_item)
         require(directory_item, 'navigation chapter exists')
         send(tree, 0x110B, 9, directory_item)
         require(u.IsWindowEnabled(u.GetDlgItem(hwnd, 819)), 'back enabled after navigating')
         send(hwnd, 0x0111, 819)
-        require(send(tree, 0x1105) == 4, 'back restores folder entries')
+        require(send(tree, 0x1105) == 3, 'back restores folder entries')
         send(hwnd, 0x0111, 821)
-        require(send(tree, 0x1105) > 4, 'up navigates to parent folder')
+        require(send(tree, 0x1105) > 3, 'up navigates to parent folder')
         require('Navigation' in text(u.GetDlgItem(hwnd, 104)), 'folder navigation retains open document')
         screenshot(hwnd, output / 'folder-navigation.png')
+
+    def folder_groups(hwnd):
+        tree = u.GetDlgItem(hwnd, 101)
+        def child(item): return send(tree, 0x110A, 4, item)
+        def sibling(item): return send(tree, 0x110A, 1, item)
+        def select(item):
+            require(item, 'expected folder/file item exists')
+            send(tree, 0x110B, 9, item)
+
+        root_item = send(tree, 0x110A, 0)
+        pdf_group = child(root_item)  # PDF, Notes, ordinary folder, loose file.
+        note_group = sibling(pdf_group)
+        ordinary = sibling(note_group)
+        loose = sibling(ordinary)
+        require(loose and not sibling(loose), 'storage folders appear once beside ordinary entries')
+        require(send(tree, 0x1105) == 8, 'groups include storage files and nested folder')
+        select(note_group)
+        require(send(tree, 0x110A, 0) == root_item, 'group selection does not navigate')
+        pdf_file = child(pdf_group)
+        note_subfolder = child(note_group)
+        note_file = sibling(note_subfolder)
+        select(pdf_file)
+        require('PDF storage' in text(u.GetDlgItem(hwnd, 104)), 'PDF group opens its actual path')
+        select(note_file)
+        require('Note storage' in text(u.GetDlgItem(hwnd, 104)), 'same filename opens separately from note group')
+        send(tree, 0x1102, 1, pdf_group)  # TVE_COLLAPSE
+        send(hwnd, 0x8000 + 4, 401, 1)  # Switch to the PDF-group file tab.
+        require(send(tree, 0x110A, 9) == pdf_file, 'tab selection finds a file in a collapsed group')
+        screenshot(hwnd, output / 'folder-groups.png')
+        select(note_subfolder)
+        require(send(tree, 0x1105) == 2, 'nested folder remains navigable')
+        send(hwnd, 0x0111, 819)
+        require(send(tree, 0x1105) == 8, 'back restores both storage groups')
+        root_item = send(tree, 0x110A, 0)
+        ordinary = sibling(sibling(child(root_item)))
+        select(ordinary)
+        require(send(tree, 0x1105) == 1, 'ordinary empty folder retains normal navigation')
+
+    def single_folder_group(hwnd):
+        tree = u.GetDlgItem(hwnd, 101)
+        root_item = send(tree, 0x110A, 0)
+        group = send(tree, 0x110A, 4, root_item)
+        loose = send(tree, 0x110A, 1, group)
+        require(group and loose and not send(tree, 0x110A, 1, loose), 'single storage group and loose file')
+        require(send(tree, 0x1105) == 3, 'empty storage group remains visible without phantom entries')
+        send(tree, 0x110B, 9, group)
+        require(send(tree, 0x110A, 0) == root_item, 'empty group selection keeps the current folder')
 
     def drag_transfer(hwnd):
         startup = subprocess.STARTUPINFO(); startup.dwFlags = subprocess.STARTF_USESHOWWINDOW; startup.wShowWindow = 4
@@ -1159,8 +1386,7 @@ def main():
         reload_file.write_text(changed.replace('\n', reload_newline), encoding='utf-8', newline='')
         originals[reload_file] = hashlib.sha256(reload_file.read_bytes()).hexdigest()
         root_item = send(tree, 0x110A, 0)
-        parent_item = send(tree, 0x110A, 4, root_item)
-        file_item = send(tree, 0x110A, 1, parent_item)
+        file_item = send(tree, 0x110A, 4, root_item)
         require(file_item, 'reload fixture in navigation tree')
         send(tree, 0x110B, 9, root_item)
         pid = wt.DWORD(); u.GetWindowThreadProcessId(hwnd, ct.byref(pid))
@@ -1280,8 +1506,8 @@ def main():
         # Use scalar tree messages; WM_USER pointer payloads are not marshalled
         # across processes and must never point into this Python process.
         names = sorted(p.name for p in view_fixtures.iterdir())
-        require(len(names) == 4 and send(tree, 0x1105) == 6, 'fixed isolated file-list inputs')
-        for _ in range(names.index(path.name) + 1):
+        require(len(names) == 4 and send(tree, 0x1105) == 5, 'fixed isolated file-list inputs')
+        for _ in range(names.index(path.name)):
             item = send(tree, 0x110A, 1, item)
         require(item, 'expected fixture exists in native file list')
         send(tree, 0x110B, 9, item)
@@ -1722,6 +1948,25 @@ def main():
     chapter = navigation / 'chapter'; chapter.mkdir(parents=True)
     navigation_file = navigation / 'nav.md'; navigation_file.write_text('# Navigation\n', encoding='utf-8')
     originals[navigation_file] = hashlib.sha256(navigation_file.read_bytes()).hexdigest()
+    grouped = output / 'grouped'
+    for folder in ('PDF', 'note/nested', 'ordinary'):
+        (grouped / folder).mkdir(parents=True)
+    grouped_files = {
+        grouped / 'loose.md': '# Loose document\n',
+        grouped / 'PDF/same.md': '# PDF storage\n',
+        grouped / 'note/same.md': '# Note storage\n',
+        grouped / 'note/nested/inside.md': '# Nested note\n',
+    }
+    for path, source in grouped_files.items():
+        path.write_text(source, encoding='utf-8')
+        originals[path] = hashlib.sha256(path.read_bytes()).hexdigest()
+    run(grouped / 'loose.md', folder_groups)
+    for kind in ('pdf', 'note'):
+        single = output / f'only-{kind}'
+        (single / kind).mkdir(parents=True)
+        loose = single / 'loose.md'; loose.write_text('# Single group\n', encoding='utf-8')
+        originals[loose] = hashlib.sha256(loose.read_bytes()).hexdigest()
+        run(loose, single_folder_group)
     large.write_text('Setext heading\n===\n\n' + ''.join(f'## Section {i}\n\nBody {i} 日本語と英字。\n\n' for i in range(400)), encoding='utf-8')
     originals[large] = hashlib.sha256(large.read_bytes()).hexdigest()
     def outline_many(hwnd):

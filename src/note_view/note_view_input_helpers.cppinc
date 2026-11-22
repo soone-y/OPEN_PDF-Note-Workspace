@@ -702,9 +702,42 @@ static bool ShouldRefreshNoteLineSpacingForPresentationSurface(UINT msg) {
     }
 }
 
+static bool ShouldUpdateNativeNoteBottomSpaceAfterInput(UINT msg) {
+    switch (msg) {
+    case WM_SETTEXT:
+    case WM_SETFONT:
+    case WM_SIZE:
+    case WM_CHAR:
+    case WM_KEYDOWN:
+    case WM_PASTE:
+    case WM_CUT:
+    case WM_UNDO:
+    case EM_REDO:
+    case WM_CLEAR:
+    case WM_IME_ENDCOMPOSITION:
+    case WM_LBUTTONDOWN:
+    case WM_LBUTTONUP:
+    case WM_LBUTTONDBLCLK:
+        return true;
+    default:
+        return false;
+    }
+}
+
 static void SyncRenderDrivenNoteInputUi(HWND hWnd, UINT msg) {
     if (!hWnd) return;
     const bool focused = GetFocus() == hWnd;
+    if (NoteUsesNativeBottomSpace() && ShouldUpdateNativeNoteBottomSpaceAfterInput(msg) &&
+        !IsNoteImeComposing() && !IsNoteImeCanonicalChangeDeferred(hWnd)) {
+        UpdateNativeNoteBottomSpace(hWnd);
+        if (focused && msg != WM_SETTEXT && msg != WM_SIZE && msg != WM_SETFONT) {
+            RECT client{};
+            if (GetClientRect(hWnd, &client)) {
+                GetViewContext(hWnd).nativeBottomSpace.RevealCaret(hWnd,
+                    NoteBottomSpacePx(hWnd, client.bottom - client.top), GetActiveNoteFont());
+            }
+        }
+    }
     const bool refreshFinalFrame = ShouldRefreshFinalNoteRenderAfterInput(msg, 0);
     // WM_SIZE reaches this function after RichEdit's default window procedure.
     // Its final geometry must be published even while focus is in another

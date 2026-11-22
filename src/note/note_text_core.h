@@ -75,6 +75,8 @@ public:
     [[nodiscard]] bool SetClroAsciiOnly(bool value) noexcept;
     bool quote_lazy_continuation() const noexcept { return metadata_.quote_lazy_continuation; }
     [[nodiscard]] bool SetQuoteLazyContinuation(bool value) noexcept;
+    bool clro_list_implicit_continuation() const noexcept { return metadata_.clro_list_implicit_continuation; }
+    [[nodiscard]] bool SetClroListImplicitContinuation(bool value) noexcept;
 
 private:
     friend class LocalNoteKernel;

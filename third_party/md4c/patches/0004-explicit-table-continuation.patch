@@ -1,0 +1,43 @@
+diff --git a/src/md4c.c b/src/md4c.c
+--- a/src/md4c.c
++++ b/src/md4c.c
+@@ -6658,6 +6658,17 @@
+     return false;
+ }
+ 
++/* Scan only this row, never the remainder of the document. */
++static int
++md_line_has_pipe(MD_CTX* ctx, OFF off)
++{
++    for(; off < ctx->size && !ISNEWLINE(off); off++) {
++        if(CH(off) == _T('|'))
++            return true;
++    }
++    return false;
++}
++
+ static unsigned
+ md_line_indentation(MD_CTX* ctx, unsigned total_indent, OFF beg, OFF* p_end)
+ {
+@@ -6990,7 +7001,9 @@
+         }
+ 
+         /* Check whether we are table continuation. */
+-        if(pivot_line->type == MD_LINE_TABLE  &&  n_parents == ctx->n_containers) {
++        if(pivot_line->type == MD_LINE_TABLE  &&  n_parents == ctx->n_containers &&
++           (!(ctx->parser.flags & MD_FLAG_REQUIRETABLEPIPES) || md_line_has_pipe(ctx, off)))
++        {
+             line->type = MD_LINE_TABLE;
+             break;
+         }
+diff --git a/src/md4c.h b/src/md4c.h
+--- a/src/md4c.h
++++ b/src/md4c.h
+@@ -392,6 +392,7 @@
+ #define MD_FLAG_NOHTMLBLOCKS                0x20     /* Disable raw HTML blocks. */
+ #define MD_FLAG_NOHTMLSPANS                 0x40     /* Disable raw HTML (inline). */
+ #define MD_FLAG_TABLES                      0x100    /* Enable tables extension. */
++#define MD_FLAG_REQUIRETABLEPIPES           0x8000000 /* App extension: a table body row must contain a literal pipe. */
+ #define MD_FLAG_STRIKETHROUGH               0x200    /* Enable strikethrough extension. */
+ #define MD_FLAG_PERMISSIVEWWWAUTOLINKS      0x400    /* Enable WWW autolinks (even without any scheme prefix, if they begin with 'www.') */
+ #define MD_FLAG_TASKLISTS                   0x800    /* Enable task list extension. */

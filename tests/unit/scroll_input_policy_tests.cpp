@@ -2,6 +2,7 @@
 #include "ui/listbox_scroll.h"
 #include "ui/toolbar_scroll.h"
 #include "ui/combobox_guard.h"
+#include "pdf_view/text_edit_view_follow.h"
 #include <cstdlib>
 #include <iostream>
 
@@ -163,6 +164,21 @@ void CheckNativeLists() {
 }
 
 int main() {
+    pdf_text_edit::ViewFollow follow;
+    Expect(!follow.Following(0), "a new view cannot inherit edit following");
+    follow.Input(500);
+    Expect(follow.Following(500), "explicit text input enables following");
+    Expect(follow.Following(10499), "following remains active before ten seconds");
+    Expect(!follow.Following(10500), "ten seconds of inactivity suspends following");
+    follow.Input(11000);
+    Expect(follow.Following(11001), "text input resumes following after idle");
+    follow.Suspend();
+    Expect(!follow.Following(11001), "a viewing gesture immediately suspends following");
+    Expect(!follow.Following(11002), "a later layout cannot resume following");
+    follow.Input(12000);
+    Expect(follow.Following(12001), "text input resumes following after navigation");
+    follow.Reset();
+    Expect(!follow.Following(12002), "closing an edit clears following state");
     using scroll_input::WheelInput;
     using scroll_input::PixelRemainder;
     WheelInput wheel;

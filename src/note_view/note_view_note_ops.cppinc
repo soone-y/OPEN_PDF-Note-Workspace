@@ -144,6 +144,7 @@ struct NoteUndoEntry {
     DWORD editorEditEnd = 0;
     size_t expectedWindowTextLength = 0;
     bool hasExpectedWindowTextLength = false;
+    bool forceHistoryBoundary = false;
 };
 
 struct ExpectedNoteTextEdit {
@@ -678,7 +679,8 @@ static void RecordCurrentNoteTextEditForUndoImpl(HWND hEdit) {
             g_noteUndoWindowTextLengthReady = true;
             const note::NoteKernelApplyResult apply = ApplyNoteDirtyGraphForUserTextEdit(
                 edit, entry.beforeSelection, entry.afterSelection,
-                ClassifyNoteHistoryOperation(edit, entry.beforeSelection, entry.afterSelection));
+                entry.forceHistoryBoundary ? note::NoteHistoryOperationKind::Replace :
+                    ClassifyNoteHistoryOperation(edit, entry.beforeSelection, entry.afterSelection));
             note::LocalNoteKernel* kernel = CurrentNoteKernel();
             if (apply.text_result != note::NoteTextApplyResult::Applied || !kernel) {
                 ResetNoteEditHistorySnapshot(hEdit);
@@ -748,7 +750,8 @@ static void RecordCurrentNoteTextEditForUndoImpl(HWND hEdit) {
             UpdateNoteUndoWindowTextLengthFromEditor(hEdit);
             const note::NoteKernelApplyResult apply = ApplyNoteDirtyGraphForUserTextEdit(
                 *observedEdit, entry.beforeSelection, *after,
-                ClassifyNoteHistoryOperation(*observedEdit, entry.beforeSelection, *after));
+                entry.forceHistoryBoundary ? note::NoteHistoryOperationKind::Replace :
+                    ClassifyNoteHistoryOperation(*observedEdit, entry.beforeSelection, *after));
             note::LocalNoteKernel* kernel = CurrentNoteKernel();
             if (apply.text_result != note::NoteTextApplyResult::Applied || !kernel ||
                 !kernel->text_core().MatchesRaw(currentText)) {
@@ -764,7 +767,8 @@ static void RecordCurrentNoteTextEditForUndoImpl(HWND hEdit) {
         UpdateNoteUndoWindowTextLengthFromEditor(hEdit);
         const note::NoteKernelApplyResult apply = ApplyNoteDirtyGraphForUserTextEdit(
             edit, entry.beforeSelection, entry.afterSelection,
-            ClassifyNoteHistoryOperation(edit, entry.beforeSelection, entry.afterSelection));
+            entry.forceHistoryBoundary ? note::NoteHistoryOperationKind::Replace :
+                ClassifyNoteHistoryOperation(edit, entry.beforeSelection, entry.afterSelection));
         note::LocalNoteKernel* kernel = CurrentNoteKernel();
         if (apply.text_result != note::NoteTextApplyResult::Applied || !kernel ||
             !kernel->text_core().MatchesRaw(currentText)) {
@@ -1266,7 +1270,7 @@ static bool TryHandleAutoBulletEnter(HWND hWnd) {
     const size_t caret = static_cast<size_t>(std::min(selStart, selEnd));
 
     const std::wstring text = GetEditTextForIndexing(hWnd);
-    const note::AutoBulletLineContext ctx = note::AnalyzeAutoBulletLine(text, caret, ShouldPromptForPdfPassword());
+    const note::AutoBulletLineContext ctx = note::AnalyzeAutoBulletLine(text, caret, true);
     if (!ctx.valid) return false;
 
     if (selStart == selEnd && caret == ctx.lineStart && ctx.hasContent) {
@@ -1350,7 +1354,7 @@ static bool TryHandleAutoBulletPrefixDelete(HWND hWnd, WPARAM vkey) {
     }
 
     const std::wstring text = GetEditTextForIndexing(hWnd);
-    const note::AutoBulletLineContext ctx = note::AnalyzeAutoBulletLine(text, caret, ShouldPromptForPdfPassword());
+    const note::AutoBulletLineContext ctx = note::AnalyzeAutoBulletLine(text, caret, true);
     if (!ctx.valid || ctx.hasContent || !ctx.structuralPrefix) return false;
 
     const bool shouldDeletePrefix =
@@ -1428,7 +1432,8 @@ static bool ReplaceNoteSelectionAndSetSelection(HWND hWnd,
                                                 DWORD selEnd,
                                                 const std::wstring& replacement,
                                                 size_t newSelStart,
-                                                size_t newSelEnd) {
+                                                size_t newSelEnd,
+                                                bool forceHistoryBoundary = false) {
     if (!hWnd) return false;
     ReleaseNoteChangeSuppressionForUserEdit();
     SendMessageW(hWnd, EM_SETSEL, selStart, selEnd);
@@ -1436,6 +1441,8 @@ static bool ReplaceNoteSelectionAndSetSelection(HWND hWnd,
     DWORD nextStart = static_cast<DWORD>(std::min<size_t>(replacement.size(), newSelStart)) + base;
     DWORD nextEnd = static_cast<DWORD>(std::min<size_t>(replacement.size(), newSelEnd)) + base;
     RegisterExpectedCurrentNoteSelectionReplacement(hWnd, replacement, nextStart, nextEnd);
+    if (forceHistoryBoundary && g_expectedNoteTextEdit.active && g_expectedNoteTextEdit.hEdit == hWnd)
+        g_expectedNoteTextEdit.entry.forceHistoryBoundary = true;
     SendMessageW(hWnd, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(replacement.c_str()));
     SendMessageW(hWnd, EM_SETSEL, nextStart, nextEnd);
     FinalizeImmediateNoteEdit(hWnd);
@@ -1516,6 +1523,19 @@ static bool SurroundNoteSelectionWithMarkdown(HWND hWnd,
     const std::wstring text = GetEditTextForIndexing(hWnd);
     size_t safeStart = std::min<size_t>(selStart, text.size());
     size_t safeEnd = std::min<size_t>(selEnd, text.size());
+
+    if (prefix == L"**" && suffix == L"**") {
+        if (g_noteImeComposing || IsNoteImeCanonicalChangeDeferred(hWnd)) return true;
+        // The pure proposal uses the same index-compatible UTF-16 source as
+        // EM_GETSEL. Apply it through the existing one-replacement history path.
+        const auto model = note::MakeNoteTextModel(CurrentNoteTextMetadata(), text, 1);
+        const auto proposal = note::BuildMarkdownBoldToggle(model, {{safeStart}, {safeEnd}});
+        if (!proposal) return true;
+        return ReplaceNoteSelectionAndSetSelection(hWnd,
+            static_cast<DWORD>(proposal->edit.start.value),
+            static_cast<DWORD>(proposal->edit.start.value + proposal->edit.deleted_len),
+            proposal->edit.inserted_text, proposal->selection.start.value, proposal->selection.end.value, true);
+    }
 
     // Asterisk-based Markdown emphasis is line-local.  A single pair of
     // delimiters around a multi-line selection is not valid emphasis, so wrap
@@ -2781,11 +2801,7 @@ bool BindDeferredNoteEditorToPath(const std::wstring& path, std::wstring* outErr
     SynchronizeCurrentNoteTextCore(GetEditTextForIndexing(g_hNoteEdit));
     const auto target = note::ResolveRuntimeNoteIdentityPath(path, outError);
     if (!target.note_id.valid() || (outError && !outError->empty())) return false;
-    note::NoteMetadata metadata;
-    metadata.clro_ascii_only = g_config.clroAsciiOnly;
-    metadata.quote_lazy_continuation = g_config.noteQuoteLazyContinuation;
-    metadata.file_name = std::filesystem::path(path).filename().wstring();
-    metadata.title = note::DeriveTitleFromFileName(metadata.file_name);
+    auto metadata = BuildNoteTextMetadata(g_config, std::filesystem::path(path).filename().wstring());
     const auto rebound = g_noteIdentityRegistry.RebindView(before.view_id, target.note_id);
     if (!rebound) return false;
     // Moving the existing kernel retains its
@@ -2958,11 +2974,7 @@ static std::optional<note::SemanticLinkTargetResolution> FindNoteTargetForLinkId
         if (!sourceKey.empty() && candidateKey == sourceKey) {
             localExclude = sourcePos;
         }
-        note::NoteMetadata metadata;
-        metadata.clro_ascii_only = g_config.clroAsciiOnly;
-        metadata.quote_lazy_continuation = g_config.noteQuoteLazyContinuation;
-        metadata.file_name = std::filesystem::path(snapshot->targetPath).filename().wstring();
-        metadata.title = note::DeriveTitleFromFileName(metadata.file_name);
+        auto metadata = BuildNoteTextMetadata(g_config, std::filesystem::path(snapshot->targetPath).filename().wstring());
         const auto candidateIndex =
             note::RuntimeNoteWorkspaceService().ResolveIndex(
                 snapshot->identity,
@@ -4612,7 +4624,9 @@ enum class BottomPaneCommandKind {
     ToggleAnnotations,
     ToggleRender,
     ToggleWrap,
+    ToggleClroAsciiOnly,
     ToggleQuoteLazyContinuation,
+    ToggleListImplicitContinuation,
     ToggleVimControls,
     ToggleCaretLineRawText,
     ToggleClickInsert,
@@ -4660,6 +4674,10 @@ static BottomPaneCommand BuildBottomPaneCommandForLine(const BottomPaneProjectio
         command.kind = BottomPaneCommandKind::ToggleAnnotations;
     } else if (lineIdx == layout.renderIdx && CurrentNoteSupportsRenderOverlay()) {
         command.kind = BottomPaneCommandKind::ToggleRender;
+    } else if (layout.clroAsciiOnlyIdx >= 0 && lineIdx == layout.clroAsciiOnlyIdx) {
+        command.kind = BottomPaneCommandKind::ToggleClroAsciiOnly;
+    } else if (layout.listImplicitContinuationIdx >= 0 && lineIdx == layout.listImplicitContinuationIdx) {
+        command.kind = BottomPaneCommandKind::ToggleListImplicitContinuation;
     } else if (layout.quoteLazyContinuationIdx >= 0 && lineIdx == layout.quoteLazyContinuationIdx) {
         command.kind = BottomPaneCommandKind::ToggleQuoteLazyContinuation;
     } else if (layout.wrapIdx >= 0 && lineIdx == layout.wrapIdx) {

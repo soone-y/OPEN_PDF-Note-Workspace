@@ -1,0 +1,215 @@
+// Isolated PDF automation fixture only. Exercise the real input and deferred
+// render paths without saving the document, annotations or preferences.
+static bool ProbePdfTextEditViewFollow(HWND hwnd, const wchar_t* flow, int& cases,
+                                     std::wstring* trace, std::wstring* outError) {
+    std::array<BYTE, 256> savedKeys{};
+    if (!GetKeyboardState(savedKeys.data())) return false;
+    const HWND previousFocus = GetFocus();
+    struct RestoreEdit {
+        HWND hwnd, focus;
+        std::array<BYTE, 256> keys;
+        ~RestoreEdit() {
+            CommitTextEditing(hwnd, false);
+            SetKeyboardState(keys.data());
+            if (focus && IsWindow(focus)) SetFocus(focus);
+        }
+    } restore{hwnd, previousFocus, savedKeys};
+    auto keys = savedKeys;
+    keys[VK_CONTROL] = keys[VK_LCONTROL] = keys[VK_RCONTROL] = 0;
+    keys[VK_MENU] = keys[VK_LMENU] = keys[VK_RMENU] = 0;
+    keys[VK_SHIFT] = keys[VK_LSHIFT] = keys[VK_RSHIFT] = 0;
+    if (!SetKeyboardState(keys.data())) return false;
+    bool valid = true;
+    const auto check = [&](bool ok, const wchar_t* condition, const wchar_t* name) {
+        ++cases;
+        if (!ok) {
+            valid = false;
+            if (trace) *trace += L"pdf_text_edit_follow:failed flow=" + std::wstring(flow) +
+                                 L" condition=" + condition + L" case=" + name + L"\n";
+        }
+    };
+    for (const wchar_t* condition : {L"idle", L"scroll", L"zoom"}) {
+        CommitTextEditing(hwnd, false);
+        ResetEditOriginal();
+        BeginTextEdit(hwnd, 0, 80, g_pdf.pages[0].heightPt - 80, 80, 30,
+                      L"Follow", g_textFontName, 12);
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        // Place the view at the opposite end from the editor, preserving focus.
+        g_pdf.scrollX = PdfPtToDocX(0, 80) < g_pdf.contentWidth * 0.5 ? MaxScrollX(rc.right) : 0;
+        g_pdf.scrollY = PdfPtToDocY(0, g_pdf.editY1) < g_pdf.contentHeight * 0.5 ? MaxScrollY(rc.bottom) : 0;
+        ClampPdfScroll(rc.bottom, rc.right, false);
+        POINT screen{rc.right / 2, rc.bottom / 2};
+        if (!ClientToScreen(hwnd, &screen)) return false;
+        const LPARAM point = MAKELPARAM(screen.x, screen.y);
+        if (std::wstring_view(condition) == L"idle") {
+            // Deterministic boundary test; no wall-clock sleep or test timer.
+            g_pdfTextEditViewFollow.Input(GetTickCount64() - 10000);
+        } else if (std::wstring_view(condition) == L"scroll") {
+            SendMessageW(hwnd, WM_MOUSEHWHEEL, MAKEWPARAM(0, WHEEL_DELTA), point);
+        } else {
+            SendMessageW(hwnd, WM_MOUSEWHEEL, MAKEWPARAM(MK_CONTROL, WHEEL_DELTA), point);
+            SendMessageW(hwnd, WM_TIMER, kZoomTimerId, 0);
+        }
+        const double x = g_pdf.scrollX, y = g_pdf.scrollY;
+        const auto text = g_pdf.editText;
+        const double font = g_pdf.editFontPt;
+        const bool layoutMoved = EnsureEditingTextBoxVisible(hwnd, L"probe_layout", TextBoxRevealIntent::Layout);
+        check(!layoutMoved && x == g_pdf.scrollX && y == g_pdf.scrollY &&
+              !g_pdfTextEditViewFollow.Following(GetTickCount64()), condition, L"passive_layout");
+        keys[VK_CONTROL] = 0x80;
+        if (!SetKeyboardState(keys.data())) return false;
+        const double oldScale = g_pdf.scale;
+        SendMessageW(hwnd, WM_KEYDOWN, VK_ADD, 1);
+        check(g_pdf.scale > oldScale && g_pdf.editFontPt == font && g_pdf.editText == text &&
+              g_pdf.editingText && GetFocus() == hwnd, condition, L"ctrl_plus_pdf_zoom");
+        const double zx = g_pdf.scrollX, zy = g_pdf.scrollY;
+        SendMessageW(hwnd, WM_TIMER, kZoomTimerId, 0);
+        check(zx == g_pdf.scrollX && zy == g_pdf.scrollY, condition, L"zoom_settle");
+        SendMessageW(hwnd, WM_KEYDOWN, VK_SUBTRACT, 1);
+        SendMessageW(hwnd, WM_TIMER, kZoomTimerId, 0);
+        keys[VK_CONTROL] = 0;
+        if (!SetKeyboardState(keys.data())) return false;
+        // Tab is a real insertion path independent of the installed IME's open
+        // status. It must preserve the old text and reveal the resumed editor.
+        SendMessageW(hwnd, WM_CHAR, L'\t', 1);
+        RECT box{};
+        GetClientRect(hwnd, &rc);
+        check(g_pdf.editText == text + L"    " && GetEditingTextBoxClientRect(&box) &&
+              box.left >= 0 && box.top >= 0 && box.right <= rc.right && box.bottom <= rc.bottom &&
+              g_pdfTextEditViewFollow.Following(GetTickCount64()), condition, L"input_resumes");
+        const double resumedScale = g_pdf.scale;
+        keys[VK_CONTROL] = 0x80;
+        if (!SetKeyboardState(keys.data())) return false;
+        SendMessageW(hwnd, WM_KEYDOWN, VK_ADD, 1);
+        check(g_pdf.scale == resumedScale && g_pdf.editFontPt > font, condition, L"active_font_shortcut");
+        keys[VK_CONTROL] = 0;
+        if (!SetKeyboardState(keys.data())) return false;
+    }
+    if (!valid && outError) *outError = L"Paused PDF text editing moved the view or did not resume on input.";
+    return valid;
+}
+
+bool RunPdfScrollStabilityProbe(HWND pdfWnd, std::wstring* trace, std::wstring* outError) {
+    if (!pdfWnd || g_pdf.pages.empty() || g_pdf.editingText || g_pdf.panning) {
+        if (outError) *outError = L"Scroll stability requires an idle PDF fixture.";
+        return false;
+    }
+    struct RestoreView {
+        HWND hwnd;
+        std::wstring flow = g_config.pdfFlowMode;
+        bool single = g_config.pdfSinglePageMode;
+        double scale = g_pdf.scale, x = g_pdf.scrollX, y = g_pdf.scrollY;
+        bool invertX = g_config.mouseWheelInvertHorizontal;
+        bool invertY = g_config.mouseWheelInvertVertical;
+        ToolMode tool = g_toolMode;
+        ~RestoreView() {
+            StopPdfZoomAnimation(hwnd);
+            CancelPdfScrollbarTrack(hwnd);
+            g_pdfWheelInput.Reset();
+            g_config.pdfFlowMode = flow;
+            g_config.pdfSinglePageMode = single;
+            g_config.mouseWheelInvertHorizontal = invertX;
+            g_config.mouseWheelInvertVertical = invertY;
+            g_toolMode = tool;
+            g_pdf.scale = scale;
+            UpdatePageLayout(hwnd);
+            g_pdf.scrollX = x;
+            g_pdf.scrollY = y;
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            ClampPdfScroll(rc.bottom, rc.right, false);
+            g_pdf.renderScale = ComputePdfRenderScale(scale);
+            InvalidatePdfRenderGeneration();
+            UpdatePdfVirtualScrollCaches(hwnd);
+        }
+    } restore{pdfWnd};
+    g_config.pdfSinglePageMode = false;
+    g_config.mouseWheelInvertHorizontal = g_config.mouseWheelInvertVertical = false;
+    g_toolMode = ToolMode::Select;
+    bool valid = true;
+    int cases = 0;
+    int editCases = 0;
+    const auto check = [&](bool ok, const wchar_t* flow, const wchar_t* name) {
+        ++cases;
+        if (!ok) {
+            valid = false;
+            if (trace) *trace += L"pdf_scroll_stability:failed flow=" + std::wstring(flow) +
+                                 L" case=" + name + L"\n";
+        }
+    };
+    for (const wchar_t* flow : {L"v_ttb", L"v_btu", L"h_ltr", L"h_rtl"}) {
+        g_config.pdfFlowMode = flow;
+        {
+            PdfInitialViewportUpdateGuard guard;
+            g_pdf.scale = 4.0;
+            // Scrollbar visibility changes the native client dimensions.
+            for (int pass = 0; pass < 3; ++pass) UpdatePageLayout(pdfWnd);
+        }
+        RECT rc{};
+        GetClientRect(pdfWnd, &rc);
+        if (rc.right <= 0 || rc.bottom <= 0 ||
+            MaxScrollX(rc.right) < 200.0 || MaxScrollY(rc.bottom) < 200.0) {
+            if (outError) *outError = L"Scroll fixture must overflow both viewport axes.";
+            return false;
+        }
+        const auto center = [&]() {
+            g_pdf.scrollX = MaxScrollX(rc.right) * 0.5;
+            g_pdf.scrollY = MaxScrollY(rc.bottom) * 0.5;
+            ClampPdfScroll(rc.bottom, rc.right, false);
+        };
+        POINT screen{rc.right / 2, rc.bottom / 2};
+        if (!ClientToScreen(pdfWnd, &screen)) return false;
+        const LPARAM point = MAKELPARAM(screen.x, screen.y);
+        // A later user scroll owns the viewport even when the zoom's expensive
+        // raster pass is still pending. Check both axes and a redundant timer.
+        for (UINT message : {WM_MOUSEWHEEL, WM_MOUSEHWHEEL}) {
+            center();
+            SetPdfScale(pdfWnd, g_pdf.scale * 1.05, POINT{rc.right / 2, rc.bottom / 2});
+            const double beforeX = g_pdf.scrollX, beforeY = g_pdf.scrollY;
+            g_pdfWheelInput.Reset();
+            SendMessageW(pdfWnd, message, MAKEWPARAM(0, WHEEL_DELTA), point);
+            const double x = g_pdf.scrollX, y = g_pdf.scrollY;
+            SendMessageW(pdfWnd, WM_TIMER, kZoomTimerId, 0);
+            SendMessageW(pdfWnd, WM_TIMER, kZoomTimerId, 0);
+            check((std::abs(x - beforeX) > 1.0 || std::abs(y - beforeY) > 1.0) &&
+                  std::abs(g_pdf.scrollX - x) < 0.01 && std::abs(g_pdf.scrollY - y) < 0.01 &&
+                  !g_zoomAnimating, flow, message == WM_MOUSEHWHEEL ? L"zoom_then_horizontal" : L"zoom_then_wheel");
+        }
+        for (int bar : {SB_HORZ, SB_VERT}) {
+            center();
+            double& pos = bar == SB_HORZ ? g_pdf.scrollX : g_pdf.scrollY;
+            const double maximum = bar == SB_HORZ ? MaxScrollX(rc.right) : MaxScrollY(rc.bottom);
+            bool aligned = true;
+            for (double edge : {-40.0, maximum + 40.0}) {
+                pos = edge;
+                ClampPdfScroll(rc.bottom, rc.right, false);
+                SCROLLINFO si{};
+                si.cbSize = sizeof(si);
+                si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+                aligned = GetScrollInfo(pdfWnd, bar, &si) && aligned &&
+                    std::abs(pos - edge) < 0.01 && std::abs(pos - si.nPos) <= 0.5 &&
+                    si.nMin <= pos && si.nMax - static_cast<int>(si.nPage) + 1 >= pos;
+            }
+            check(aligned, flow, bar == SB_HORZ ? L"horizontal_bar_edges" : L"vertical_bar_edges");
+        }
+        // A new wheel gesture must stop the older scrollbar tracking owner.
+        for (UINT message : {WM_MOUSEWHEEL, WM_MOUSEHWHEEL}) {
+            center();
+            g_pdfScrollbarTrack.active = true;
+            g_pdfScrollbarTrack.bar = SB_HORZ;
+            g_pdfWheelInput.Reset();
+            SendMessageW(pdfWnd, message, MAKEWPARAM(0, WHEEL_DELTA), point);
+            check(!g_pdfScrollbarTrack.active, flow,
+                  message == WM_MOUSEHWHEEL ? L"horizontal_takes_over" : L"wheel_takes_over");
+            CancelPdfScrollbarTrack(pdfWnd);
+        }
+        if (!ProbePdfTextEditViewFollow(pdfWnd, flow, editCases, trace, outError)) valid = false;
+    }
+    if (trace) *trace += L"pdf_scroll_stability:completed cases=" + std::to_wstring(cases) +
+                         L" valid=" + std::to_wstring(valid) + L"\n";
+    if (trace) *trace += L"pdf_text_edit_follow:completed cases=" + std::to_wstring(editCases) +
+                         L" valid=" + std::to_wstring(valid) + L"\n";
+    if (!valid && outError) *outError = L"PDF scroll position was reset, mismatched its scrollbar or retained an older input owner.";
+    return valid;
+}

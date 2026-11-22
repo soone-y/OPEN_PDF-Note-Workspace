@@ -67,7 +67,7 @@ struct NoteRenderRuntimeObservation {
 // layout. Returns false when its render control is not visible.
 [[nodiscard]] bool GetNoteStatusAssistRenderControlRect(RECT* outRect);
 enum class NoteStatusAssistControl {
-    Rendering, Vim, NormalCaretRaw, ClickInsert, CurrentDisplay, InlineMathVerticalAlignment, BottomSpace, QuoteLazyContinuation
+    Rendering, Vim, NormalCaretRaw, ClickInsert, CurrentDisplay, InlineMathVerticalAlignment, BottomSpace, QuoteLazyContinuation, ListImplicitContinuation, ClroAsciiOnly
 };
 [[nodiscard]] bool GetNoteStatusAssistControlRect(NoteStatusAssistControl control, RECT* outRect);
 

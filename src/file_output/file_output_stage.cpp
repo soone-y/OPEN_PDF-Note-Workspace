@@ -4455,7 +4455,7 @@ bool IntegrateStagedNoteAndAnnotations(HWND owner) {
   return ok;
 }
 
-bool RunSaveAndIntegrateTransaction(HWND owner) {
+[[nodiscard]] static bool RunSaveAndIntegrateTransactionImpl(HWND owner, bool explicitSave) {
   const ULONGLONG startTick = preview_trace::TickNow();
   std::wstring workspaceLockError;
   WorkspaceOperationLock workspaceLock(std::filesystem::path(g_workspaceRoot), &workspaceLockError);
@@ -4490,7 +4490,7 @@ bool RunSaveAndIntegrateTransaction(HWND owner) {
   for (;;) {
     ++iteration;
     PumpSaveScrollMessages(owner);
-    if (!StageDeferredCurrentNoteForExplicitSave(owner)) {
+    if (explicitSave && !StageDeferredCurrentNoteForExplicitSave(owner)) {
       ok = false;
       TraceSaveFailure(L"SaveTransaction",
                        L"deferred_note_explicit_stage_failed",
@@ -4517,6 +4517,16 @@ bool RunSaveAndIntegrateTransaction(HWND owner) {
                             std::to_wstring(iteration) + L" elapsed_ms=" +
                             preview_trace::ElapsedMs(startTick));
   return ok;
+}
+
+bool RunSaveAndIntegrateTransaction(HWND owner) {
+  return RunSaveAndIntegrateTransactionImpl(owner, true);
+}
+
+bool RunSaveAndIntegrateTransactionForExit(HWND owner) {
+  // IntegrateStagedNoteAndAnnotations still calls SaveNoteIfDirty, including
+  // synchronization and path allocation for a real deferred edit.
+  return RunSaveAndIntegrateTransactionImpl(owner, false);
 }
 
 SaveTransactionStartResult

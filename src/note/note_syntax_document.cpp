@@ -136,6 +136,7 @@ struct RelativeSpan {
 struct StoredBlock {
     BlockNode value;
     RelativeSpan span{};
+    std::optional<RelativeSpan> code_fence_span;
 };
 
 struct StoredInline {
@@ -182,6 +183,12 @@ struct StoredNode {
     case NoteSyntaxDocumentNodeKind::Block: {
         StoredBlock value;
         value.value = *static_cast<const BlockNode*>(source);
+        if (value.value.code_fence_span.end > value.value.code_fence_span.start) {
+            RelativeSpan fence;
+            if (!MakeRelativeSpan(sourceLines, value.value.code_fence_span, &fence)) return false;
+            value.code_fence_span = fence;
+            value.value.code_fence_span = {};
+        }
         if (!MakeRelativeSpan(sourceLines, value.value.span, &value.span)) return false;
         value.value.span = {};
         value.value.loc = {};
@@ -243,6 +250,8 @@ struct StoredNode {
         if (!value) return false;
         *block = value->value;
         if (!ResolveRelativeSpan(sourceLines, value->span, &block->span)) return false;
+        if (value->code_fence_span &&
+            !ResolveRelativeSpan(sourceLines, *value->code_fence_span, &block->code_fence_span)) return false;
         const auto location = NoteSourceLineMap::FindByOffset(sourceLines, block->span.start);
         if (!location.has_value() || block->span.start.value < location->start.value) return false;
         block->loc.line = static_cast<int>(location->line_index.value + 1);
@@ -311,6 +320,9 @@ struct StoredNode {
         if (!transform(&value.span)) return false;
         if constexpr (std::is_same_v<std::decay_t<decltype(value)>, StoredMath>) {
             return transform(&value.content_span);
+        }
+        if constexpr (std::is_same_v<std::decay_t<decltype(value)>, StoredBlock>) {
+            return !value.code_fence_span || transform(&*value.code_fence_span);
         }
         return true;
     }, node->value);

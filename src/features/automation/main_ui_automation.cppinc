@@ -3725,73 +3725,116 @@ static bool RunUiAutomationPdfRollbackScenario(HWND owner, std::wstring* outErro
 }
 
 bool RunUiAutomationStartupLastOpenScenario(HWND owner, std::wstring* outError) {
-    if (!owner) {
-        if (outError) *outError = L"Main window is not ready for startup restore testing.";
+    const auto fail = [&](const wchar_t* message) {
+        if (outError) *outError = message;
         return false;
-    }
+    };
+    if (!owner) return fail(L"Main window is not ready for startup restore testing.");
     const std::wstring lecturePath = g_currentLecturePath;
     const std::wstring sessionPath = g_currentSessionPath;
     const int altPdfIndex = FindAlternativeFileIndex(g_hPdfList, CurrentPdfIndex());
     const int altNoteIndex = FindAlternativeFileIndex(g_hNoteList, CurrentNoteIndex());
-    if (altPdfIndex < 0 || altNoteIndex < 0) {
-        if (outError) *outError = L"Could not find alternate files for startup restore testing.";
-        return false;
-    }
-
-    SetListboxSelAndNotify(g_hPdfList, altPdfIndex);
-    SetListboxSelAndNotify(g_hNoteList, altNoteIndex);
-
-    const std::wstring expectedPdfPath = CurrentLogicalPdfPath();
-    const std::wstring expectedNotePath = g_currentNotePath;
-    const int expectedPdfIndex = CurrentPdfIndex();
-    const int expectedNoteIndex = CurrentNoteIndex();
-    if (expectedPdfPath.empty() || expectedNotePath.empty()) {
-        if (outError) *outError = L"Failed to open alternate files for startup restore testing.";
-        return false;
-    }
-
-    OnWorkspaceLoaded(owner);
-    const std::wstring previousAutoOpenMode = g_config.sessionAutoOpenMode;
-
+    if (altPdfIndex < 0 || altNoteIndex < 0)
+        return fail(L"Could not find alternate files for startup restore testing.");
+    const std::wstring expectedPdf = g_pdfFiles[static_cast<size_t>(altPdfIndex)].path;
+    const std::wstring expectedNote = g_noteFiles[static_cast<size_t>(altNoteIndex)].path;
+    const auto previousMode = g_config.sessionAutoOpenMode;
     const bool previousResume = g_config.restoreLastSession;
-    const auto sessionBeforeResume = g_currentSessionPath;
-    g_config.restoreLastSession = false;
-    const bool unexpectedlyResumed = RestoreStartupLastOpenSelection(owner);
-    g_config.restoreLastSession = previousResume;
-    if (unexpectedlyResumed || g_currentSessionPath != sessionBeforeResume) {
-        if (outError) *outError = L"Workspace-only startup restored a session.";
-        return false;
+    struct RestoreSettings {
+        std::wstring mode;
+        bool resume;
+        bool firstSession;
+        ~RestoreSettings() {
+            g_config.sessionAutoOpenMode = mode;
+            g_config.restoreLastSession = resume;
+            g_config.startupSelectFirstSession = firstSession;
+        }
+    } restoreSettings{previousMode, previousResume, g_config.startupSelectFirstSession};
+    g_config.restoreLastSession = true;
+    auto restart = [&]() {
+        ClearPdfAndNoteSelection();
+        // A fresh process has no previous lecture selection for LoadLectures
+        // to retain while initializing the new workspace lists.
+        g_currentLecturePath.clear();
+        OnWorkspaceLoaded(owner);
+        return RestoreStartupLastOpenSelection(owner);
+    };
+    int cases = 0;
+    for (const auto* mode : {L"off", L"view", L"edit"}) {
+        for (int mask : {3, 1, 2, 0}) {
+            g_config.sessionAutoOpenMode = L"off";
+            SetListboxSelAndNotify(g_hLectureList, FindLectureIndexByPath(lecturePath));
+            SetListboxSelAndNotify(g_hSessionList, FindSessionIndexByPath(sessionPath));
+            if (!OpenPdfIfDifferent(owner, expectedPdf) || !OpenNoteIfDifferent(owner, expectedNote))
+                return fail(L"Cannot prepare both files for restart matrix.");
+            if (!(mask & 1) && !CloseFileDisplayFromContext(owner, false, expectedPdf))
+                return fail(L"Cannot close PDF before restart.");
+            if (!(mask & 2) && !CloseFileDisplayFromContext(owner, true, expectedNote))
+                return fail(L"Cannot close note before restart.");
+            if (!file_output::RunSaveAndIntegrateTransactionForExit(owner))
+                return fail(L"Cannot preserve documents before simulated exit.");
+            if (CurrentLogicalPdfPath() != ((mask & 1) ? expectedPdf : L"") ||
+                g_currentNotePath != ((mask & 2) ? expectedNote : L""))
+                return fail(L"Exit save rebound a closed display to a deferred filename.");
+            if (!SaveStartupLastOpenTarget()) return fail(L"Cannot save restart snapshot.");
+            const auto path = StartupLastOpenTargetFilePath();
+            std::string before, after;
+            if (!ReadUiAutomationFileBytes(path, &before)) return fail(L"Cannot read restart snapshot.");
+            g_config.sessionAutoOpenMode = mode;
+            const bool resumed = restart();
+            if (resumed != (mask != 0) ||
+                CurrentLogicalPdfPath() != ((mask & 1) ? expectedPdf : L"") ||
+                g_currentNotePath != ((mask & 2) ? expectedNote : L""))
+                return fail(L"Restart did not preserve the exact PDF/note open and closed state.");
+            if (mask == 0) {
+                g_config.startupSelectFirstSession = true;
+                SelectFirstSessionForInitialSample(owner);
+                g_config.startupSelectFirstSession = restoreSettings.firstSession;
+                if (!g_currentLecturePath.empty() || !g_currentSessionPath.empty() ||
+                    CurrentLectureIndex() >= 0 || CurrentSessionIndex() >= 0 ||
+                    static_cast<int>(SendMessageW(g_hLectureList, LB_GETCURSEL, 0, 0)) >= 0 ||
+                    static_cast<int>(SendMessageW(g_hSessionList, LB_GETCURSEL, 0, 0)) >= 0 ||
+                    !g_pdfFiles.empty() || !g_noteFiles.empty())
+                    return fail(L"Restart opened a directory after both files were closed.");
+            } else if (g_currentLecturePath != lecturePath || g_currentSessionPath != sessionPath) {
+                return fail(L"Restart did not restore the open files' directory.");
+            }
+            if (!ReadUiAutomationFileBytes(path, &after) || after != before)
+                return fail(L"Restart overwrote its snapshot during directory selection.");
+            ++cases;
+        }
     }
-
     g_config.sessionAutoOpenMode = L"off";
-    const bool selectedOnlyRestored = RestoreStartupLastOpenSelection(owner);
-    if (!selectedOnlyRestored) {
-        g_config.sessionAutoOpenMode = previousAutoOpenMode;
-        if (outError) *outError = L"Startup restore did not restore the last session in selection-only mode.";
-        return false;
-    }
-    const int selectedOnlyPdfIndex = static_cast<int>(SendMessageW(g_hPdfList, LB_GETCURSEL, 0, 0));
-    const int selectedOnlyNoteIndex = static_cast<int>(SendMessageW(g_hNoteList, LB_GETCURSEL, 0, 0));
-    if (selectedOnlyPdfIndex != expectedPdfIndex || selectedOnlyNoteIndex != expectedNoteIndex) {
-        g_config.sessionAutoOpenMode = previousAutoOpenMode;
-        if (outError) *outError = L"Startup restore did not select the last-open PDF/Note when auto-open was off.";
-        return false;
-    }
+    SetListboxSelAndNotify(g_hLectureList, FindLectureIndexByPath(lecturePath));
+    SetListboxSelAndNotify(g_hSessionList, FindSessionIndexByPath(sessionPath));
+    if (!OpenPdfIfDifferent(owner, expectedPdf) || !OpenNoteIfDifferent(owner, expectedNote) ||
+        !SaveStartupLastOpenTarget()) return fail(L"Cannot prepare resume-disabled check.");
+    std::string savedBytes, disabledBytes;
+    const auto path = StartupLastOpenTargetFilePath();
+    if (!ReadUiAutomationFileBytes(path, &savedBytes)) return fail(L"Cannot read saved restart state.");
+    g_config.restoreLastSession = false;
+    if (restart() || !g_currentLecturePath.empty() || !g_currentSessionPath.empty() ||
+        !SaveStartupLastOpenTarget() || !ReadUiAutomationFileBytes(path, &disabledBytes) || disabledBytes != savedBytes)
+        return fail(L"Workspace-only startup changed the saved restart state.");
+    g_config.restoreLastSession = true;
+    if (!RestoreStartupLastOpenSelection(owner)) return fail(L"Cannot restore after workspace-only startup.");
 
-    g_config.sessionAutoOpenMode = L"view";
-    const bool restored = RestoreStartupLastOpenSelection(owner);
-    g_config.sessionAutoOpenMode = previousAutoOpenMode;
-    if (!restored) {
-        if (outError) *outError = L"Startup restore did not reopen the last session.";
-        return false;
-    }
-
-    return VerifyUiRollbackState(lecturePath, sessionPath,
-                                 expectedPdfPath, expectedNotePath,
-                                 expectedPdfIndex, expectedNoteIndex,
-                                 outError);
+    // Deny replacement of the existing record. Failed persistence must retain
+    // bytes and must not advance the last-successful snapshot cache.
+    HANDLE locked = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (locked == INVALID_HANDLE_VALUE) return fail(L"Cannot lock restart state for failure check.");
+    g_lastStartupTargetSaved.clear();
+    const bool unexpectedlySaved = SaveStartupLastOpenTarget();
+    CloseHandle(locked);
+    if (unexpectedlySaved || !g_lastStartupTargetSaved.empty() ||
+        !ReadUiAutomationFileBytes(path, &disabledBytes) || disabledBytes != savedBytes ||
+        !SaveStartupLastOpenTarget())
+        return fail(L"Restart state write failure lost the old record or could not retry.");
+    AppendUiAutomationTrace(L"startup_restore:open_closed_matrix_ok cases=" + std::to_wstring(cases) +
+                            L" disabled_preserved=1 write_failure_retry=1");
+    return VerifyUiRollbackState(lecturePath, sessionPath, expectedPdf, expectedNote,
+                                 altPdfIndex, altNoteIndex, outError);
 }
-
 
 bool PrepareUiAutomationStagedExitScenario(HWND owner, std::wstring* outError) {
     if (!owner || g_currentNotePath.empty() || !g_hNoteEdit) {
@@ -8649,6 +8692,10 @@ static bool RunUiAutomationScenarios(HWND owner, std::wstring* outError) {
             return false;
         }
         AppendUiAutomationTrace(L"automation:ensure_pdf_only_ok");
+        std::wstring scrollTrace;
+        const bool scrollStable = RunPdfScrollStabilityProbe(g_hPdfView, &scrollTrace, outError);
+        AppendUiAutomationTrace(scrollTrace);
+        if (!scrollStable) return false;
         if (!RunUiAutomationAnnotationShortcutScenario(owner, outError)) return false;
         if (!RunUiAutomationPdfKeyboardScrollScenario(owner, outError)) return false;
         AppendUiAutomationTrace(L"automation:pdf_keyboard_scroll_ok");

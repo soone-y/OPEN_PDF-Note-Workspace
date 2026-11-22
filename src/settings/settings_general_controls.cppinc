@@ -731,6 +731,9 @@ static bool ApplyGeneralSettings(GeneralSettingsCtx* ctx) {
         g_noteWrapEnabled = (SendMessageW(ctx->chkNoteWrapEnabled, BM_GETCHECK, 0, 0) == BST_CHECKED);
         g_config.noteWrapEnabled = g_noteWrapEnabled;
     }
+    if (ctx->chkClroListImplicitContinuation) {
+        g_config.clroListImplicitContinuation = SendMessageW(ctx->chkClroListImplicitContinuation, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    }
     if (ctx->chkNoteQuoteLazyContinuation) {
         g_config.noteQuoteLazyContinuation = SendMessageW(ctx->chkNoteQuoteLazyContinuation, BM_GETCHECK, 0, 0) == BST_CHECKED;
     }

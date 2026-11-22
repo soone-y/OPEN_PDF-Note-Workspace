@@ -1,12 +1,104 @@
 diff --git a/src/md4c.c b/src/md4c.c
 --- a/src/md4c.c
 +++ b/src/md4c.c
-@@ -7030,7 +7030,24 @@
+@@ -285,6 +285,8 @@
+     int consecutive_blank_lines;
+     int last_n_implicit_parents_beg;
+     int last_n_implicit_parents_end;
++    int last_n_implicit_quote_parents_beg;
++    int last_n_implicit_quote_parents_end;
+ };
+ 
+ enum MD_LINETYPE_tag {
+@@ -6674,6 +6676,25 @@
+     return indent - total_indent;
+ }
+ 
++/* Probe only the explicit prefix. Work is bounded by its quote/space prefix,
++ * rather than the number of already open list containers. */
++static int
++md_line_has_explicit_list_mark(MD_CTX* ctx, OFF off)
++{
++    MD_CONTAINER mark = { 0 };
++    OFF end;
++
++    while(off < ctx->size && !ISNEWLINE(off)) {
++        if(!md_is_container_mark(ctx, 0, off, &end, &mark))
++            return false;
++        if(mark.ch != _T('>'))
++            return true;
++        off = end;
++        md_line_indentation(ctx, 0, off, &off);
++    }
++    return false;
++}
++
+ static const MD_LINE_ANALYSIS md_dummy_blank_line = { MD_LINE_BLANK, 0, 0, 0, 0, 0 };
+ 
+ /* Analyze type of the line and find some its properties. This serves as a
+@@ -6692,12 +6713,21 @@
+     OFF hr_killer = 0;
+     int n_implicit_parents_beg = 0;
+     int n_implicit_parents_end = 0;
++    int n_implicit_quote_parents_beg = 0;
++    int n_implicit_quote_parents_end = 0;
++    int allow_implicit_lists;
+     int ret = 0;
+ 
+     line->indent = md_line_indentation(ctx, total_indent, off, &off);
+     total_indent += line->indent;
+     line->beg = off;
+     line->enforce_new_block = false;
++
++    /* Literal blocks retain their parser-owned boundaries. Ordinary lines
++     * must carry a list marker before inheriting any list container. */
++    allow_implicit_lists = !(ctx->parser.flags & MD_FLAG_NOIMPLICITLISTCONTINUATION) ||
++        pivot_line->type == MD_LINE_FENCEDCODE || pivot_line->type == MD_LINE_HTML ||
++        md_line_has_explicit_list_mark(ctx, off);
+ 
+     /* Given the indentation and block quote marks '>', determine how many of
+      * the current containers are our parents. */
+@@ -6719,7 +6749,7 @@
+ 
+             line->beg = off;
+ 
+-        } else if(c->ch != _T('>')  &&  line->indent >= c->contents_indent) {
++        } else if(c->ch != _T('>')  &&  allow_implicit_lists && line->indent >= c->contents_indent) {
+             /* List. */
+             line->indent -= c->contents_indent;
+         } else {
+@@ -6732,7 +6762,7 @@
+     if(off >= ctx->size  ||  ISNEWLINE(off)) {
+         /* Blank line does not need any real indentation to be nested inside
+          * a list. */
+-        if(n_brothers + n_children == 0) {
++        if(n_brothers + n_children == 0 && allow_implicit_lists) {
+             n_implicit_parents_beg = n_parents;
+ 
+             while(n_parents < ctx->n_containers  &&  ctx->containers[n_parents].ch != _T('>')) {
+@@ -7033,7 +7063,41 @@
          line->type = MD_LINE_TEXT;
          if(pivot_line->type == MD_LINE_TEXT  &&  n_brothers + n_children == 0) {
              /* Lazy continuation. */
 -            n_parents = ctx->n_containers;
-+            if(ctx->parser.flags & MD_FLAG_NOQUOTE_LAZY_CONTINUATION) {
++            if(!allow_implicit_lists) {
++                /* Quote continuation is independent of list continuation.
++                 * Cache quote-only intervals to keep deep quotes linear. */
++                n_implicit_quote_parents_beg = n_parents;
++                while(!(ctx->parser.flags & MD_FLAG_NOQUOTE_LAZY_CONTINUATION) &&
++                      n_parents < ctx->n_containers && ctx->containers[n_parents].ch == _T('>'))
++                {
++                    if(ctx->last_n_implicit_quote_parents_beg <= n_parents &&
++                       n_parents < ctx->last_n_implicit_quote_parents_end &&
++                       ctx->last_n_implicit_quote_parents_end <= ctx->n_containers)
++                    {
++                        n_parents = ctx->last_n_implicit_quote_parents_end;
++                    } else {
++                        n_parents++;
++                    }
++                }
++                n_implicit_quote_parents_end = n_parents;
++            } else if(ctx->parser.flags & MD_FLAG_NOQUOTE_LAZY_CONTINUATION) {
 +                /* Preserve implicit list parents, stopping at a missing quote
 +                 * marker. Cache the list-only interval to keep deep lists linear. */
 +                n_implicit_parents_beg = n_parents;
@@ -27,14 +119,24 @@ diff --git a/src/md4c.c b/src/md4c.c
          }
  
          /* Check for task mark. */
+@@ -7199,6 +7263,8 @@
+ 
+     ctx->last_n_implicit_parents_beg = n_implicit_parents_beg;
+     ctx->last_n_implicit_parents_end = n_implicit_parents_end;
++    ctx->last_n_implicit_quote_parents_beg = n_implicit_quote_parents_beg;
++    ctx->last_n_implicit_quote_parents_end = n_implicit_quote_parents_end;
+ 
+ abort:
+     return ret;
 diff --git a/src/md4c.h b/src/md4c.h
 --- a/src/md4c.h
 +++ b/src/md4c.h
-@@ -406,6 +406,7 @@
+@@ -408,6 +408,8 @@
  #define MD_FLAG_HIGHLIGHT                   0x200000 /* Enable ==highlight== spans. */
  #define MD_FLAG_PRESERVEBLANKLINES          0x400000 /* Report blank line runs as MD_BLOCK_BLANK. */
  #define MD_FLAG_INSERT                      0x800000 /* Enable insert extension. */
 +#define MD_FLAG_NOQUOTE_LAZY_CONTINUATION   0x1000000 /* App extension: require explicit quote markers on continuation lines. */
++#define MD_FLAG_NOIMPLICITLISTCONTINUATION  0x4000000 /* App extension: require list markers outside literal blocks. */
  
  #define MD_FLAG_PERMISSIVEAUTOLINKS         (MD_FLAG_PERMISSIVEEMAILAUTOLINKS | MD_FLAG_PERMISSIVEURLAUTOLINKS | MD_FLAG_PERMISSIVEWWWAUTOLINKS)
  #define MD_FLAG_NOHTML                      (MD_FLAG_NOHTMLBLOCKS | MD_FLAG_NOHTMLSPANS)

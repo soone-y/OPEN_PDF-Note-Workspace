@@ -392,6 +392,12 @@ try {
         throw "UI automation did not verify unsaved annotation preservation during file organization."
     }
     if ($PdfOnly -or $fullSuite) {
+        if ($PdfOnly -and $traceText -notmatch '(?m)^pdf_scroll_stability:completed cases=24 valid=1$') {
+            throw 'PDF scrolling did not preserve later input across deferred zoom and scrollbar boundaries in all four flow modes.'
+        }
+        if ($PdfOnly -and $traceText -notmatch '(?m)^pdf_text_edit_follow:completed cases=60 valid=1$') {
+            throw 'Paused text editing did not preserve the viewport, route Ctrl+Plus to PDF zoom and resume following on input.'
+        }
         if ($traceText -notmatch '(?m)^pdf_ime:prerequisite native_control=1 native_context=1$') {
             throw 'PDF IME prerequisites were not available or not observed; this is not a completed PDF/IME check.'
         }
@@ -482,6 +488,7 @@ try {
          $traceText -notmatch "(?m)^open_work:pdf_worker_concurrency_ok$" -or
          $traceText -notmatch "(?m)^automation:pdf_worker_faults_ok render=1 publish=1 recovery=1$" -or
          $traceText -notmatch "(?m)^open_work:startup_restore_ok$" -or
+         $traceText -notmatch "(?m)^startup_restore:open_closed_matrix_ok cases=12 disabled_preserved=1 write_failure_retry=1$" -or
          $traceText -notmatch "(?m)^open_work:pdf_initial_viewport_ok$")) {
         throw "Open work automation did not verify checkpoint counts and content/history preservation."
     }

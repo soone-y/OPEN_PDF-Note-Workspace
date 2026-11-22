@@ -111,6 +111,7 @@ enum : int {
     IDC_EMPTY_VIEW_GUIDE = 4226,
     IDC_CLRO_ASCII_ONLY = 4227,
     IDC_NOTE_QUOTE_LAZY_CONTINUATION = 4228,
+    IDC_CLRO_LIST_IMPLICIT_CONTINUATION = 4229,
     IDC_NOTE_BOTTOM_SPACE_MODE = 4250,
     IDC_NOTE_BOTTOM_SPACE_FIXED,
     IDC_NOTE_BOTTOM_SPACE_FONT,
@@ -470,6 +471,7 @@ struct GeneralSettingsCtx {
     HWND chkNoteWrapEnabled = nullptr;
     HWND chkClroAsciiOnly = nullptr;
     HWND chkNoteQuoteLazyContinuation = nullptr;
+    HWND chkClroListImplicitContinuation = nullptr;
     HWND cbNoteBottomSpaceMode = nullptr;
     HWND editNoteBottomSpaceFixed = nullptr;
     HWND editNoteBottomSpaceFont = nullptr;

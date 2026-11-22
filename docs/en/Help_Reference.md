@@ -121,6 +121,10 @@ The PDF export dialog's **Keep page rotation** checkbox starts ON. It captures e
 
 ### PDF scrolling
 
+Scrolling immediately after zooming keeps the new position when rendering finishes. Scrollbars track the view position through the margins at the document edges. Starting a wheel or drag gesture stops tracking from an earlier scrollbar hold.
+
+While editing PDF text, ten seconds of inactivity, scrolling, or zooming pauses automatic following of the edit position. `Ctrl`+`+`/`-` then changes the PDF zoom. The text and editing session remain intact. Typing, pasting, IME input, or moving the text cursor resumes following and brings the box into view. During active editing, `Ctrl`+`+`/`-` continues to change the text size.
+
 Touchpad scrolling preserves fine input deltas. **Touchpad scroll stabilization** in Basic settings defaults to ON. In PDF and rendered note views it reduces small reversals during continuous scrolling. Sustained movement in the opposite direction takes effect. Turn it OFF to bypass this suppression. High-resolution wheels that send fine input deltas may also receive stabilization. The note's raw text editor uses standard Windows scrolling.
 
 The annotation, lecture, session, PDF and note lists, and the application's file picker, accumulate fine scroll input separately for each list and move to the nearest row. Movement starts after about half a row of input and follows the Windows wheel setting. Ordinary annotation-list updates retain your browsing position; an action that reveals a newly added annotation brings that item into view.
@@ -301,13 +305,17 @@ Before restoration, review protected work so an old original and a newer draft a
 
 ## Output
 
-Use **Output > Output Dialog...** to choose PDF output, single-page PNG, TXT, Markdown, or HTML. Set the destination folder and output file name before output; useful defaults are supplied and may be changed. With no queue, **Export** creates the current output alone. Add each desired setting to the queue, then select **Export all queued** to create all queued results and show one result list at the end. Use **Export selected** to create just one result: success removes that reservation and keeps the dialog and remaining queue open; failure or overwrite cancellation retains the reservation. Closing the dialog discards unexecuted reservations. Select a reservation to change its destination or file name and choose **Update reservation**, or move, remove, or clear it. The same destination cannot be queued twice, and the open original cannot be selected as output. Existing output files require an explicit overwrite confirmation. The application safely integrates current edits before output.
+Use **Output > Output Dialog...** to choose PDF output, single-page PNG, TXT, Markdown, or HTML. Set the destination folder and file name. **Export current** exports the current document with those settings. **Add to queue** keeps the source, settings, and destination in the list. The queue stays available until the app exits, including when you close the dialog or open a different document.
 
-Hover over the destination folder field to see the complete path, or select the field and use Ctrl+A, Ctrl+C to copy it. TXT markup removal defaults to OFF, including Quick Note; previously saved settings remain in effect.
+Below the list, **Export selected** runs one reservation and **Export all queued** creates a separate file for each reservation. Successful jobs leave the queue. Failed or canceled jobs remain available to retry. Select a reservation to load its destination and file name into the fields, then choose **Update destination** after editing them. Use **Remove selected** or **Clear reservations** to cancel jobs. Choose a different destination for each reservation. The app integrates current edits before exporting and asks before replacing an existing output.
+
+Hover over the destination folder field to see its complete path in a tooltip. Hover over the output file name field to see the complete path including the folder and file name. Select a field and use Ctrl+A, Ctrl+C to copy its contents. TXT markup removal defaults to OFF, including Quick Note; previously saved settings remain in effect.
 
 ### Merge queued PDFs
 
-Use **Move up** and **Move down** to change the queue order. Both separate output and merging run from top to bottom. **Merge queued PDFs** is available only with at least two reservations, all of them PDF outputs. Choose one destination; the merged PDF preserves each reservation's page order, crop, scale, and annotation options. Individual reservation destinations are not written, and the results dialog lists only the merged file. Success clears the completed queue while keeping the dialog open. Destination or overwrite cancellation and output failure retain the queue. PNG or note reservations prevent merging.
+Open each source PDF in turn, choose its output options, and add it to the queue. Use **Move up** and **Move down** to change the order. **Merge queued PDFs** is available when the queue contains at least two PDF outputs and every reservation is a PDF output. Choose one destination. The app combines the reservations from top to bottom and preserves each one's page order, crop, scale, and annotation options. Annotations and page rotations reflect the state when you added that PDF to the queue.
+
+The results dialog lists the merged file, and the completed reservations leave the queue. Cancellations and failures retain the queue. If a source PDF moves or changes, check the source and add a fresh reservation when needed.
 
 After output, **Show in Explorer** in the results dialog reveals the selected output. PDF and Markdown files open in the read-only viewer, and other formats open with their default app.
 
@@ -361,6 +369,14 @@ If an annotation cannot be created, export stops before writing the result.
 
 PNG output also displays native annotations contained in the PDF. **Include annotations** controls the additional separate-file app layer; it does not remove native PDF annotations.
 
+### Protected PDFs
+
+The main application and the read-only viewer use the open PDF's effective copy permissions when copying document text. The main application's PNG export also requires copy permission. Print permission alone does not allow PNG export.
+
+Export to a separate PDF and detachment of native PDF annotations stop for encrypted or digitally signed PDFs because these operations cannot preserve the original protection. When you add a PDF or PNG export to the queue, the app checks the source and shows the reason if it cannot add the reservation. It checks the source again at export time and checks every source for a merged export.
+
+Once a PDF is open, you can save your own annotations in a separate `.clrop` file. Follow the rights holder's or distributor's terms of use.
+
 
 ## Settings
 
@@ -374,6 +390,8 @@ Open **Settings > Settings dialog**, then choose a group and page on the left. M
 | Annotation | Tools/display and Controls/key bindings: creation appearance, correction, marker display and direct tool keys |
 | Save | Automatic/integrated save and Backup/recovery: work protection and entry points for recovery |
 | Export | Quick PDF and Quick Note defaults; the output dialog sets this run's destination, page range and queue |
+
+With **Resume previous work at startup** on, restart restores the PDFs and notes that were open at exit, together with their lecture and session. A closed side stays closed. Closing both files before exit also leaves the lecture and session closed on restart. This is separate from automatic opening when selecting a session. Restart state is stored in the selected workspace’s management area, separately from per-session file history. Older directory-only restart records do not infer which files were open.
 
 Turning off **Resume previous work at startup** opens only the workspace next time without deleting previous records. Explicit startup filenames still open. **PDF opening view** offers automatic adjustment, previous position/zoom, first-page width or first-page fit; older records without zoom use automatic adjustment. Notes' font, background, wrapping and bottom space affect viewing without adding text to the original. Check existing notes after changing markup interpretation.
 

@@ -785,7 +785,7 @@ static std::optional<size_t> HitTestNativeNoteRawPosition(
     HWND hWnd, int clientX, int clientY);
 static std::optional<std::wstring> LinkIdAtCharIndex(HWND hWnd, size_t idx);
 static void UpdateNoteFormatRect(HWND hWnd);
-static void UpdateNativeNoteBottomSpaceFrame(HWND hWnd);
+static void UpdateNativeNoteBottomSpace(HWND hWnd);
 static std::pair<size_t, size_t> GetNoteSelectionBounds();
 static std::pair<size_t, size_t> NoteNormalSelectionRange();
 static bool TryGetNoteImeCompositionAnchorLine(HWND hWnd, int* outLine);
@@ -1436,12 +1436,7 @@ static uint64_t NextNoteTextCoreRevision() {
 }
 
 static note::NoteMetadata CurrentNoteTextMetadata() {
-    note::NoteMetadata meta;
-    meta.clro_ascii_only = g_config.clroAsciiOnly;
-    meta.quote_lazy_continuation = g_config.noteQuoteLazyContinuation;
-    meta.file_name = CurrentNoteFileNameForParse();
-    meta.title = note::DeriveTitleFromFileName(meta.file_name);
-    return meta;
+    return BuildNoteTextMetadata(g_config, CurrentNoteFileNameForParse());
 }
 
 static void ResetCurrentNoteTextCore(note::NoteId noteId,
@@ -1697,7 +1692,9 @@ struct BottomAssistLineLayout {
     int noteDisplayIdx = -1;
     int renderIdx = -1;
     int wrapIdx = -1;
+    int clroAsciiOnlyIdx = -1;
     int quoteLazyContinuationIdx = -1;
+    int listImplicitContinuationIdx = -1;
     int vimIdx = -1;
     int vimCaretLineRawTextIdx = -1;
     int vimClickInsertIdx = -1;
@@ -1944,8 +1941,12 @@ static std::wstring BuildBottomAssistText(BottomAssistLineLayout* outLayout) {
         : localization::Text(L"note.assist.unavailable"), &layout.renderIdx);
     appendValue(L"note.assist.current_display", noteDisplayLabel, &layout.noteDisplayIdx);
     if (showWrapToggle) appendValue(L"note.assist.wrap", wrapLabel, &layout.wrapIdx);
-    if (renderSupportedRoute && !CurrentNoteUsesTeXMathOnlyRender()) {
-        appendValue(L"note.assist.quote_lazy_continuation", onOff(g_config.noteQuoteLazyContinuation),
+    if (note::IsClroMarkdownFile(CurrentNoteFileNameForParse())) {
+        appendRow(localization::Text(L"settings.note.clro_syntax"));
+        appendValue(L"settings.note.clro_ascii_only", onOff(g_config.clroAsciiOnly), &layout.clroAsciiOnlyIdx);
+        appendValue(L"settings.note.clro_list_implicit_continuation", onOff(g_config.clroListImplicitContinuation),
+                    &layout.listImplicitContinuationIdx);
+        appendValue(L"settings.note.quote_lazy_continuation", onOff(g_config.noteQuoteLazyContinuation),
                     &layout.quoteLazyContinuationIdx);
     }
     appendRow(L"");
@@ -2239,16 +2240,17 @@ static void SyncNoteWrapMenuState(HWND owner) {
     DrawMenuBar(owner);
 }
 
-static void ToggleNoteQuoteLazyContinuationSetting() {
+static void ToggleClroSyntaxSetting(bool& setting, const wchar_t* failureMessageId) {
+    if (!note::IsClroMarkdownFile(CurrentNoteFileNameForParse())) return;
     if (IsNoteImeCanonicalChangeDeferred(g_hNoteEdit) || IsNoteImeComposing()) {
         ShowSoftNotice(g_hMainWnd, localization::Text(L"note.assist.finish_ime_first"), SoftNoticeKind::Info);
         return;
     }
-    const bool previous = g_config.noteQuoteLazyContinuation;
-    g_config.noteQuoteLazyContinuation = !previous;
+    const bool previous = setting;
+    setting = !previous;
     if (!TryPersistConfig()) {
-        g_config.noteQuoteLazyContinuation = previous;
-        ShowSoftNotice(g_hMainWnd, localization::Text(L"settings.note.quote_lazy_save_failed"), SoftNoticeKind::Warning);
+        setting = previous;
+        ShowSoftNotice(g_hMainWnd, localization::Text(failureMessageId), SoftNoticeKind::Warning);
         return;
     }
     ApplyCurrentNoteViewConfiguration();
@@ -2805,7 +2807,7 @@ static bool SetNoteRenderScrollPosX(HWND hWnd, int pos) {
 
 static void UpdateNoteFormatRect(HWND hWnd) {
     if (!hWnd) return;
-    UpdateNativeNoteBottomSpaceFrame(hWnd);
+    UpdateNativeNoteBottomSpace(hWnd);
 
     // The final renderer owns visible glyph geometry and both scroll ranges.
     // RichEdit remains an input/fallback transport only, so it receives one
@@ -3756,7 +3758,7 @@ using NoteFinalImePreeditState = note::NoteRenderFinalImePreeditSession;
 
 struct LocalNoteViewContext {
     // Window geometry survives document/derived-state resets.
-    ui::BottomSpaceFrame nativeBottomSpaceFrame;
+    ui::NativeNoteBottomSpace nativeBottomSpace;
     scroll_input::WheelInput wheelInput;
     scroll_input::PixelRemainder horizontalWheelPixels;
     scroll_input::PixelRemainder verticalWheelPixels;
@@ -4069,20 +4071,17 @@ static void ForgetLocalNoteViewContext(HWND hwnd) {
     g_viewContexts.erase(hwnd);
 }
 
-static void UpdateNativeNoteBottomSpaceFrame(HWND hWnd) {
-    auto& frame = GetViewContext(hWnd).nativeBottomSpaceFrame;
-    if (frame.updating) return;
+static void UpdateNativeNoteBottomSpace(HWND hWnd) {
+    if (!IsRichEditControl(hWnd) || IsNoteImeComposing() || IsNoteImeCanonicalChangeDeferred(hWnd)) return;
+    auto& space = GetViewContext(hWnd).nativeBottomSpace;
+    if (space.updating) return;
     RECT client{};
     if (!GetClientRect(hWnd, &client)) return;
-    const int height = frame.available_height_px > 0 ? frame.available_height_px
-        : static_cast<int>(client.bottom - client.top) + frame.padding_px;
+    const int height = std::max<LONG>(0, client.bottom - client.top);
     const int wanted = NoteUsesNativeBottomSpace() ? NoteBottomSpacePx(hWnd, height) : 0;
-    if (wanted == frame.padding_px) return;
-    frame.updating = true;
-    SetWindowPos(hWnd, nullptr, 0, 0, 0, 0,
-        SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-    frame.updating = false;
-    RedrawWindow(hWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_FRAME);
+    if (!space.Apply(hWnd, wanted, GetDpiY(hWnd))) {
+        preview_trace::Append(L"NoteBottomSpace", L"native_display_spacing_failed");
+    }
 }
 
 inline ActiveNoteRenderSnapshot& Access_noteRenderSnapshot() { return GetViewContext(nullptr).renderSnapshot; }
@@ -10753,6 +10752,7 @@ void ApplyCurrentNoteViewConfiguration() {
         if (kernel) {
             parsingChanged = kernel->SetClroAsciiOnly(g_config.clroAsciiOnly);
             parsingChanged = kernel->SetQuoteLazyContinuation(g_config.noteQuoteLazyContinuation) || parsingChanged;
+            parsingChanged = kernel->SetClroListImplicitContinuation(g_config.clroListImplicitContinuation) || parsingChanged;
         }
         if (parsingChanged) {
             workspace.InvalidateIndexes(entry.second.identity.note_id);

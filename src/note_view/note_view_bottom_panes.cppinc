@@ -107,6 +107,8 @@ bool GetNoteStatusAssistControlRect(NoteStatusAssistControl control, RECT* outRe
     case NoteStatusAssistControl::NormalCaretRaw: index = projection.assistLayout.vimCaretLineRawTextIdx; break;
     case NoteStatusAssistControl::ClickInsert: index = projection.assistLayout.vimClickInsertIdx; break;
     case NoteStatusAssistControl::CurrentDisplay: index = projection.assistLayout.noteDisplayIdx; break;
+    case NoteStatusAssistControl::ClroAsciiOnly: index = projection.assistLayout.clroAsciiOnlyIdx; break;
+    case NoteStatusAssistControl::ListImplicitContinuation: index = projection.assistLayout.listImplicitContinuationIdx; break;
     case NoteStatusAssistControl::QuoteLazyContinuation: index = projection.assistLayout.quoteLazyContinuationIdx; break;
     case NoteStatusAssistControl::BottomSpace: index = projection.assistLayout.bottomSpaceIdx; break;
     case NoteStatusAssistControl::InlineMathVerticalAlignment:
@@ -175,8 +177,14 @@ static bool ExecuteBottomPaneCommand(HWND hWnd, const BottomPaneCommand& command
             ToggleNoteRenderSetting();
         }
         return true;
+    case BottomPaneCommandKind::ToggleClroAsciiOnly:
+        ToggleClroSyntaxSetting(g_config.clroAsciiOnly, L"settings.note.clro_ascii_save_failed");
+        return true;
+    case BottomPaneCommandKind::ToggleListImplicitContinuation:
+        ToggleClroSyntaxSetting(g_config.clroListImplicitContinuation, L"settings.note.clro_list_save_failed");
+        return true;
     case BottomPaneCommandKind::ToggleQuoteLazyContinuation:
-        ToggleNoteQuoteLazyContinuationSetting();
+        ToggleClroSyntaxSetting(g_config.noteQuoteLazyContinuation, L"settings.note.quote_lazy_save_failed");
         return true;
     case BottomPaneCommandKind::ToggleWrap:
         ToggleNoteWrapSetting();

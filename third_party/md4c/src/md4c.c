@@ -285,6 +285,8 @@ struct MD_CTX_tag {
     int consecutive_blank_lines;
     int last_n_implicit_parents_beg;
     int last_n_implicit_parents_end;
+    int last_n_implicit_quote_parents_beg;
+    int last_n_implicit_quote_parents_end;
 };
 
 enum MD_LINETYPE_tag {
@@ -5384,6 +5386,7 @@ abort:
 #define MD_BLOCK_CONTAINER          (MD_BLOCK_CONTAINER_OPENER | MD_BLOCK_CONTAINER_CLOSER)
 #define MD_BLOCK_LOOSE_LIST         0x04
 #define MD_BLOCK_SETEXT_HEADER      0x08
+#define MD_BLOCK_CODE_FENCE_CLOSED  0x10
 
 struct MD_BLOCK_tag {
     MD_BLOCKTYPE type  :  8;
@@ -5402,6 +5405,7 @@ struct MD_BLOCK_tag {
      * MD_BLOCK_OL:     Start item number.
      */
     MD_SIZE n_lines;
+    OFF source_end;  /* Leaf source extent, including an accepted closing fence. */
 };
 
 struct MD_CONTAINER_tag {
@@ -5539,6 +5543,15 @@ md_setup_fenced_code_detail(MD_CTX* ctx, const MD_BLOCK* block, MD_BLOCK_CODE_DE
     MD_CHECK(md_build_attribute(ctx, STR(beg), lang_end - beg, 0, &det->lang, lang_build));
 
     det->fence_char = fence_ch;
+    det->fence_begin = fence_line->beg;
+    det->fence_end = block->source_end;
+    det->fence_closed = ((block->flags & MD_BLOCK_CODE_FENCE_CLOSED) != 0);
+    /* Keep a final empty body row inside an unclosed block's source extent. */
+    if(!det->fence_closed && det->fence_end < ctx->size && ISNEWLINE(det->fence_end)) {
+        if(CH(det->fence_end) == _T('\r') && det->fence_end + 1 < ctx->size && CH(det->fence_end + 1) == _T('\n'))
+            det->fence_end++;
+        det->fence_end++;
+    }
 
 abort:
     return ret;
@@ -5597,9 +5610,9 @@ md_process_leaf_block(MD_CTX* ctx, MD_BLOCK* block)
             break;
 
         case MD_BLOCK_CODE:
+            memset(&det.code, 0, sizeof(MD_BLOCK_CODE_DETAIL));
             /* For fenced code block, we may need to set the info string. */
             if(block->data != 0) {
-                memset(&det.code, 0, sizeof(MD_BLOCK_CODE_DETAIL));
                 clean_fence_code_detail = true;
                 MD_CHECK(md_setup_fenced_code_detail(ctx, block, &det.code, &info_build, &lang_build));
             }
@@ -5842,6 +5855,7 @@ md_start_new_block(MD_CTX* ctx, const MD_LINE_ANALYSIS* line)
     block->flags = 0;
     block->data = line->data;
     block->n_lines = 0;
+    block->source_end = line->end;
 
     ctx->current_block = block;
     return 0;
@@ -6006,6 +6020,7 @@ md_add_line_into_current_block(MD_CTX* ctx, const MD_LINE_ANALYSIS* analysis)
         line->end = analysis->end;
     }
     ctx->current_block->n_lines++;
+    ctx->current_block->source_end = analysis->end;
 
     return 0;
 }
@@ -6656,6 +6671,17 @@ md_is_container_mark(MD_CTX* ctx, unsigned indent, OFF beg, OFF* p_end, MD_CONTA
     return false;
 }
 
+/* Scan only this row, never the remainder of the document. */
+static int
+md_line_has_pipe(MD_CTX* ctx, OFF off)
+{
+    for(; off < ctx->size && !ISNEWLINE(off); off++) {
+        if(CH(off) == _T('|'))
+            return true;
+    }
+    return false;
+}
+
 static unsigned
 md_line_indentation(MD_CTX* ctx, unsigned total_indent, OFF beg, OFF* p_end)
 {
@@ -6672,6 +6698,25 @@ md_line_indentation(MD_CTX* ctx, unsigned total_indent, OFF beg, OFF* p_end)
 
     *p_end = off;
     return indent - total_indent;
+}
+
+/* Probe only the explicit prefix. Work is bounded by its quote/space prefix,
+ * rather than the number of already open list containers. */
+static int
+md_line_has_explicit_list_mark(MD_CTX* ctx, OFF off)
+{
+    MD_CONTAINER mark = { 0 };
+    OFF end;
+
+    while(off < ctx->size && !ISNEWLINE(off)) {
+        if(!md_is_container_mark(ctx, 0, off, &end, &mark))
+            return false;
+        if(mark.ch != _T('>'))
+            return true;
+        off = end;
+        md_line_indentation(ctx, 0, off, &off);
+    }
+    return false;
 }
 
 static const MD_LINE_ANALYSIS md_dummy_blank_line = { MD_LINE_BLANK, 0, 0, 0, 0, 0 };
@@ -6692,12 +6737,21 @@ md_analyze_line(MD_CTX* ctx, OFF beg, OFF* p_end,
     OFF hr_killer = 0;
     int n_implicit_parents_beg = 0;
     int n_implicit_parents_end = 0;
+    int n_implicit_quote_parents_beg = 0;
+    int n_implicit_quote_parents_end = 0;
+    int allow_implicit_lists;
     int ret = 0;
 
     line->indent = md_line_indentation(ctx, total_indent, off, &off);
     total_indent += line->indent;
     line->beg = off;
     line->enforce_new_block = false;
+
+    /* Literal blocks retain their parser-owned boundaries. Ordinary lines
+     * must carry a list marker before inheriting any list container. */
+    allow_implicit_lists = !(ctx->parser.flags & MD_FLAG_NOIMPLICITLISTCONTINUATION) ||
+        pivot_line->type == MD_LINE_FENCEDCODE || pivot_line->type == MD_LINE_HTML ||
+        md_line_has_explicit_list_mark(ctx, off);
 
     /* Given the indentation and block quote marks '>', determine how many of
      * the current containers are our parents. */
@@ -6719,7 +6773,7 @@ md_analyze_line(MD_CTX* ctx, OFF beg, OFF* p_end,
 
             line->beg = off;
 
-        } else if(c->ch != _T('>')  &&  line->indent >= c->contents_indent) {
+        } else if(c->ch != _T('>')  &&  allow_implicit_lists && line->indent >= c->contents_indent) {
             /* List. */
             line->indent -= c->contents_indent;
         } else {
@@ -6732,7 +6786,7 @@ md_analyze_line(MD_CTX* ctx, OFF beg, OFF* p_end,
     if(off >= ctx->size  ||  ISNEWLINE(off)) {
         /* Blank line does not need any real indentation to be nested inside
          * a list. */
-        if(n_brothers + n_children == 0) {
+        if(n_brothers + n_children == 0 && allow_implicit_lists) {
             n_implicit_parents_beg = n_parents;
 
             while(n_parents < ctx->n_containers  &&  ctx->containers[n_parents].ch != _T('>')) {
@@ -6762,6 +6816,9 @@ md_analyze_line(MD_CTX* ctx, OFF beg, OFF* p_end,
              * which we transform into MD_LINE_BLANK. */
             if(line->indent < ctx->code_indent_offset) {
                 if(md_is_closing_code_fence(ctx, CH(pivot_line->beg), off, &off)) {
+                    MD_ASSERT(ctx->current_block != NULL && ctx->current_block->type == MD_BLOCK_CODE);
+                    ctx->current_block->source_end = off;
+                    ctx->current_block->flags |= MD_BLOCK_CODE_FENCE_CLOSED;
                     line->type = MD_LINE_BLANK;
                     ctx->last_line_has_list_loosening_effect = false;
                     break;
@@ -6848,7 +6905,8 @@ md_analyze_line(MD_CTX* ctx, OFF beg, OFF* p_end,
         }
 
         /* Check whether we are Setext underline. */
-        if(line->indent < ctx->code_indent_offset  &&  pivot_line->type == MD_LINE_TEXT
+        if(!(ctx->parser.flags & MD_FLAG_NOSETEXTHEADINGS) &&
+            line->indent < ctx->code_indent_offset  &&  pivot_line->type == MD_LINE_TEXT
             &&  off < ctx->size  &&  ISANYOF2(off, _T('='), _T('-'))
             &&  (n_parents == ctx->n_containers))
         {
@@ -6960,7 +7018,9 @@ md_analyze_line(MD_CTX* ctx, OFF beg, OFF* p_end,
         }
 
         /* Check whether we are table continuation. */
-        if(pivot_line->type == MD_LINE_TABLE  &&  n_parents == ctx->n_containers) {
+        if(pivot_line->type == MD_LINE_TABLE  &&  n_parents == ctx->n_containers &&
+           (!(ctx->parser.flags & MD_FLAG_REQUIRETABLEPIPES) || md_line_has_pipe(ctx, off)))
+        {
             line->type = MD_LINE_TABLE;
             break;
         }
@@ -7033,7 +7093,24 @@ md_analyze_line(MD_CTX* ctx, OFF beg, OFF* p_end,
         line->type = MD_LINE_TEXT;
         if(pivot_line->type == MD_LINE_TEXT  &&  n_brothers + n_children == 0) {
             /* Lazy continuation. */
-            if(ctx->parser.flags & MD_FLAG_NOQUOTE_LAZY_CONTINUATION) {
+            if(!allow_implicit_lists) {
+                /* Quote continuation is independent of list continuation.
+                 * Cache quote-only intervals to keep deep quotes linear. */
+                n_implicit_quote_parents_beg = n_parents;
+                while(!(ctx->parser.flags & MD_FLAG_NOQUOTE_LAZY_CONTINUATION) &&
+                      n_parents < ctx->n_containers && ctx->containers[n_parents].ch == _T('>'))
+                {
+                    if(ctx->last_n_implicit_quote_parents_beg <= n_parents &&
+                       n_parents < ctx->last_n_implicit_quote_parents_end &&
+                       ctx->last_n_implicit_quote_parents_end <= ctx->n_containers)
+                    {
+                        n_parents = ctx->last_n_implicit_quote_parents_end;
+                    } else {
+                        n_parents++;
+                    }
+                }
+                n_implicit_quote_parents_end = n_parents;
+            } else if(ctx->parser.flags & MD_FLAG_NOQUOTE_LAZY_CONTINUATION) {
                 /* Preserve implicit list parents, stopping at a missing quote
                  * marker. Cache the list-only interval to keep deep lists linear. */
                 n_implicit_parents_beg = n_parents;
@@ -7216,6 +7293,8 @@ md_analyze_line(MD_CTX* ctx, OFF beg, OFF* p_end,
 
     ctx->last_n_implicit_parents_beg = n_implicit_parents_beg;
     ctx->last_n_implicit_parents_end = n_implicit_parents_end;
+    ctx->last_n_implicit_quote_parents_beg = n_implicit_quote_parents_beg;
+    ctx->last_n_implicit_quote_parents_end = n_implicit_quote_parents_end;
 
 abort:
     return ret;

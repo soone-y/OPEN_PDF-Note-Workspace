@@ -193,6 +193,7 @@ struct Draft {
     int layout = 0, noteFont = 0, headingFont = 0, lens = 0;
     bool clroAsciiOnly = false;
     bool quoteLazyContinuation = false;
+    bool listImplicitContinuation = false;
     int bottomSpaceMode = 0;
     std::wstring bottomSpaceFixed, bottomSpaceFont, bottomSpaceViewport;
     std::wstring hex;
@@ -202,10 +203,14 @@ static void Seed(const fs::path& workspace, bool flat, const fs::path& lectureRo
     Draft draft;
     Page(settings, 8); draft.layout = static_cast<int>(Send(DescendantId(settings, 4214), CB_GETCURSEL));
     Page(settings, 1); draft.noteFont = static_cast<int>(Send(DescendantId(settings, 4114), CB_GETCURSEL));
+    const HWND notePage = GetParent(GetParent(DescendantId(settings, 4227)));
+    Require(Send(GetDlgItem(notePage, 4188), CB_GETCOUNT) == 5, "note navigation includes a dedicated syntax section");
     Require(DescendantId(settings, 4227) != nullptr, "CLRO ASCII-only setting exists");
     draft.clroAsciiOnly = Send(DescendantId(settings, 4227), BM_GETCHECK) == BST_CHECKED;
     Require(DescendantId(settings, 4228) != nullptr, "quote lazy-continuation setting exists");
     draft.quoteLazyContinuation = Send(DescendantId(settings, 4228), BM_GETCHECK) == BST_CHECKED;
+    Require(DescendantId(settings, 4229) != nullptr, "list implicit-continuation setting exists");
+    draft.listImplicitContinuation = Send(DescendantId(settings, 4229), BM_GETCHECK) == BST_CHECKED;
     Require(DescendantId(settings, 4250) && DescendantId(settings, 4251) &&
         DescendantId(settings, 4252) && DescendantId(settings, 4253), "bottom space controls exist");
     draft.bottomSpaceMode = static_cast<int>(Send(DescendantId(settings, 4250), CB_GETCURSEL));
@@ -230,6 +235,7 @@ static void Expect(HWND settings, const Draft& expected) {
     Require(actual.layout == expected.layout && actual.noteFont == expected.noteFont &&
         actual.headingFont == expected.headingFont && actual.lens == expected.lens && actual.hex == expected.hex &&
         actual.clroAsciiOnly == expected.clroAsciiOnly && actual.quoteLazyContinuation == expected.quoteLazyContinuation &&
+        actual.listImplicitContinuation == expected.listImplicitContinuation &&
         actual.bottomSpaceMode == expected.bottomSpaceMode &&
         actual.bottomSpaceFixed == expected.bottomSpaceFixed && actual.bottomSpaceFont == expected.bottomSpaceFont &&
         actual.bottomSpaceViewport == expected.bottomSpaceViewport,
@@ -242,6 +248,7 @@ static void Expect(HWND settings, const Draft& expected) {
     Page(settings, 1);
     changed.clroAsciiOnly = !old.clroAsciiOnly;
     changed.quoteLazyContinuation = !old.quoteLazyContinuation;
+    changed.listImplicitContinuation = !old.listImplicitContinuation;
     changed.bottomSpaceMode = (old.bottomSpaceMode + 1) % 3;
     changed.bottomSpaceFixed = old.bottomSpaceFixed == L"144" ? L"96" : L"144";
     changed.bottomSpaceFont = old.bottomSpaceFont == L"600" ? L"400" : L"600";
@@ -252,6 +259,7 @@ static void Expect(HWND settings, const Draft& expected) {
     Type(DescendantId(settings, 4253), changed.bottomSpaceViewport.c_str());
     Send(DescendantId(settings, 4227), BM_SETCHECK, changed.clroAsciiOnly ? BST_CHECKED : BST_UNCHECKED);
     Send(DescendantId(settings, 4228), BM_SETCHECK, changed.quoteLazyContinuation ? BST_CHECKED : BST_UNCHECKED);
+    Send(DescendantId(settings, 4229), BM_SETCHECK, changed.listImplicitContinuation ? BST_CHECKED : BST_UNCHECKED);
     HWND font = DescendantId(settings, 4114); const int count = static_cast<int>(Send(font, CB_GETCOUNT));
     Require(count > 1, "note font has multiple choices"); changed.noteFont = (old.noteFont + 1) % count;
     Send(font, CB_SETCURSEL, changed.noteFont);
@@ -281,6 +289,7 @@ static void SettingsMatrix(const fs::path& executable, const fs::path& workspace
     Page(settings, 1); Send(settings, WM_COMMAND, 7102);
     Draft reverted = changed; reverted.noteFont = baseline.noteFont; reverted.clroAsciiOnly = baseline.clroAsciiOnly;
     reverted.quoteLazyContinuation = baseline.quoteLazyContinuation;
+    reverted.listImplicitContinuation = baseline.listImplicitContinuation;
     reverted.bottomSpaceMode = baseline.bottomSpaceMode;
     reverted.bottomSpaceFixed = baseline.bottomSpaceFixed; reverted.bottomSpaceFont = baseline.bottomSpaceFont;
     reverted.bottomSpaceViewport = baseline.bottomSpaceViewport; Expect(settings, reverted);
@@ -530,8 +539,12 @@ static void BottomPanePersistenceMatrix(const fs::path& executable, const fs::pa
 }
 
 static void CentralGuideMatrix(const fs::path& executable, const fs::path& workspace) {
-    Seed(workspace, false);
     const auto config = workspace / L"workspace.json";
+    fs::create_directories(workspace / L"講義 空白" / L"第01回");
+    // Exercise the empty startup view. With restoration enabled, startup
+    // selects the first lecture even when automatic session selection is off.
+    Write(config, R"({"classesDir":".","restoreLastSession":false,"startupSelectFirstSession":false,)"
+                  R"("noteRenderEnabled":false,"noteRawOnly":true,"sessionFileLayout":"separate_directories"})");
     OwnedApp app; app.Start(executable, workspace);
     const auto view = [&] {
         HWND result = Descendant(app.main, L"PdfWorkspacePdfView");

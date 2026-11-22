@@ -425,7 +425,6 @@ static_assert(AllUniqueValues(std::array<UINT_PTR, 6>{
 static constexpr int kZoomTimerIntervalMs = 24; // debounce heavy rerender after direct zoom feedback
 static bool g_zoomAnimating = false;
 static double g_zoomTargetScale = 1.0;
-static POINT g_zoomFocusPoint{};
 struct ZoomAnchor {
     bool valid = false;
     int pageIndex = -1;
@@ -455,20 +454,6 @@ static void StopPdfZoomAnimation(HWND pdfWnd) {
     }
 }
 
-static void StepPdfZoomAnimation(HWND pdfWnd) {
-    if (g_pdf.kind == DocKind::None) {
-        StopPdfZoomAnimation(pdfWnd);
-        return;
-    }
-
-    if (!g_zoomAnimating) {
-        StopPdfZoomAnimation(pdfWnd);
-        return;
-    }
-
-    ApplyPdfScaleDirect(pdfWnd, NormalizeZoomScaleValue(g_zoomTargetScale), g_zoomFocusPoint, true);
-    StopPdfZoomAnimation(pdfWnd);
-}
 static constexpr double kPanAxisAngleDeg = 6.0;
 static constexpr int kPanAxisLockDeadPx = 3;
 

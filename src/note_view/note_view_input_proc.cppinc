@@ -198,20 +198,7 @@ LRESULT CALLBACK NoteEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     bool forgetViewContextAfterDefault = false;
     bool releaseOpeningFocusHoldAfterDefault = false;
 
-    if (msg == WM_NCCALCSIZE && lParam) {
-        const LRESULT result = CallWindowProcW(g_oldNoteProc, hWnd, msg, wParam, lParam);
-        RECT& client = wParam ? reinterpret_cast<NCCALCSIZE_PARAMS*>(lParam)->rgrc[0]
-            : *reinterpret_cast<RECT*>(lParam);
-        const int height = std::max<LONG>(0, client.bottom - client.top);
-        auto& frame = GetViewContext(hWnd).nativeBottomSpaceFrame;
-        frame.Apply(client, NoteUsesNativeBottomSpace() ? NoteBottomSpacePx(hWnd, height) : 0);
-        return frame.padding_px > 0 ? 0 : result;
-    }
-    if (msg == WM_NCPAINT) {
-        const LRESULT result = CallWindowProcW(g_oldNoteProc, hWnd, msg, wParam, lParam);
-        (void)GetViewContext(hWnd).nativeBottomSpaceFrame.Paint(hWnd, g_noteBgColor);
-        return result;
-    }
+    if (msg == WM_SETTEXT) GetViewContext(hWnd).nativeBottomSpace.Invalidate();
 
     if (msg == WM_SETREDRAW) {
         auto& context = GetViewContext(hWnd);

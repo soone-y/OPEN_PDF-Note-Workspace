@@ -63,7 +63,7 @@ int CurrentNoteIndex();
 
 // Session file management
 void AutoOpenSingleSessionFiles(HWND hWnd);
-bool SaveStartupLastOpenTarget();
+[[nodiscard]] bool SaveStartupLastOpenTarget();
 void LoadSessionLastOpenMap();
 void ApplySessionAutoOpenPreference(const struct SessionEntry& session,
                                     std::wstring& preferredPdf,
@@ -103,5 +103,4 @@ std::wstring FileDisplayLabelForPath(const std::wstring& filePath,
 extern const wchar_t kLectureSettingsDirName[];
 extern std::unordered_map<std::wstring, std::wstring> g_lastNoteBySession;
 extern std::unordered_map<std::wstring, std::wstring> g_lastPdfBySession;
-extern std::wstring g_lastStartupLecturePathSaved;
-extern std::wstring g_lastStartupSessionPathSaved;
+extern std::wstring g_lastStartupTargetSaved;

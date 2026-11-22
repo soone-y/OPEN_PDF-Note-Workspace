@@ -147,6 +147,10 @@ bool g_isDraggingSplitter = false;
 bool g_leftPaneVisible = true;
 bool g_focusSearchVisible = false;
 HMENU g_tabSelectionMenu = nullptr;
+HMENU g_startupMenu = nullptr;
+HMENU g_startupTargetsMenu = nullptr;
+std::vector<std::wstring> g_startupDocuments;
+std::vector<std::pair<bool, std::wstring>> g_startupMenuTargets;
 std::wstring g_viewerStatus;
 bool g_persistSessionEnabled = false;
 bool g_sessionStateLoaded = false;
@@ -172,6 +176,7 @@ constexpr int kShortcutReferenceMenuId = 123;
 constexpr int kBinaryButtonId = 124;
 constexpr int kFindTextMenuId = 125;
 constexpr int kToggleTopmostMenuId = 126;
+constexpr int kFilePickerMenuId = 127;
 constexpr int kDetachedDiagramZoomInButtonId = 201;
 constexpr int kDetachedDiagramZoomOutButtonId = 202;
 constexpr int kDetachedDiagramResetButtonId = 203;
@@ -236,7 +241,6 @@ struct OpenTab {
     ViewMode viewMode = ViewMode::Raw;
     std::vector<int> jpLines;
     int totalLines = 1;
-    bool persistent = false;
     ReaderViewPosition readingPositions[6];
     reader_next::PdfViewState pdfPosition;
     textviewer::mermaid::DiagramViewState diagramPosition;
@@ -282,7 +286,7 @@ HWND g_hwndHighlightBar = NULL;
 reader_next::SearchOverview g_searchOverview;
 void RefreshSearchOverview();
 
-void PopulateFileTree(const std::wstring& directoryPath);
+void PopulateFileTree(std::wstring directoryPath);
 void OpenDetachedDiagramWindow(HWND source);
 void UpdateInlineDiagramBounds();
 void SetViewerStatus(HWND owner, const std::wstring& message);
@@ -295,7 +299,10 @@ bool IsTrustedReadonlyViewerWindow(HWND hwnd);
 void SendTabTransferAcknowledgement(HWND source, ULONG_PTR token);
 void RelayoutViewer();
 [[nodiscard]] bool SaveReadonlySession(std::wstring* error = nullptr);
-void RestoreReadonlySession(HWND owner);
+void RestoreReadonlySession(HWND owner, bool openDocuments = true);
+void UpdateStartupMenu();
+void ShowFilePickerMenu(HWND owner);
+[[nodiscard]] std::wstring StartupPathKey(const std::wstring& path);
 
 void BuildViewerMenu(HWND hwnd) {
     HMENU bar = CreateMenu();
@@ -310,6 +317,7 @@ void BuildViewerMenu(HWND hwnd) {
     using ShortcutAction = application_shortcuts::Action;
     AppendMenuW(file, MF_STRING, kOpenFileButtonId, shortcutText(L"readonly.menu.open_file", ShortcutAction::OpenFile).c_str());
     AppendMenuW(file, MF_STRING, kOpenFolderButtonId, localization::Text(L"readonly.menu.open_folder").c_str());
+    AppendMenuW(file, MF_STRING, kFilePickerMenuId, localization::Text(L"readonly.picker.list").c_str());
     AppendMenuW(file, MF_STRING, reader_next::kFolderBackId, localization::Text(L"readonly.menu.folder_back").c_str());
     AppendMenuW(file, MF_STRING, reader_next::kFolderUpId, localization::Text(L"readonly.menu.folder_up").c_str());
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
@@ -347,16 +355,22 @@ void BuildViewerMenu(HWND hwnd) {
     AppendMenuW(view, MF_STRING, kFindTextMenuId, localization::Text(L"readonly.menu.find_text").c_str());
     AppendMenuW(view, MF_STRING, reader_next::kFindNextId, localization::Text(L"readonly.menu.find_next").c_str());
     AppendMenuW(view, MF_STRING, reader_next::kFindPreviousId, localization::Text(L"readonly.menu.find_previous").c_str());
-    AppendMenuW(paths, MF_STRING, kPathMarkTabPersistentMenuId, localization::Text(L"readonly.menu.persist_current_tab").c_str());
-    AppendMenuW(paths, MF_STRING, kPathMarkTabTemporaryMenuId, localization::Text(L"readonly.menu.mark_current_tab_temporary").c_str());
+    g_startupMenu = paths;
+    AppendMenuW(paths, MF_STRING, kPersistSessionMenuId, localization::Text(L"readonly.startup.enable").c_str());
     AppendMenuW(paths, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(paths, MF_STRING, kPathMarkFolderPersistentMenuId, localization::Text(L"readonly.menu.persist_current_folder").c_str());
-    AppendMenuW(paths, MF_STRING, kPathMarkFolderTemporaryMenuId, localization::Text(L"readonly.menu.mark_current_folder_temporary").c_str());
-    AppendMenuW(settings, MF_STRING, kPersistSessionMenuId, localization::Text(L"readonly.menu.restore_previous_session").c_str());
+    AppendMenuW(paths, MF_STRING, kPathMarkTabPersistentMenuId, localization::Text(L"readonly.startup.document").c_str());
+    AppendMenuW(paths, MF_STRING, kPathMarkFolderPersistentMenuId, localization::Text(L"readonly.startup.folder").c_str());
+    AppendMenuW(paths, MF_SEPARATOR, 0, nullptr);
+    g_startupTargetsMenu = CreatePopupMenu();
+    if (g_startupTargetsMenu) {
+        MENUINFO info{}; info.cbSize = sizeof(info); info.fMask = MIM_STYLE; info.dwStyle = MNS_NOTIFYBYPOS;
+        SetMenuInfo(g_startupTargetsMenu, &info);
+        AppendMenuW(paths, MF_POPUP, reinterpret_cast<UINT_PTR>(g_startupTargetsMenu), localization::Text(L"readonly.startup.targets").c_str());
+    }
     AppendMenuW(settings, MF_STRING, kShortcutReferenceMenuId, localization::Text(L"shortcut.reference.title").c_str());
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), localization::Text(L"readonly.menu.file").c_str());
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(view), localization::Text(L"readonly.menu.view").c_str());
-    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(paths), localization::Text(L"readonly.menu.path_management").c_str());
+    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(paths), localization::Text(L"readonly.startup.menu").c_str());
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(settings), localization::Text(L"readonly.menu.settings").c_str());
     AppendMenuW(bar, MF_STRING, kLicensesMenuId, localization::Text(L"reader_next.licenses").c_str());
     HMENU tabs = CreatePopupMenu();
@@ -1692,6 +1706,24 @@ void RestoreReaderPosition(const ReaderViewPosition& position) {
     RedrawWindow(g_hwndEditControl, nullptr, nullptr,
         RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
 }
+[[nodiscard]] bool SelectFileTreeDocument(const std::wstring& path) {
+    for (HTREEITEM item = TreeView_GetRoot(g_hwndFileTree); item;) {
+        TVITEMW data{}; data.mask = TVIF_PARAM; data.hItem = item;
+        if (TreeView_GetItem(g_hwndFileTree, &data) && data.lParam >= 0 && data.lParam < static_cast<LPARAM>(g_filePaths.size()) &&
+            _wcsicmp(g_filePaths[data.lParam].c_str(), path.c_str()) == 0) {
+            g_syncFileSelection = true; TreeView_SelectItem(g_hwndFileTree, item);
+            TreeView_EnsureVisible(g_hwndFileTree, item); g_syncFileSelection = false;
+            return true;
+        }
+        if (HTREEITEM child = TreeView_GetChild(g_hwndFileTree, item)) item = child;
+        else {
+            while (item && !TreeView_GetNextSibling(g_hwndFileTree, item)) item = TreeView_GetParent(g_hwndFileTree, item);
+            if (item) item = TreeView_GetNextSibling(g_hwndFileTree, item);
+        }
+    }
+    return false;
+}
+
 void ShowCurrentTab(bool rememberView = true) {
     if (rememberView) RememberReaderView();
     struct PublicationGuard {
@@ -1804,15 +1836,7 @@ void ShowCurrentTab(bool rememberView = true) {
     SetPropW(g_hwndMain, L"ReaderNextReadingWidth", reinterpret_cast<HANDLE>(static_cast<UINT_PTR>(readingWidth)));
     UpdateReaderWindowTitle(g_hwndMain);
     // Reflect the active document when switching tabs without opening it again.
-    HTREEITEM root = TreeView_GetRoot(g_hwndFileTree);
-    for (HTREEITEM item = TreeView_GetChild(g_hwndFileTree, root); item; item = TreeView_GetNextSibling(g_hwndFileTree, item)) {
-        TVITEMW data{}; data.mask = TVIF_PARAM; data.hItem = item;
-        if (TreeView_GetItem(g_hwndFileTree, &data) && data.lParam >= 0 && data.lParam < static_cast<LPARAM>(g_filePaths.size()) &&
-            _wcsicmp(g_filePaths[data.lParam].c_str(), tab.path.c_str()) == 0) {
-            g_syncFileSelection = true; TreeView_SelectItem(g_hwndFileTree, item);
-            TreeView_EnsureVisible(g_hwndFileTree, item); g_syncFileSelection = false; break;
-        }
-    }
+    (void)SelectFileTreeDocument(tab.path);
     if (g_hwndHighlightBar) InvalidateRect(g_hwndHighlightBar, NULL, TRUE);
     RelayoutViewer();
     if (newlyOpenedPdf) {
@@ -2159,21 +2183,26 @@ bool ReadReadonlySessionFile(const std::filesystem::path& path, StoredReadonlySe
     std::ostringstream json;
     json << "{\n  \"format\": \"readonly_viewer_session_v1\",\n  \"persistenceEnabled\": "
          << (g_persistSessionEnabled ? "true" : "false") << ",\n  \"folder\": {\"path\": \"";
-    if (g_persistSessionEnabled && g_sessionFolderPersistent) json << EscapeJsonString(WideToUTF8(g_sessionFolder));
-    json << "\", \"persistent\": " << (g_persistSessionEnabled && g_sessionFolderPersistent ? "true" : "false") << "},\n"
-         << "  \"selectedTab\": " << (g_persistSessionEnabled ? g_currentTab : -1) << ",\n  \"tabs\": [";
+    if (g_sessionFolderPersistent) json << EscapeJsonString(WideToUTF8(g_sessionFolder));
+    int selected = -1;
+    if (g_currentTab >= 0 && g_currentTab < static_cast<int>(g_tabs.size())) {
+        for (size_t i = 0; i < g_startupDocuments.size(); ++i)
+            if (_wcsicmp(StartupPathKey(g_startupDocuments[i]).c_str(), StartupPathKey(g_tabs[g_currentTab].path).c_str()) == 0) selected = static_cast<int>(i);
+    }
+    json << "\", \"persistent\": " << (g_sessionFolderPersistent ? "true" : "false") << "},\n"
+         << "  \"selectedTab\": " << selected << ",\n  \"tabs\": [";
     bool first = true;
-    if (g_persistSessionEnabled) for (const OpenTab& tab : g_tabs) if (tab.persistent) {
+    for (const auto& path : g_startupDocuments) {
         if (!first) json << ',';
         first = false;
-        json << "\n    {\"path\": \"" << EscapeJsonString(WideToUTF8(tab.path)) << "\", \"persistent\": true}";
+        json << "\n    {\"path\": \"" << EscapeJsonString(WideToUTF8(path)) << "\", \"persistent\": true}";
     }
     if (!first) json << '\n';
     json << "  ]\n}\n";
     return atomic_write::AtomicWriteUtf8(dir / kViewerSessionFile, json.str(), dir, error);
 }
 
-void RestoreReadonlySession(HWND owner) {
+void RestoreReadonlySession(HWND owner, bool openDocuments) {
     const std::filesystem::path dir = ViewerExeDirectory();
     if (dir.empty()) return;
     StoredReadonlySession shared, privateState;
@@ -2191,33 +2220,147 @@ void RestoreReadonlySession(HWND owner) {
     g_sessionStateLoaded = hasPrivate || (!privateExistsEc && !privateExists);
     // The dedicated file is the user's explicit choice.  It can disable restoration
     // even when a previously distributed/shared setup still contains old paths.
-    if (hasPrivate ? !privateState.persistenceEnabled : (!hasShared || !shared.persistenceEnabled)) return;
-    g_persistSessionEnabled = true;
-    const StoredReadonlySession* folderState =
-        hasPrivate && privateState.folderPersistent ? &privateState : (hasShared ? &shared : nullptr);
-    if (folderState && folderState->folderPersistent && IsSupportedLocalPath(folderState->folder)) {
+    // A dedicated file is authoritative even when ON with zero targets. Never
+    // resurrect removed targets from the legacy/shared setup. A malformed
+    // dedicated file must not fall back to older registrations either.
+    const auto* state = hasPrivate ? &privateState :
+        (!privateExistsEc && !privateExists && hasShared ? &shared : nullptr);
+    if (!state) return;
+    g_persistSessionEnabled = state->persistenceEnabled;
+    g_sessionFolderPersistent = state->folderPersistent && !state->folder.empty();
+    if (g_sessionFolderPersistent) g_sessionFolder = state->folder;
+    g_startupDocuments.clear();
+    for (const auto& [path, persistent] : state->tabs) {
+        if (!persistent || path.empty()) continue;
+        if (std::none_of(g_startupDocuments.begin(), g_startupDocuments.end(), [&](const auto& saved) {
+            return _wcsicmp(saved.c_str(), path.c_str()) == 0;
+        })) g_startupDocuments.push_back(path);
+    }
+    if (!openDocuments || !g_persistSessionEnabled) return;
+    if (g_sessionFolderPersistent && IsSupportedLocalPath(g_sessionFolder)) {
         std::error_code ec;
-        if (std::filesystem::is_directory(folderState->folder, ec) && !ec) {
-            g_sessionFolder = folderState->folder;
-            g_sessionFolderPersistent = true;
-            PopulateFileTree(folderState->folder);
+        if (std::filesystem::is_directory(g_sessionFolder, ec) && !ec) {
+            PopulateFileTree(g_sessionFolder);
         }
     }
-    std::vector<std::wstring> restored;
-    const auto restoreTabs = [&](const StoredReadonlySession& state) {
-        for (const auto& [path, persistent] : state.tabs) {
-            if (!persistent || !IsSupportedLocalPath(path)) continue;
-            std::error_code ec;
-            if (!std::filesystem::is_regular_file(path, ec) || ec) continue;
-            const std::wstring normalized = std::filesystem::absolute(path, ec).lexically_normal().wstring();
-            if (ec || std::find_if(restored.begin(), restored.end(), [&](const std::wstring& item) { return _wcsicmp(item.c_str(), normalized.c_str()) == 0; }) != restored.end()) continue;
-            if (OpenPathInTab(owner, normalized)) { g_tabs.back().persistent = true; restored.push_back(normalized); }
+    int selectedOpenTab = -1;
+    for (size_t i = 0; i < g_startupDocuments.size(); ++i) {
+        const auto& path = g_startupDocuments[i];
+        if (!IsSupportedLocalPath(path)) continue;
+        std::error_code ec;
+        if (!std::filesystem::is_regular_file(path, ec) || ec) continue;
+        if (OpenPathInTab(owner, path) && static_cast<int>(i) == state->selectedTab) selectedOpenTab = g_currentTab;
+    }
+    if (selectedOpenTab >= 0) SelectTab(selectedOpenTab);
+}
+
+[[nodiscard]] std::wstring StartupPathKey(const std::wstring& path) {
+    std::error_code ec;
+    const auto absolute = std::filesystem::absolute(path, ec);
+    return ec ? path : absolute.lexically_normal().wstring();
+}
+
+[[nodiscard]] bool IsStartupDocument(const std::wstring& path) {
+    const auto key = StartupPathKey(path);
+    return std::any_of(g_startupDocuments.begin(), g_startupDocuments.end(), [&](const auto& saved) {
+        return _wcsicmp(StartupPathKey(saved).c_str(), key.c_str()) == 0;
+    });
+}
+
+[[nodiscard]] std::wstring MenuSafeText(std::wstring text) {
+    for (size_t i = 0; i < text.size(); ++i) {
+        if (text[i] == L'&') text.insert(i++, 1, L'&');
+        else if (text[i] < L' ') text[i] = L' ';
+    }
+    return text;
+}
+
+[[nodiscard]] std::wstring StartupTargetName(const std::wstring& path) {
+    const std::filesystem::path value(path);
+    const auto name = value.filename().wstring();
+    const auto parent = value.parent_path().filename().wstring();
+    return MenuSafeText(name.empty() ? value.root_path().wstring() : (parent.empty() ? name : parent + L" / " + name));
+}
+
+void UpdateStartupMenu() {
+    if (!g_startupMenu) return;
+    const bool hasTab = g_currentTab >= 0 && g_currentTab < static_cast<int>(g_tabs.size());
+    CheckMenuItem(g_startupMenu, kPersistSessionMenuId, MF_BYCOMMAND | (g_persistSessionEnabled ? MF_CHECKED : MF_UNCHECKED));
+    const auto document = localization::Text(L"readonly.startup.document") +
+        (hasTab ? L"  (" + StartupTargetName(g_tabs[g_currentTab].path) + L")" : L"");
+    const auto folder = localization::Text(L"readonly.startup.folder") +
+        (g_browseFolder.empty() ? L"" : L"  (" + StartupTargetName(g_browseFolder) + L")");
+    ModifyMenuW(g_startupMenu, kPathMarkTabPersistentMenuId, MF_BYCOMMAND | MF_STRING |
+        (g_persistSessionEnabled && hasTab ? MF_ENABLED : MF_GRAYED) |
+        (hasTab && IsStartupDocument(g_tabs[g_currentTab].path) ? MF_CHECKED : MF_UNCHECKED),
+        kPathMarkTabPersistentMenuId, document.c_str());
+    ModifyMenuW(g_startupMenu, kPathMarkFolderPersistentMenuId, MF_BYCOMMAND | MF_STRING |
+        (g_persistSessionEnabled && !g_browseFolder.empty() ? MF_ENABLED : MF_GRAYED) |
+        (g_sessionFolderPersistent && _wcsicmp(g_browseFolder.c_str(), g_sessionFolder.c_str()) == 0 ? MF_CHECKED : MF_UNCHECKED),
+        kPathMarkFolderPersistentMenuId, folder.c_str());
+    if (!g_startupTargetsMenu) return;
+    while (GetMenuItemCount(g_startupTargetsMenu) > 0)
+        if (!DeleteMenu(g_startupTargetsMenu, 0, MF_BYPOSITION)) return;
+    g_startupMenuTargets.clear();
+    if (g_sessionFolderPersistent) g_startupMenuTargets.emplace_back(true, g_sessionFolder);
+    for (const auto& path : g_startupDocuments) g_startupMenuTargets.emplace_back(false, path);
+    if (g_startupMenuTargets.empty()) {
+        AppendMenuW(g_startupTargetsMenu, MF_STRING | MF_GRAYED, 0, localization::Text(L"readonly.startup.empty").c_str());
+    }
+    for (const auto& [directory, path] : g_startupMenuTargets) {
+        const auto label = localization::Format(directory ? L"readonly.startup.remove_folder" : L"readonly.startup.remove_document",
+            {{L"NAME", StartupTargetName(path)}});
+        AppendMenuW(g_startupTargetsMenu, MF_STRING, 0, label.c_str());
+    }
+}
+
+// The UI thread owns this transaction. Explicit edits change only the exe-side
+// settings, never source documents. Keep the previous selection on save failure.
+// Enabled and the registrations are independent: ON + zero is a valid state.
+template<class Edit>
+void ApplyStartupEdit(HWND owner, Edit edit) {
+    if (!g_sessionStateLoaded) RestoreReadonlySession(owner, false);
+    if (!g_sessionStateLoaded) {
+        SetViewerStatus(owner, localization::Text(L"readonly.startup.unreadable"));
+        return;
+    }
+    const bool enabled = g_persistSessionEnabled, folderPersistent = g_sessionFolderPersistent;
+    const auto documents = g_startupDocuments;
+    const auto folder = g_sessionFolder;
+    edit();
+    std::wstring error;
+    if (!SaveReadonlySession(&error)) {
+        g_persistSessionEnabled = enabled; g_sessionFolderPersistent = folderPersistent;
+        g_startupDocuments = documents; g_sessionFolder = folder;
+        SetViewerStatus(owner, localization::Text(L"readonly.startup.save_failed"));
+    } else {
+        SetViewerStatus(owner, localization::Text(g_persistSessionEnabled && g_startupDocuments.empty() && !g_sessionFolderPersistent
+            ? L"readonly.startup.empty_enabled" : L"readonly.startup.saved"));
+    }
+    UpdateStartupMenu();
+}
+
+void HandleStartupCommand(HWND owner, UINT command) {
+    ApplyStartupEdit(owner, [command] {
+        if (command == kPersistSessionMenuId) { g_persistSessionEnabled = !g_persistSessionEnabled; return; }
+        if (command == kPathMarkTabPersistentMenuId || command == kPathMarkTabTemporaryMenuId) {
+            if (g_currentTab < 0 || g_currentTab >= static_cast<int>(g_tabs.size())) return;
+            const auto path = StartupPathKey(g_tabs[g_currentTab].path);
+            const bool remove = command == kPathMarkTabTemporaryMenuId || IsStartupDocument(path);
+            if (!remove && !g_persistSessionEnabled) return;
+            g_startupDocuments.erase(std::remove_if(g_startupDocuments.begin(), g_startupDocuments.end(), [&](const auto& saved) {
+                return _wcsicmp(StartupPathKey(saved).c_str(), path.c_str()) == 0;
+            }), g_startupDocuments.end());
+            if (!remove) g_startupDocuments.push_back(path);
+        } else {
+            const bool remove = command == kPathMarkFolderTemporaryMenuId ||
+                (g_sessionFolderPersistent && _wcsicmp(g_browseFolder.c_str(), g_sessionFolder.c_str()) == 0);
+            if (remove) g_sessionFolderPersistent = false;
+            else if (g_persistSessionEnabled && !g_browseFolder.empty()) {
+                g_sessionFolder = g_browseFolder; g_sessionFolderPersistent = true;
+            }
         }
-    };
-    if (hasShared && shared.persistenceEnabled) restoreTabs(shared);
-    if (hasPrivate) restoreTabs(privateState);
-    const int selected = hasPrivate ? privateState.selectedTab : shared.selectedTab;
-    if (selected >= 0 && selected < static_cast<int>(g_tabs.size())) SelectTab(selected);
+    });
 }
 
 std::filesystem::path InitialDialogFolder() {
@@ -2655,7 +2798,74 @@ void PopulateReleaseDocuments(const std::vector<std::wstring>& paths) {
     TreeView_Expand(g_hwndFileTree, hRoot, TVE_EXPAND);
 }
 
-void PopulateFileTree(const std::wstring& directoryPath) {
+// UI-thread-owned tree/path tables. Only enumerate the opened folder and the
+// immediate contents of its pdf/note storage folders; never modify source data.
+void AppendFileTreeFolder(const std::filesystem::path& folder, HTREEITEM parent, bool groupStorageFolders) {
+    TVINSERTSTRUCTW tvis{};
+    tvis.hParent = parent;
+    tvis.hInsertAfter = TVI_LAST;
+    tvis.item.mask = TVIF_TEXT | TVIF_PARAM;
+    std::vector<std::filesystem::path> directories;
+    std::vector<std::filesystem::path> files;
+    std::error_code ec;
+    for (std::filesystem::directory_iterator it(folder, std::filesystem::directory_options::skip_permission_denied, ec), end;
+         !ec && it != end; it.increment(ec)) {
+        std::error_code entryEc;
+        if (it->is_directory(entryEc) && !entryEc && IsSupportedLocalPath(it->path().wstring())) directories.push_back(it->path());
+        else if (it->is_regular_file(entryEc) && !entryEc) files.push_back(it->path());
+    }
+    const auto byName = [](const std::filesystem::path& left, const std::filesystem::path& right) {
+        return _wcsicmp(left.filename().c_str(), right.filename().c_str()) < 0;
+    };
+    std::sort(directories.begin(), directories.end(), byName);
+    std::sort(files.begin(), files.end(), byName);
+    if (groupStorageFolders) {
+        for (const auto* name : {L"pdf", L"note"}) {
+            const auto found = std::find_if(directories.begin(), directories.end(), [name](const auto& directory) {
+                return _wcsicmp(directory.filename().c_str(), name) == 0;
+            });
+            if (found == directories.end()) continue;
+            const auto label = wcscmp(name, L"pdf") == 0
+                ? localization::Text(L"readonly.tree.pdf_folder")
+                : localization::Text(L"readonly.tree.note_folder");
+            tvis.item.pszText = const_cast<LPWSTR>(label.c_str());
+            tvis.item.lParam = -1; // A grouping node expands without changing the browse folder.
+            tvis.item.mask |= TVIF_STATE;
+            tvis.item.stateMask = TVIS_BOLD; tvis.item.state = TVIS_BOLD;
+            HTREEITEM group = TreeView_InsertItem(g_hwndFileTree, &tvis);
+            tvis.item.mask = TVIF_TEXT | TVIF_PARAM;
+            if (group) {
+                AppendFileTreeFolder(*found, group, false);
+                TreeView_Expand(g_hwndFileTree, group, TVE_EXPAND);
+            }
+            directories.erase(found);
+        }
+    }
+    for (const auto& directory : directories) {
+        g_directoryPaths.push_back(directory.wstring());
+        auto label = localization::Format(L"readonly.tree.directory", {{L"NAME", directory.filename().wstring()}});
+        tvis.item.pszText = label.data();
+        tvis.item.lParam = -static_cast<LPARAM>(g_directoryPaths.size()) - 1;
+        TreeView_InsertItem(g_hwndFileTree, &tvis);
+    }
+    for (const auto& file : files) {
+        g_filePaths.push_back(file.wstring());
+        auto extension = file.extension().wstring();
+        std::transform(extension.begin(), extension.end(), extension.begin(), ::towlower);
+        const auto type = extension == L".pdf" ? localization::Text(L"menu.common.pdf") :
+            extension == L".clrop" ? localization::Text(L"readonly.tree.annotation_type") :
+            (extension == L".clro" || extension == L".md" || extension == L".txt") ? localization::Text(L"readonly.tree.note_type") :
+            localization::Text(L"readonly.tree.file_type");
+        auto label = localization::Format(L"readonly.tree.file_label", {{L"NAME", file.filename().wstring()}, {L"TYPE", type}});
+        tvis.item.pszText = label.data();
+        tvis.item.lParam = static_cast<LPARAM>(g_filePaths.size() - 1);
+        TreeView_InsertItem(g_hwndFileTree, &tvis);
+    }
+}
+
+// Own the path before clearing tables: folder navigation can pass an entry in
+// g_directoryPaths, whose storage is invalidated while rebuilding the tree.
+void PopulateFileTree(std::wstring directoryPath) {
     if (!g_browseFolder.empty() && _wcsicmp(g_browseFolder.c_str(), directoryPath.c_str()) != 0 && !g_browseBack) {
         if (g_folderHistory.size() >= 64) g_folderHistory.erase(g_folderHistory.begin());
         g_folderHistory.push_back(g_browseFolder);
@@ -2667,7 +2877,6 @@ void PopulateFileTree(const std::wstring& directoryPath) {
     // Browsing another folder (including local license documents) must not
     // replace the path the user explicitly marked for session restoration.
     if (!g_sessionFolderPersistent) g_sessionFolder = directoryPath;
-    if (!g_persistSessionEnabled) g_sessionFolderPersistent = false;
     TreeView_DeleteAllItems(g_hwndFileTree);
     g_filePaths.clear();
     g_directoryPaths.clear();
@@ -2682,52 +2891,85 @@ void PopulateFileTree(const std::wstring& directoryPath) {
     tvis.item.lParam = -1;
     tvis.item.mask |= TVIF_STATE; tvis.item.stateMask = TVIS_BOLD; tvis.item.state = TVIS_BOLD;
     HTREEITEM hRoot = TreeView_InsertItem(g_hwndFileTree, &tvis);
-    const auto parentName = std::filesystem::path(directoryPath).parent_path().filename().wstring();
-    const auto breadcrumb = parentName.empty() ? rootLabel : parentName + L" / " + rootLabel;
+    const auto breadcrumb = localization::Format(L"readonly.picker.location", {{L"NAME", rootLabel}});
     SetWindowTextW(g_hwndFileTreeLabel, breadcrumb.c_str());
 
-    const auto addDirectory = [&](const std::wstring& path, const std::wstring& label) {
-        g_directoryPaths.push_back(path);
-        tvis.hParent = hRoot;
-        tvis.item.mask = TVIF_TEXT | TVIF_PARAM;
-        tvis.item.pszText = const_cast<LPWSTR>(label.c_str());
-        tvis.item.lParam = -static_cast<LPARAM>(g_directoryPaths.size()) - 1;
-        TreeView_InsertItem(g_hwndFileTree, &tvis);
-    };
-
-    std::error_code ec;
     const std::filesystem::path current(directoryPath);
-    const std::filesystem::path parent = current.parent_path();
-    if (!parent.empty() && parent != current && IsSupportedLocalPath(parent.wstring())) {
-        addDirectory(parent.wstring(), localization::Text(L"reader_next.parent_folder"));
-    }
-    std::vector<std::filesystem::path> directories;
-    std::vector<std::filesystem::path> files;
-    for (std::filesystem::directory_iterator it(current, std::filesystem::directory_options::skip_permission_denied, ec), end;
-         !ec && it != end; it.increment(ec)) {
-        std::error_code entryEc;
-        if (it->is_directory(entryEc) && !entryEc && IsSupportedLocalPath(it->path().wstring())) directories.push_back(it->path());
-        else if (it->is_regular_file(entryEc) && !entryEc) files.push_back(it->path());
-    }
-    const auto byName = [](const std::filesystem::path& left, const std::filesystem::path& right) {
-        return _wcsicmp(left.filename().c_str(), right.filename().c_str()) < 0;
-    };
-    std::sort(directories.begin(), directories.end(), byName);
-    std::sort(files.begin(), files.end(), byName);
-    for (const auto& directory : directories) addDirectory(directory.wstring(), directory.filename().wstring());
-    for (const auto& file : files) {
-        g_filePaths.push_back(file.wstring());
-        tvis.hParent = hRoot;
-        tvis.item.mask = TVIF_TEXT | TVIF_PARAM;
-        std::wstring filename = file.filename().wstring();
-        tvis.item.pszText = const_cast<LPWSTR>(filename.c_str());
-        tvis.item.lParam = static_cast<LPARAM>(g_filePaths.size() - 1);
-        TreeView_InsertItem(g_hwndFileTree, &tvis);
-    }
+    AppendFileTreeFolder(current, hRoot, true);
     TreeView_Expand(g_hwndFileTree, hRoot, TVE_EXPAND);
-    g_syncFileSelection = true; TreeView_SelectItem(g_hwndFileTree, hRoot); g_syncFileSelection = false;
+    if (g_currentTab < 0 || g_currentTab >= static_cast<int>(g_tabs.size()) || !SelectFileTreeDocument(g_tabs[g_currentTab].path)) {
+        g_syncFileSelection = true; TreeView_SelectItem(g_hwndFileTree, hRoot); g_syncFileSelection = false;
+    }
 }
 
+// Build a temporary picker from the already loaded tree, including its logical
+// PDF/note groups. This does not widen the window or perform another disk scan.
+void AppendFilePickerItems(HMENU menu, HTREEITEM item, std::vector<std::pair<bool, std::wstring>>& targets, int depth) {
+    for (; item; item = TreeView_GetNextSibling(g_hwndFileTree, item)) {
+        wchar_t label[1024]{};
+        TVITEMW data{}; data.hItem = item; data.mask = TVIF_TEXT | TVIF_PARAM;
+        data.pszText = label; data.cchTextMax = static_cast<int>(std::size(label));
+        if (!TreeView_GetItem(g_hwndFileTree, &data)) continue;
+        const auto text = MenuSafeText(label);
+        const auto child = TreeView_GetChild(g_hwndFileTree, item);
+        if (child && depth < 32) {
+            const auto sub = CreatePopupMenu();
+            if (!sub) continue;
+            AppendFilePickerItems(sub, child, targets, depth + 1);
+            if (!AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(sub), text.c_str())) DestroyMenu(sub);
+        } else {
+            std::optional<std::pair<bool, std::wstring>> target;
+            if (data.lParam >= 0 && data.lParam < static_cast<LPARAM>(g_filePaths.size()))
+                target = std::make_pair(false, g_filePaths[static_cast<size_t>(data.lParam)]);
+            else if (data.lParam <= -2) {
+                const auto i = static_cast<size_t>(-data.lParam - 2);
+                if (i < g_directoryPaths.size()) target = std::make_pair(true, g_directoryPaths[i]);
+            }
+            if (target && targets.size() < 60000) {
+                targets.push_back(std::move(*target));
+                AppendMenuW(menu, MF_STRING, targets.size() + 9, text.c_str());
+            } else AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, text.c_str());
+        }
+    }
+}
+
+void ShowFilePickerMenu(HWND owner) {
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return;
+    AppendMenuW(menu, MF_STRING | (g_folderHistory.empty() ? MF_GRAYED : 0), 1, localization::Text(L"reader_next.folder_back").c_str());
+    AppendMenuW(menu, MF_STRING | (IsWindowEnabled(GetDlgItem(owner, reader_next::kFolderUpId)) ? 0 : MF_GRAYED), 2,
+        localization::Text(L"reader_next.folder_up").c_str());
+    AppendMenuW(menu, MF_STRING, 3, localization::Text(L"reader_next.folder").c_str());
+    AppendMenuW(menu, MF_STRING, 4, localization::Text(L"reader_next.open").c_str());
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    const auto root = TreeView_GetRoot(g_hwndFileTree);
+    std::vector<std::pair<bool, std::wstring>> targets;
+    if (root) AppendFilePickerItems(menu, root, targets, 0);
+    RECT anchor{};
+    HWND button = GetDlgItem(owner, kFilePickerMenuId);
+    POINT point{8, 8};
+    if (button && IsWindowVisible(button) && GetWindowRect(button, &anchor)) point = {anchor.left, anchor.bottom};
+    else ClientToScreen(owner, &point);
+    const auto command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, point.x, point.y, 0, owner, nullptr);
+    DestroyMenu(menu);
+    if (command >= 10 && static_cast<size_t>(command - 10) < targets.size()) {
+        const auto& target = targets[command - 10];
+        if (target.first) PopulateFileTree(target.second);
+        else OpenPathInTab(owner, target.second);
+    } else if (command >= 1 && command <= 4) {
+        const UINT commands[]{reader_next::kFolderBackId, reader_next::kFolderUpId, kOpenFolderButtonId, kOpenFileButtonId};
+        SendMessageW(owner, WM_COMMAND, commands[command - 1], 0);
+    }
+}
+
+
+[[nodiscard]] bool IsViewerSidebarVisible(HWND owner) {
+    RECT client{};
+    // Preserve the user's normal/focus preference while a narrow window lends
+    // the sidebar's space to the document. It returns when the window widens.
+    return g_leftPaneVisible && GetClientRect(owner, &client) &&
+        client.right - client.left >= reader_next::Px(owner, 740);
+}
 
 void LayoutToolbarControls(HWND hWnd, int splitX, int rightPaneWidth, int height) {
     const auto px = [hWnd](int n) { return reader_next::Px(hWnd, n); };
@@ -2738,12 +2980,17 @@ void LayoutToolbarControls(HWND hWnd, int splitX, int rightPaneWidth, int height
     const bool pdf = hasTab && g_tabs[g_currentTab].isPdf;
     const bool binary = hasTab && g_tabs[g_currentTab].isBinary;
     ShowWindow(g_hwndTabControl, focus ? SW_HIDE : SW_SHOW);
-    if (!focus) MoveWindow(g_hwndTabControl, x, px(4), width, px(28), TRUE);
+    const bool picker = !focus && !IsViewerSidebarVisible(hWnd);
+    ShowWindow(GetDlgItem(hWnd, kFilePickerMenuId), picker ? SW_SHOW : SW_HIDE);
+    if (picker) MoveWindow(GetDlgItem(hWnd, kFilePickerMenuId), x, px(4), px(98), px(28), TRUE);
+    if (!focus) MoveWindow(g_hwndTabControl, x + (picker ? px(104) : 0), px(4), std::max(0, width - (picker ? px(104) : 0)), px(28), TRUE);
     int modeX = x;
     for (int id : {kDecoratedButtonId, kRawButtonId, kHexButtonId, kBinaryButtonId, kDiagramButtonId}) {
         HWND button = GetDlgItem(hWnd, id);
         const bool byteMode = id == kHexButtonId || id == kBinaryButtonId;
-        const bool visible = !focus && !pdf && (!binary || byteMode);
+        const bool visible = !focus && !pdf && (!binary || byteMode) &&
+            modeX + px(70) + px(8) <= x + width - px(192);
+        if (!visible && GetFocus() == button) SetFocus(hWnd);
         ShowWindow(button, visible ? SW_SHOW : SW_HIDE);
         if (visible) {
             MoveWindow(button, modeX, px(40), px(70), px(28), TRUE);
@@ -2950,6 +3197,7 @@ bool CreateReaderControls(HWND owner) {
         return reader_next::Button(owner, id, localization::Text(key).c_str());
     };
     controlsCreated &= button(kOpenFileButtonId, L"reader_next.open") != nullptr;
+    controlsCreated &= button(kFilePickerMenuId, L"readonly.picker.list") != nullptr;
     controlsCreated &= button(kDecoratedButtonId, L"reader_next.reading") != nullptr;
     controlsCreated &= button(kRawButtonId, L"reader_next.raw") != nullptr;
     controlsCreated &= button(kHexButtonId, L"reader_next.hex") != nullptr;
@@ -3135,30 +3383,35 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             if (!g_publishingReaderView) RememberReaderView();
             const auto px = [hWnd](int n) { return reader_next::Px(hWnd, n); };
             const int width = LOWORD(lParam), height = HIWORD(lParam);
-            const int split = g_leftPaneVisible ? std::clamp(g_splitX, px(210), std::max(px(210), width - px(530))) : 0;
+            const bool sidebar = IsViewerSidebarVisible(hWnd);
+            const int split = sidebar ? std::clamp(g_splitX, px(210), std::max(px(210), width - px(530))) : 0;
             HWND openFile = GetDlgItem(hWnd, kOpenFileButtonId);
             for (HWND control : {g_hwndToggleLeftPaneButton, openFile, g_hwndOpenFolderButton,
-                                 g_hwndFileTree, g_hwndTocTree, g_hwndFileTreeLabel, g_hwndTocTreeLabel})
-                ShowWindow(control, g_leftPaneVisible ? SW_SHOW : SW_HIDE);
-            if (g_leftPaneVisible) {
+                                 g_hwndFileTree, g_hwndTocTree, g_hwndFileTreeLabel, g_hwndTocTreeLabel}) {
+                if (!sidebar && GetFocus() == control) SetFocus(hWnd);
+                ShowWindow(control, sidebar ? SW_SHOW : SW_HIDE);
+            }
+            if (sidebar) {
                 g_splitX = split;
                 MoveWindow(g_hwndToggleLeftPaneButton, px(12), px(44), split - px(24), px(28), TRUE);
                 SetWindowTextW(g_hwndToggleLeftPaneButton, localization::Text(L"reader_next.focus").c_str());
                 MoveWindow(openFile, px(12), px(80), split - px(24), px(28), TRUE);
                 MoveWindow(g_hwndOpenFolderButton, px(12), px(114), split - px(24), px(28), TRUE);
-                int treeHeight = std::max(0, height - px(220));
+                int treeHeight = std::max(0, height - px(248));
                 int fileHeight = treeHeight * 55 / 100;
-                MoveWindow(g_hwndFileTreeLabel, px(18), px(160), split - px(104), px(24), TRUE);
-                MoveWindow(g_hwndFileTree, px(12), px(192), split - px(24), fileHeight, TRUE);
-                MoveWindow(g_hwndTocTreeLabel, px(18), px(202) + fileHeight, split - px(36), px(24), TRUE);
-                MoveWindow(g_hwndTocTree, px(12), px(234) + fileHeight, split - px(24), std::max(0, height - px(250) - fileHeight), TRUE);
+                MoveWindow(g_hwndFileTreeLabel, px(12), px(188), split - px(24), px(24), TRUE);
+                MoveWindow(g_hwndFileTree, px(12), px(220), split - px(24), fileHeight, TRUE);
+                MoveWindow(g_hwndTocTreeLabel, px(18), px(230) + fileHeight, split - px(36), px(24), TRUE);
+                MoveWindow(g_hwndTocTree, px(12), px(262) + fileHeight, split - px(24), std::max(0, height - px(278) - fileHeight), TRUE);
             }
-            int folderX = split - px(78);
+            int folderX = px(12);
+            const int folderButtonWidth = std::max(0, (split - px(32)) / 2);
             for (UINT id : {reader_next::kFolderBackId, reader_next::kFolderUpId}) {
                 HWND control = GetDlgItem(hWnd, id);
-                ShowWindow(control, g_leftPaneVisible ? SW_SHOW : SW_HIDE);
-                if (g_leftPaneVisible) MoveWindow(control, folderX, px(156), px(30), px(28), TRUE);
-                folderX += px(36);
+                if (!sidebar && GetFocus() == control) SetFocus(hWnd);
+                ShowWindow(control, sidebar ? SW_SHOW : SW_HIDE);
+                if (sidebar) MoveWindow(control, folderX, px(150), folderButtonWidth, px(28), TRUE);
+                folderX += folderButtonWidth + px(8);
             }
             LayoutToolbarControls(hWnd, split, width - split, height);
             if (!g_publishingReaderView && g_isRichEdit && g_currentTab >= 0 &&
@@ -3172,7 +3425,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         }
         case WM_GETMINMAXINFO: {
             auto* info = reinterpret_cast<MINMAXINFO*>(lParam);
-            info->ptMinTrackSize = {reader_next::Px(hWnd, 900), reader_next::Px(hWnd, 600)};
+            info->ptMinTrackSize = {reader_next::Px(hWnd, 480), reader_next::Px(hWnd, 600)};
             return 0;
         }
         case WM_DPICHANGED: {
@@ -3185,7 +3438,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             return 0;
         }
         case WM_PAINT:
-            reader_next::Paint(hWnd, g_leftPaneVisible ? g_splitX : 0, g_leftPaneVisible ? reader_next::Px(hWnd, 110) : 0, g_tabs.empty());
+            reader_next::Paint(hWnd, IsViewerSidebarVisible(hWnd) ? g_splitX : 0, g_leftPaneVisible ? reader_next::Px(hWnd, 110) : 0, g_tabs.empty());
             return 0;
         case WM_ERASEBKGND: return 1;
         case WM_CTLCOLORSTATIC:
@@ -3219,6 +3472,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             }
             break;
         case WM_INITMENUPOPUP:
+            if (reinterpret_cast<HMENU>(wParam) == g_startupMenu || reinterpret_cast<HMENU>(wParam) == g_startupTargetsMenu) {
+                if (!g_sessionStateLoaded) RestoreReadonlySession(hWnd, false);
+                UpdateStartupMenu();
+                return 0;
+            }
             if (g_tabSelectionMenu && reinterpret_cast<HMENU>(wParam) == g_tabSelectionMenu) {
                 while (GetMenuItemCount(g_tabSelectionMenu) > 0) {
                     if (!DeleteMenu(g_tabSelectionMenu, 0, MF_BYPOSITION)) return 0;
@@ -3237,6 +3495,16 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 UpdatePdfViewMenu(hWnd);
             break;
         case WM_MENUCOMMAND:
+            if (g_startupTargetsMenu && reinterpret_cast<HMENU>(lParam) == g_startupTargetsMenu) {
+                if (wParam < g_startupMenuTargets.size()) {
+                    const auto target = g_startupMenuTargets[static_cast<size_t>(wParam)];
+                    ApplyStartupEdit(hWnd, [&] {
+                        if (target.first) g_sessionFolderPersistent = false;
+                        else g_startupDocuments.erase(std::remove(g_startupDocuments.begin(), g_startupDocuments.end(), target.second), g_startupDocuments.end());
+                    });
+                }
+                return 0;
+            }
             if (g_tabSelectionMenu && reinterpret_cast<HMENU>(lParam) == g_tabSelectionMenu) {
                 if (wParam < g_tabs.size()) SelectTab(static_cast<int>(wParam));
                 return 0;
@@ -3308,45 +3576,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 case kTabMenuReopenClosed:
                     ReopenLastClosedTab();
                     return 0;
-                case kPersistSessionMenuId: {
-                    g_sessionStateLoaded = true;
-                    g_persistSessionEnabled = !g_persistSessionEnabled;
-                    HMENU menu = GetMenu(hWnd);
-                    HMENU settings = menu ? GetSubMenu(menu, 3) : nullptr;
-                    if (settings) CheckMenuItem(settings, kPersistSessionMenuId,
-                                                MF_BYCOMMAND | (g_persistSessionEnabled ? MF_CHECKED : MF_UNCHECKED));
-                    if (!g_persistSessionEnabled) {
-                        g_sessionFolderPersistent = false;
-                        for (OpenTab& tab : g_tabs) tab.persistent = false;
-                        std::wstring error;
-                        if (!SaveReadonlySession(&error)) SetViewerStatus(hWnd, localization::Text(L"readonly.status.session_disable_save_failed"));
-                    }
-                    DrawMenuBar(hWnd);
-                    SetViewerStatus(hWnd, localization::Text(g_persistSessionEnabled ? L"readonly.status.session_restore_enabled" : L"readonly.status.session_restore_disabled"));
-                    return 0;
-                }
+                case kPersistSessionMenuId:
                 case kPathMarkTabPersistentMenuId:
-                    if (!g_persistSessionEnabled || g_currentTab < 0 || g_currentTab >= static_cast<int>(g_tabs.size())) {
-                        SetViewerStatus(hWnd, localization::Text(L"readonly.status.enable_session_restore_first")); return 0;
-                    }
-                    g_tabs[g_currentTab].persistent = true;
-                    SetViewerStatus(hWnd, localization::Text(L"readonly.status.current_tab_persisted"));
-                    return 0;
                 case kPathMarkTabTemporaryMenuId:
-                    if (g_currentTab >= 0 && g_currentTab < static_cast<int>(g_tabs.size())) g_tabs[g_currentTab].persistent = false;
-                    SetViewerStatus(hWnd, localization::Text(L"readonly.status.current_tab_temporary"));
-                    return 0;
                 case kPathMarkFolderPersistentMenuId:
-                    if (!g_persistSessionEnabled || g_browseFolder.empty()) {
-                        SetViewerStatus(hWnd, localization::Text(L"readonly.status.enable_restore_and_open_folder")); return 0;
-                    }
-                    g_sessionFolder = g_browseFolder;
-                    g_sessionFolderPersistent = true;
-                    SetViewerStatus(hWnd, localization::Text(L"readonly.status.current_folder_persisted"));
-                    return 0;
                 case kPathMarkFolderTemporaryMenuId:
-                    g_sessionFolderPersistent = false;
-                    SetViewerStatus(hWnd, localization::Text(L"readonly.status.current_folder_temporary"));
+                    HandleStartupCommand(hWnd, command);
+                    return 0;
+                case kFilePickerMenuId:
+                    ShowFilePickerMenu(hWnd);
                     return 0;
                 case kOpenFileButtonId: {
                     const std::vector<std::wstring> paths = PromptForLocalPaths(hWnd, false);
@@ -3436,7 +3674,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         }
         case WM_LBUTTONDOWN: {
             int xPos = GET_X_LPARAM(lParam);
-            if (g_leftPaneVisible && xPos >= g_splitX && xPos <= g_splitX + 5) {
+            if (IsViewerSidebarVisible(hWnd) && xPos >= g_splitX && xPos <= g_splitX + 5) {
                 g_isDraggingSplitter = true;
                 SetCapture(hWnd);
             }
@@ -3476,7 +3714,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 SendMessage(hWnd, WM_SIZE, 0, MAKELPARAM(rc.right - rc.left, rc.bottom - rc.top));
             } else {
                 int xPos = GET_X_LPARAM(lParam);
-                if (g_leftPaneVisible && xPos >= g_splitX && xPos <= g_splitX + 5) {
+                if (IsViewerSidebarVisible(hWnd) && xPos >= g_splitX && xPos <= g_splitX + 5) {
                     SetCursor(LoadCursor(NULL, IDC_SIZEWE));
                 }
             }
@@ -3642,7 +3880,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             if (wParam == TRUE) {
                 g_viewerExitRequest = ViewerExitRequest::SystemEndSession;
                 g_loadCancelRequested = true;
-                if (g_persistSessionEnabled && !g_systemEndSessionSessionSaved) {
+                if (!g_systemEndSessionSessionSaved) {
                     std::wstring ignored;
                     (void)SaveReadonlySession(&ignored);
                     g_systemEndSessionSessionSaved = true;
@@ -3664,7 +3902,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             DestroyWindow(hWnd);
             return 0;
         case WM_DESTROY:
-            if (g_persistSessionEnabled && !g_systemEndSessionSessionSaved) {
+            if (!g_systemEndSessionSessionSaved) {
                 std::wstring ignored;
                 const bool saved = SaveReadonlySession(&ignored);
                 (void)saved;
@@ -3817,11 +4055,8 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmd
         }
     } else {
         RestoreReadonlySession(hwnd);
-        HMENU menu = GetMenu(hwnd);
-        HMENU settings = menu ? GetSubMenu(menu, 3) : nullptr;
-        if (settings) CheckMenuItem(settings, kPersistSessionMenuId,
-                                    MF_BYCOMMAND | (g_persistSessionEnabled ? MF_CHECKED : MF_UNCHECKED));
-        if (!g_tabs.empty() || !g_sessionFolder.empty()) {
+        UpdateStartupMenu();
+        if (!g_tabs.empty() || !g_browseFolder.empty()) {
             // A restored session already chose the folder/tab state; never replace it
             // with a release-directory scan.
         } else {

@@ -1295,6 +1295,8 @@ NoteRenderSourcePlanBuildResult NoteRenderSourcePlan::Build(
             return NoteRenderSourcePlanBuildResult::InconsistentSyntax;
         }
         const NoteSyntaxDocument& document = *syntaxDocument;
+        const bool explicitListLines = IsClroMarkdownFile(document.metadata().file_name) &&
+            !document.metadata().clro_list_implicit_continuation;
         std::vector<TableCellBinding> tableCellBindings;
         if (!BuildTableCellBindings(document, sourceLines, &tableCellBindings)) {
             return NoteRenderSourcePlanBuildResult::InconsistentSyntax;
@@ -1390,6 +1392,7 @@ NoteRenderSourcePlanBuildResult NoteRenderSourcePlan::Build(
                         AddLineDecorationFlag(&decoration,
                                               NoteRenderSourceLineDecorationListItem);
                         decoration.list_depth = std::max(decoration.list_depth, listDepths[index]);
+                        decoration.list_continuation = line != firstLine.value;
                         if (orderedListNumbers[index] > 0) {
                             AddLineDecorationFlag(&decoration,
                                                   NoteRenderSourceLineDecorationOrderedListItem);
@@ -1408,6 +1411,16 @@ NoteRenderSourcePlanBuildResult NoteRenderSourcePlan::Build(
                     case BlockKind::CodeBlock:
                         AddLineDecorationFlag(&decoration,
                                               NoteRenderSourceLineDecorationCodeBlock);
+                        if (explicitListLines) {
+                            // Fenced contents remain literal even when a fence
+                            // starts in a list. Its body has no list markers.
+                            decoration.flags &= ~(NoteRenderSourceLineDecorationListItem |
+                                NoteRenderSourceLineDecorationOrderedListItem | NoteRenderSourceLineDecorationTaskItem);
+                            decoration.list_depth = 0;
+                            decoration.ordered_list_number = 0;
+                            decoration.task_checked = false;
+                            decoration.list_continuation = false;
+                        }
                         break;
                     case BlockKind::FencedContainer:
                         AddLineDecorationFlag(&decoration, NoteRenderSourceLineDecorationContainer);
@@ -1462,17 +1475,26 @@ NoteRenderSourcePlanBuildResult NoteRenderSourcePlan::Build(
             default:
                 continue;
             }
-            if (!IsValidSpan(block.span, sourceLength) || block.span.end <= block.span.start) {
+            const Span geometrySpan = block.kind == BlockKind::CodeBlock &&
+                block.code_fence_span.end > block.code_fence_span.start ? block.code_fence_span : block.span;
+            if (!IsValidSpan(geometrySpan, sourceLength)) {
                 return NoteRenderSourcePlanBuildResult::InconsistentSyntax;
             }
-            const auto firstLocation = NoteSourceLineMap::FindByOffset(sourceLines, block.span.start);
+            if (geometrySpan.end == geometrySpan.start) {
+                // Empty list/quote markers have no text callbacks in MD4C.
+                // Their source remains visible, but an empty content span
+                // owns no atomic geometry and must not reject the frame.
+                if (block.kind == BlockKind::List || block.kind == BlockKind::Quote) continue;
+                return NoteRenderSourcePlanBuildResult::InconsistentSyntax;
+            }
+            const auto firstLocation = NoteSourceLineMap::FindByOffset(sourceLines, geometrySpan.start);
             const auto lastLocation = NoteSourceLineMap::FindByOffset(
-                sourceLines, {block.span.end.value - 1});
+                sourceLines, {geometrySpan.end.value - 1});
             if (!firstLocation.has_value() || !lastLocation.has_value()) {
                 return NoteRenderSourcePlanBuildResult::InconsistentSyntax;
             }
             atomicGroups.push_back(NoteRenderAtomicGroup{
-                groupKind, block.span, firstLocation->line_index, lastLocation->line_index});
+                groupKind, geometrySpan, firstLocation->line_index, lastLocation->line_index});
         }
 
         // MD4C's code-block content span may begin after an opening fence and
@@ -1481,9 +1503,23 @@ NoteRenderSourcePlanBuildResult NoteRenderSourcePlan::Build(
         // still proves they belong together; a future GDI provider must not
         // infer fences from a legacy LineCache.
         for (const BlockNode& block : blocks) {
-            if (block.kind != BlockKind::CodeBlock || block.span.end <= block.span.start) {
+            if (block.kind != BlockKind::CodeBlock) continue;
+            if (block.code_fence_span.end > block.code_fence_span.start) {
+                LineIndex firstLine;
+                LineIndex lastLine;
+                if (!SourceLineRangeForSpan(sourceLines, block.code_fence_span, &firstLine, &lastLine)) {
+                    return NoteRenderSourcePlanBuildResult::InconsistentSyntax;
+                }
+                for (size_t line = firstLine.value; line <= lastLine.value; ++line) {
+                    auto& decoration = lines[line].decoration;
+                    AddLineDecorationFlag(&decoration, NoteRenderSourceLineDecorationCodeBlock);
+                    if (line == firstLine.value || (line == lastLine.value && block.fence_closed)) {
+                        AddLineDecorationFlag(&decoration, NoteRenderSourceLineDecorationCodeFence);
+                    }
+                }
                 continue;
             }
+            if (block.span.end <= block.span.start) continue;
             LineIndex firstLine;
             LineIndex lastLine;
             if (!SourceLineRangeForSpan(sourceLines, block.span, &firstLine, &lastLine)) {
@@ -1797,21 +1833,25 @@ NoteRenderSourcePlanBuildResult NoteRenderSourcePlan::Build(
         for (size_t index = 0; index < blocks.size(); ++index) {
             const BlockNode& block = blocks[index];
             const bool container = block.kind == BlockKind::FencedContainer;
-            if ((!container && block.kind != BlockKind::CodeBlock) || block.span.end <= block.span.start) continue;
-            const auto first = NoteSourceLineMap::FindByOffset(sourceLines, block.span.start);
-            if (!first || (!container && first->line_index.value == 0)) continue;
-            const size_t line = first->line_index.value - (container ? 0 : 1);
+            if (!container && block.kind != BlockKind::CodeBlock) continue;
+            const bool exactFence = !container && block.code_fence_span.end > block.code_fence_span.start;
+            const Span sourceSpan = exactFence ? block.code_fence_span : block.span;
+            if (sourceSpan.end <= sourceSpan.start) continue;
+            const auto first = NoteSourceLineMap::FindByOffset(sourceLines, sourceSpan.start);
+            if (!first || (!container && !exactFence && first->line_index.value == 0)) continue;
+            const size_t line = first->line_index.value - (container || exactFence ? 0 : 1);
             const auto& location = lineLocations[line];
+            const size_t syntaxStart = exactFence ? sourceSpan.start.value : location.start.value;
             std::wstring titleSyntax = rawSource.substr(
-                location.start.value, location.content_end.value - location.start.value);
+                syntaxStart, location.content_end.value - syntaxStart);
             if (candidate->syntax_->uses_clro_fullwidth_markdown()) {
                 std::transform(titleSyntax.begin(), titleSyntax.end(), titleSyntax.begin(), ClroMarkdownCharacter);
             }
             const Span title = NoteFenceTitleSpan(titleSyntax, container);
             if (title.end <= title.start) continue;
             NoteRenderSourceRun run;
-            run.source_span = {{location.start.value + title.start.value},
-                               {location.start.value + title.end.value}};
+            run.source_span = {{syntaxStart + title.start.value},
+                               {syntaxStart + title.end.value}};
             run.display_source_span = run.source_span;
             run.line_index = {line};
             run.parent_block = index;

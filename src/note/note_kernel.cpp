@@ -1,6 +1,7 @@
 #include "note/note_kernel.h"
 
 #include "note/note_parser.h"
+#include "note/note_clro_markdown.h"
 #include "diagnostics/open_work_counters.h"
 
 #include <algorithm>
@@ -98,6 +99,24 @@ void PruneEmptyDocumentNodes(NoteDocument* document) {
                            return diagnostic.span.end < diagnostic.span.start;
                        }),
         document->diagnostics.end());
+}
+
+// Only a three-character row can become this CLRO delimiter. Check the
+// persistent line index and at most three retained characters; ordinary
+// Japanese typing needs no source materialization or whole-note scan.
+[[nodiscard]] bool EditChangesLongVowelRule(const NoteTextCore& core, const TextEdit& edit) {
+    constexpr std::wstring_view rule = L"\u30FC\u30FC\u30FC";
+    const auto line = NoteSourceLineMap::FindByOffset(core.source_line_map(), edit.start);
+    if (!line || edit.start > line->content_end ||
+        edit.deleted_len > line->content_end - edit.start) return false;
+    if (line->line.content_length == rule.size() && core.RangeMatches(line->start, rule)) return true;
+    const size_t retained = line->line.content_length - edit.deleted_len;
+    if (retained > rule.size() || edit.inserted_text.size() != rule.size() - retained) return false;
+    const size_t prefix = edit.start - line->start;
+    const size_t suffix = line->content_end - edit.start - edit.deleted_len;
+    return core.RangeMatches(line->start, rule.substr(0, prefix)) &&
+        rule.substr(prefix, edit.inserted_text.size()) == edit.inserted_text &&
+        core.RangeMatches({edit.start.value + edit.deleted_len}, rule.substr(rule.size() - suffix));
 }
 
 [[nodiscard]] bool IsPlainPendingLineText(std::wstring_view text) {
@@ -290,6 +309,8 @@ NoteKernelApplyResult LocalNoteKernel::Apply(const TextEdit& edit,
     const NoteDerivedSnapshotIdentity beforeIdentity{
         text_core_.note_id(), text_core_.content_revision()};
     const bool syntaxCurrent = CanReadSyntax();
+    const bool changesLongVowelRule = IsClroMarkdownFile(text_core_.metadata_.file_name) &&
+        EditChangesLongVowelRule(text_core_, edit);
     const std::wstring deletedText = text_core_.CopyRawRange(edit.start, edit.deleted_len);
     std::optional<NotePendingLocalLineProof> nextLocalLineProof;
     std::optional<NoteDirtyGraph> locallyProvenDirtyGraph;
@@ -370,6 +391,22 @@ NoteKernelApplyResult LocalNoteKernel::Apply(const TextEdit& edit,
         pending_influence_scope_.reset();
     } else {
         pending_local_line_proof_ = std::move(nextLocalLineProof);
+    }
+    if (changesLongVowelRule) {
+        // A delimiter entering/leaving the row changes paragraph ownership.
+        // Never publish a marker-free splice for this transition, including
+        // successive edits inside one debounce transaction.
+        force_full_refresh_ = true;
+        pending_local_line_proof_.reset();
+        pending_influence_scope_.reset();
+        result.dirty_graph.structure_dirty = true;
+        result.dirty_graph.edit_kind = NoteEditKind::StructuralText;
+        result.dirty_graph.downstream_parser_state_proven_unchanged = false;
+        if (pending_dirty_graph_) {
+            pending_dirty_graph_->structure_dirty = true;
+            pending_dirty_graph_->edit_kind = NoteEditKind::StructuralText;
+            pending_dirty_graph_->downstream_parser_state_proven_unchanged = false;
+        }
     }
     if (!pending_dirty_graph_.has_value()) {
         pending_dirty_graph_ = result.dirty_graph;
@@ -531,6 +568,12 @@ bool LocalNoteKernel::SetClroAsciiOnly(bool value) {
 
 bool LocalNoteKernel::SetQuoteLazyContinuation(bool value) {
     if (!text_core_.SetQuoteLazyContinuation(value)) return false;
+    ResetDerivedState(true);
+    return true;
+}
+
+bool LocalNoteKernel::SetClroListImplicitContinuation(bool value) {
+    if (!text_core_.SetClroListImplicitContinuation(value)) return false;
     ResetDerivedState(true);
     return true;
 }

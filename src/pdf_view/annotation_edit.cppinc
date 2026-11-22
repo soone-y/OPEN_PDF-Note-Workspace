@@ -776,7 +776,7 @@ bool ApplyPdfTextBoxWritingMode(HWND hwnd, TextWritingMode mode) {
         g_pdf.editWritingMode = mode;
         g_pdf.editLayoutDirty = true;
         RecalcEditingTextboxSize(true);
-        EnsureEditingTextBoxVisible(hwnd, L"writing_mode_change");
+        EnsureEditingTextBoxVisible(hwnd, L"writing_mode_change", TextBoxRevealIntent::EditCommand);
         UpdateImeWindowPosition(hwnd, true);
         InvalidateEditingTextBoxRect(hwnd, hadBefore ? &before : nullptr);
         return true;

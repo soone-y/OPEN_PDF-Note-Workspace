@@ -1281,6 +1281,62 @@ Write-Output ('RESULT:' + ($results | ConvertTo-Json -Depth 4 -Compress))
                 self.assertIn("Office reduction acceptance", result.stderr)
 
 
+    def test_export_and_note_recovery_gates_track_current_contracts(self):
+        validator = load_module("shared_annotation_validator", "tests/python/validate_codebase.py")
+        for check in (validator.find_existing_pdf_annotation_policy_regressions,
+                      validator.find_slide_crop_export_regressions,
+                      validator.find_annotation_shortcut_regressions):
+            self.assertEqual(check(), [])
+        read_text = Path.read_text
+        cases = (
+            ("src/file_output/file_output.cpp", "IsSamePath(target, CurrentLogicalPdfPath())", "false",
+             (validator.find_existing_pdf_annotation_policy_regressions, validator.find_slide_crop_export_regressions)),
+            ("src/file_output/file_output.cpp", "part.source && IsSamePath(target, part.source->path)", "false",
+             (validator.find_existing_pdf_annotation_policy_regressions,)),
+            ("src/file_output/file_output.cpp", "AddAnnotationsToPage(*annots, fontCache, dest, page, spec.pageIndex,",
+             "AddAnnotationsToPage(*annots, fontCache, srcDoc, page, spec.pageIndex,",
+             (validator.find_existing_pdf_annotation_policy_regressions,)),
+            ("src/note_view/note_view_note_ops.cppinc", "if (hasCachedEditForTarget || stageCreatedDuringCurrentProcess)",
+             "if (true)", (validator.find_annotation_shortcut_regressions,)),
+            ("src/note_view/note_view_note_ops.cppinc", "return !ec && writeTime >= g_noteRecoveryProcessStartTime;",
+             "return writeTime >= g_noteRecoveryProcessStartTime;", (validator.find_annotation_shortcut_regressions,)),
+            ("src/note_view/note_view_note_ops.cppinc", "ShowSilentDialog(hWnd, options) == SilentDialogResult::Yes",
+             "true", (validator.find_annotation_shortcut_regressions,)),
+            ("src/note_view/note_view_note_ops.cppinc", "options.defaultResult = SilentDialogResult::No;",
+             "options.defaultResult = SilentDialogResult::Yes;", (validator.find_annotation_shortcut_regressions,)),
+        )
+        for relative, before, after, checks in cases:
+            target = REPO_ROOT / relative
+            self.assertIn(before, read_text(target, encoding="utf-8"))
+            def changed(path, *args, **kwargs):
+                text = read_text(path, *args, **kwargs)
+                return text.replace(before, after) if path == target else text
+            with self.subTest(source=relative, mutation=after), mock.patch.object(Path, "read_text", changed):
+                for check in checks:
+                    self.assertTrue(check())
+
+    def test_probe_filesystem_exception_requires_failure_boundary(self):
+        validator = load_module("shared_annotation_validator", "tests/python/validate_codebase.py")
+        target = REPO_ROOT / "tools/dev/microtex_trial/probe.cpp"
+        original = target.read_text(encoding="utf-8")
+        with mock.patch.object(validator, "iter_source_files", return_value=[target]):
+            self.assertEqual(validator.find_new_throwing_filesystem_calls(), [])
+            for before, after in (
+                ("return 1;", "return 0;"),
+                ("catch (const std::exception& error)", "catch (const std::logic_error& error)"),
+                ("std::cerr << error.what()", "std::cerr << \"ignored\""),
+                ("return 0;", "std::filesystem::exists(inputPath); return 0;"),
+            ):
+                self.assertIn(before, original)
+                with self.subTest(mutation=after), mock.patch.object(
+                        Path, "read_text", return_value=original.replace(before, after)):
+                    self.assertTrue(validator.find_new_throwing_filesystem_calls())
+        # The same calls and handler in application code are still prohibited.
+        app_target = REPO_ROOT / "src/probe.cpp"
+        with mock.patch.object(validator, "iter_source_files", return_value=[app_target]), \
+             mock.patch.object(Path, "read_text", return_value=original):
+            self.assertTrue(validator.find_new_throwing_filesystem_calls())
+
     def test_text_raster_gate_tracks_shared_main_reader_baseline(self):
         validator = load_module("shared_annotation_validator", "tests/python/validate_codebase.py")
         self.assertEqual(validator.find_annotation_text_quality_regressions(), [])

@@ -104,7 +104,11 @@ int main(void)
            "[g]: /g\n[h]: /h\n[i]: /i\n[j]: /j\n\n[a] [b] [c] [i] [j]\n"),
         _T("[x](a&amp;b \"c &amp; d\") ![y](a\\*b \"e &quot; f\")\n"),
         _T("|a|b|\n|-|-|\n|*x*|[y](z)|\n\n- [x] item\n  - nested\n"),
+        _T("```cpp title=EMPTY\n```\n\n> ~~~\n> ~~~\n\n- ```\n  ```\n\n```\n"),
         _T("__underline__ _italic_ ___both___ **bold** **__nested__**\n"),
+        _T("first\nsecond\n-\n\nplain\n=\n\nbody\n---\n"),
+        _T("| a | b |\n|---|---|\n| row | [link](local.md) |\nplain **text**\n"),
+        _T("- first\nplain\n  - nested\n- [ ] task\n  ordinary\n- ```\n  literal\n  ```\n"),
         _T(">> *deep*\n> outer\nplain\n\n- > [link](local.md)\nlazy list\n"),
 #ifdef MD4C_TEST_LIBREOFFICE
         _T("[[page]] [[page|label &amp; title]]\n\n<div>inline</div>\n"
@@ -122,7 +126,8 @@ int main(void)
 #else
     parser.flags = MD_FLAG_NOHTML | MD_FLAG_NOINDENTEDCODEBLOCKS |
                    MD_FLAG_STRIKETHROUGH | MD_FLAG_TABLES | MD_FLAG_TASKLISTS |
-                   MD_FLAG_NOQUOTE_LAZY_CONTINUATION | MD_FLAG_DOUBLEUNDERSCOREUNDERLINE;
+                   MD_FLAG_NOQUOTE_LAZY_CONTINUATION | MD_FLAG_DOUBLEUNDERSCOREUNDERLINE |
+                   MD_FLAG_NOIMPLICITLISTCONTINUATION | MD_FLAG_REQUIRETABLEPIPES | MD_FLAG_NOSETEXTHEADINGS;
 #endif
     parser.enter_block = parser.leave_block = block;
     parser.enter_span = parser.leave_span = span;

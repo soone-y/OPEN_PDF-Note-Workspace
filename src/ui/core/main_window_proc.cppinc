@@ -289,9 +289,8 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     SetFocus(g_hPdfView ? g_hPdfView : hWnd);
                 } else {
                     SetFocus(g_hLectureList);
-                    if (!RestoreStartupLastOpenSelection(hWnd)) {
-                        EnsureListboxSelection(g_hLectureList);
-                    }
+                    RestoreStartupLastOpenSelection(hWnd);
+                    SelectFirstSessionForInitialSample(hWnd);
                 }
             }
         }
@@ -339,22 +338,14 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     SetFocus(g_hPdfView ? g_hPdfView : hWnd);
                 } else {
                     SetFocus(g_hLectureList);
-                    if (!RestoreStartupLastOpenSelection(hWnd)) {
-                        EnsureListboxSelection(g_hLectureList);
-                    }
+                    RestoreStartupLastOpenSelection(hWnd);
+                    SelectFirstSessionForInitialSample(hWnd);
                 }
             } else if (g_leftPaneCollapsed) {
                 SetFocus(g_hPdfView ? g_hPdfView : hWnd);
             } else if (g_hLectureList && IsWindowVisible(hWnd)) {
-                if (!RestoreStartupLastOpenSelection(hWnd)) {
-                    EnsureListboxSelection(g_hLectureList);
-                    // A workspace must opt in explicitly. This lets a sample
-                    // begin with its first course session without changing the
-                    // first-launch behavior of an ordinary user workspace.
-                    if (g_config.startupSelectFirstSession) {
-                        EnsureListboxSelection(g_hSessionList);
-                    }
-                }
+                RestoreStartupLastOpenSelection(hWnd);
+                SelectFirstSessionForInitialSample(hWnd);
             }
         }
         // The automatic open may have run a password dialog. Only queue other
@@ -1139,6 +1130,8 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         if (wParam == TRUE) {
             // No modal UI while Windows ends the session; every accepted edit
             // already has a durable recovery envelope if integration fails.
+            const bool startupSaved = SaveStartupLastOpenTarget();
+            (void)startupSaved;
             const bool memoSaved = SaveWorkspaceMemoForExit(false);
             (void)memoSaved;
             s_exitInProgress = true;

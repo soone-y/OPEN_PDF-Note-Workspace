@@ -29,12 +29,15 @@ struct ExportDialogResult {
     file_output::PdfPngStyle pngStyle = file_output::PdfPngStyle::PdfLike;
     file_output::TextExportOptions textOptions{};
     file_output::NoteMarkupExportOptions noteMarkupOptions{};
+    std::shared_ptr<const file_output::ReservedPdfSource> reservedPdf;
+    std::wstring reservedNotePath;
     // The unified export dialog validates this user-selected destination before
     // any output begins.  An empty value is retained only for legacy callers.
     std::wstring outputPath;
 };
 
 bool ShowUnifiedExportDialog(HWND owner, ExportDialogKind preset, std::vector<ExportDialogResult>& out);
+[[nodiscard]] bool HasUnifiedExportReservations();
 void ExecuteUnifiedExports(HWND hWnd, const std::vector<ExportDialogResult>& results);
 // Called by the main window only after a requested pre-export integration transaction ends.
 void CompleteUnifiedExportsAfterSave(HWND hWnd, bool saveSucceeded, bool saveRestarted);

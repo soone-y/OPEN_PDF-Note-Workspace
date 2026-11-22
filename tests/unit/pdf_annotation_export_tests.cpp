@@ -1,6 +1,7 @@
 #include "file_output/pdf_annotation_export.h"
 #include "file_output/pdf_annotation_detach.h"
 #include "core/annot_stage_replay.h"
+#include "core/pdf_permissions.h"
 #define PDF_NOTE_ANNOT_COMMAND_CODEC_ONLY
 #include "pdf_view/annotation_store.cppinc"
 #undef PDF_NOTE_ANNOT_COMMAND_CODEC_ONLY
@@ -710,6 +711,44 @@ void DetachCycles() {
     std::cout << "PASS: detach cycles=" << cases << " types=11; exact data/appearance; retained/invalid/source protection\n";
 }
 
+static void PermissionCases(const std::filesystem::path& directory) {
+    using pdf_permissions::BlockMessage;
+    using pdf_permissions::Operation;
+    struct Case {
+        const char* file;
+        const char* password;
+        bool canExtract;
+        std::wstring_view pdfRestriction;
+    };
+    const Case cases[] = {
+        {"permissions_copy_and_print.pdf", "reader", true, L"pdf.permissions.encrypted_pdf"},
+        {"permissions_print_only.pdf", nullptr, false, L"pdf.permissions.pdf_denied"},
+        {"permissions_no_copy.pdf", "reader", false, L"pdf.permissions.pdf_denied"},
+        {"permissions_no_copy.pdf", "owner", true, L"pdf.permissions.encrypted_pdf"},
+        {"permissions_signature.pdf", nullptr, true, L"pdf.permissions.signed_pdf"},
+        {"permissions_unsigned_field.pdf", nullptr, true, L""},
+    };
+    for (const auto& test : cases) {
+        const auto path = directory / test.file;
+        pdf_annotation_detach::Document doc(FPDF_LoadDocument(path.string().c_str(), test.password));
+        Require(!!doc, test.file);
+        const auto* copy = BlockMessage(doc.get(), Operation::CopyText);
+        const auto* image = BlockMessage(doc.get(), Operation::ExportImage);
+        const auto* pdf = BlockMessage(doc.get(), Operation::ExportPdf);
+        Require(std::wstring_view(copy ? copy : L"") ==
+                    (test.canExtract ? L"" : L"pdf.permissions.copy_denied"), test.file);
+        Require(std::wstring_view(image ? image : L"") ==
+                    (test.canExtract ? L"" : L"pdf.permissions.image_denied"), test.file);
+        Require(std::wstring_view(pdf ? pdf : L"") == test.pdfRestriction, test.file);
+    }
+    const auto encrypted = (directory / "permissions_no_copy.pdf").string();
+    pdf_annotation_detach::Document wrong(FPDF_LoadDocument(encrypted.c_str(), "incorrect"));
+    Require(!wrong && FPDF_GetLastError() == FPDF_ERR_PASSWORD, "wrong PDF password");
+    Require(BlockMessage(nullptr, Operation::CopyText) && BlockMessage(nullptr, Operation::ExportImage) &&
+            BlockMessage(nullptr, Operation::ExportPdf), "permission check must reject a missing document");
+    std::cout << "PASS: PDF permissions: 6 documents by 3 operations; wrong password and missing document rejected\n";
+}
+
 int main(int argc, char** argv) {
     FPDF_InitLibrary();
     try {
@@ -730,6 +769,7 @@ int main(int argc, char** argv) {
         std::error_code ec;
         std::filesystem::create_directories(directory,ec);
         Require(!ec,"fixture directory creation");
+        PermissionCases(directory);
         DetachCycles();
         StandardDetachCases();
         ArcCases();

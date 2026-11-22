@@ -1,0 +1,24 @@
+diff --git a/src/md4c.c b/src/md4c.c
+--- a/src/md4c.c
++++ b/src/md4c.c
+@@ -6889,7 +6889,8 @@
+         }
+ 
+         /* Check whether we are Setext underline. */
+-        if(line->indent < ctx->code_indent_offset  &&  pivot_line->type == MD_LINE_TEXT
++        if(!(ctx->parser.flags & MD_FLAG_NOSETEXTHEADINGS) &&
++            line->indent < ctx->code_indent_offset  &&  pivot_line->type == MD_LINE_TEXT
+             &&  off < ctx->size  &&  ISANYOF2(off, _T('='), _T('-'))
+             &&  (n_parents == ctx->n_containers))
+         {
+diff --git a/src/md4c.h b/src/md4c.h
+--- a/src/md4c.h
++++ b/src/md4c.h
+@@ -385,6 +385,7 @@
+  * The following flags may allow some extensions or deviations from it.
+  */
+ #define MD_FLAG_COLLAPSEWHITESPACE          0x1      /* In MD_TEXT_NORMAL, collapse non-trivial whitespace into single ' ' */
++#define MD_FLAG_NOSETEXTHEADINGS            0x10000000 /* App extension: do not infer headings from a following underline. */
+ #define MD_FLAG_PERMISSIVEATXHEADERS        0x2      /* Do not require space in ATX headers ( ###header ) */
+ #define MD_FLAG_PERMISSIVEURLAUTOLINKS      0x4      /* Recognize URLs as autolinks even without '<', '>' */
+ #define MD_FLAG_PERMISSIVEEMAILAUTOLINKS    0x8      /* Recognize e-mails as autolinks even without '<', '>' and 'mailto:' */

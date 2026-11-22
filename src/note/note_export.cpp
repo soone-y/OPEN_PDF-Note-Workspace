@@ -62,16 +62,24 @@ std::wstring Utf8ToWide(std::string_view text) {
     return out;
 }
 
-std::string EscapeHtml(std::string_view text) {
+std::string EscapeHtml(std::string_view text, bool preserveLineBreaks = false) {
     std::string out;
     out.reserve(text.size());
-    for (char ch : text) {
+    for (size_t index = 0; index < text.size(); ++index) {
+        const char ch = text[index];
         switch (ch) {
         case '&': out += "&amp;"; break;
         case '<': out += "&lt;"; break;
         case '>': out += "&gt;"; break;
         case '"': out += "&quot;"; break;
         case '\'': out += "&#39;"; break;
+        case '\r':
+        case '\n':
+            if (preserveLineBreaks) {
+                if (ch == '\r' && index + 1 < text.size() && text[index + 1] == '\n') ++index;
+                out += "<br>\n";
+            } else out.push_back(ch);
+            break;
         default: out.push_back(ch); break;
         }
     }
@@ -344,14 +352,19 @@ std::string TableCellAlignCss(TableCellAlign align) {
 }
 
 // Both export and the immutable source plan use the lexical title rule.
-// MD4C's nonempty code span starts at the body, so its opener is one row above.
+// Parser-owned fence coordinates also locate titles when the body is empty.
 [[nodiscard]] std::wstring FenceTitle(const NoteTextModel& model, const BlockNode& block) {
     const bool container = block.kind == BlockKind::FencedContainer;
-    if ((!container && block.kind != BlockKind::CodeBlock) || block.span.end <= block.span.start ||
-        block.loc.line <= (container ? 0 : 1)) return {};
-    const size_t line = static_cast<size_t>(block.loc.line - (container ? 1 : 2));
-    if (line >= model.line_starts.size()) return {};
-    const size_t start = model.line_starts[line];
+    if (!container && block.kind != BlockKind::CodeBlock) return {};
+    const bool exactFence = !container && block.code_fence_span.end > block.code_fence_span.start;
+    if (!exactFence && (block.span.end <= block.span.start || block.loc.line <= (container ? 0 : 1))) return {};
+    size_t start = block.code_fence_span.start.value;
+    if (!exactFence) {
+        const size_t line = static_cast<size_t>(block.loc.line - (container ? 1 : 2));
+        if (line >= model.line_starts.size()) return {};
+        start = model.line_starts[line];
+    }
+    if (start > model.raw.size()) return {};
     const size_t foundEnd = model.raw.find_first_of(L"\r\n", start);
     const size_t end = foundEnd == std::wstring::npos ? model.raw.size() : foundEnd;
     const std::wstring_view raw(model.raw.data() + start, end - start);
@@ -425,69 +438,136 @@ std::wstring RenderPlainBlock(const ExportSource& source,
     return out;
 }
 
+// Skip only block prefixes. Inline delimiters belong to the heading text and
+// must survive the Markdown-to-Markdown export unchanged.
+[[nodiscard]] size_t MarkdownBlockContentStart(std::wstring_view raw, size_t start, size_t end, bool fullwidth) {
+    const auto syntax = [fullwidth](wchar_t ch) { return fullwidth ? ClroMarkdownCharacter(ch) : ch; };
+    size_t cursor = start;
+    while (cursor < end) {
+        while (cursor < end && (syntax(raw[cursor]) == L' ' || raw[cursor] == L'\t')) ++cursor;
+        if (cursor == end) break;
+        if (syntax(raw[cursor]) == L'>') { ++cursor; continue; }
+        size_t markerEnd = cursor;
+        if (syntax(raw[cursor]) == L'-' || syntax(raw[cursor]) == L'+' || syntax(raw[cursor]) == L'*') {
+            ++markerEnd;
+        } else {
+            while (markerEnd < end && markerEnd - cursor < 9 && raw[markerEnd] >= L'0' && raw[markerEnd] <= L'9') ++markerEnd;
+            if (markerEnd == cursor || markerEnd == end ||
+                (syntax(raw[markerEnd]) != L'.' && syntax(raw[markerEnd]) != L')')) break;
+            ++markerEnd;
+        }
+        if (markerEnd == end || (syntax(raw[markerEnd]) != L' ' && raw[markerEnd] != L'\t')) break;
+        cursor = markerEnd;
+    }
+    return cursor;
+}
+
 std::optional<std::wstring> RewriteMarkdownHeadings(std::wstring text,
+                                                     const NoteMetadata& metadata,
                                                      const std::wstring& title,
-                                                     bool includeTitleHeading,
                                                      bool shiftHeadingLevels) {
-    NoteMetadata meta;
-    meta.file_name = L"export.md";
-    NoteTextModel model = MakeNoteTextModel(std::move(meta), text, 1);
-    NoteDocument doc = ParseNoteDocument(model);
+    NoteTextModel model = MakeNoteTextModel(metadata, std::move(text), 1);
+    const NoteDocument doc = ParseNoteDocument(model);
     if (NoteDocumentHasFatalParseFailure(doc)) return std::nullopt;
+
+    std::wstring out;
+    if (!title.empty()) out += L"# " + title + L"\n\n";
+    if (!shiftHeadingLevels) return out + model.raw;
 
     std::unordered_map<size_t, const BlockNode*> headingByLine;
     for (const auto& block : doc.blocks) {
-        if (block.kind != BlockKind::Heading) continue;
-        if (block.loc.line <= 0) continue;
-        headingByLine.emplace(static_cast<size_t>(block.loc.line - 1), &block);
-    }
-
-    std::wstring out;
-    if (includeTitleHeading && !title.empty()) {
-        out += L"# " + title + L"\n\n";
-    }
-
-    for (size_t lineIndex = 0; lineIndex < model.line_starts.size(); ++lineIndex) {
-        const size_t lineStart = model.line_starts[lineIndex];
-        const size_t nextLineStart = (lineIndex + 1 < model.line_starts.size())
-            ? model.line_starts[lineIndex + 1]
-            : model.raw.size();
-        size_t contentEnd = nextLineStart;
-        std::wstring lineBreak;
-        if (contentEnd > lineStart && model.raw[contentEnd - 1] == L'\n') {
-            lineBreak.insert(lineBreak.begin(), L'\n');
-            --contentEnd;
+        if (block.kind == BlockKind::Heading && block.loc.line > 0) {
+            headingByLine.emplace(static_cast<size_t>(block.loc.line - 1), &block);
         }
-        if (contentEnd > lineStart && model.raw[contentEnd - 1] == L'\r') {
-            lineBreak.insert(lineBreak.begin(), L'\r');
-            --contentEnd;
+    }
+    const auto lineEnd = [&model](size_t line) {
+        size_t end = line + 1 < model.line_starts.size() ? model.line_starts[line + 1] : model.raw.size();
+        while (end > model.line_starts[line] && (model.raw[end - 1] == L'\r' || model.raw[end - 1] == L'\n')) --end;
+        return end;
+    };
+    for (size_t line = 0; line < model.line_starts.size(); ++line) {
+        const size_t start = model.line_starts[line];
+        const size_t next = line + 1 < model.line_starts.size() ? model.line_starts[line + 1] : model.raw.size();
+        const auto found = headingByLine.find(line);
+        if (found == headingByLine.end()) {
+            out.append(model.raw, start, next - start);
+            continue;
         }
-
-        auto it = headingByLine.find(lineIndex);
-        if (it == headingByLine.end()) {
-            out += model.raw.substr(lineStart, nextLineStart - lineStart);
+        const BlockNode& heading = *found->second;
+        const size_t end = lineEnd(line);
+        const size_t contentStart = MarkdownBlockContentStart(model.raw, start, end, doc.uses_clro_fullwidth_markdown);
+        const int level = std::clamp(heading.level + 1, 1, 6);
+        const wchar_t marker = contentStart < end ? model.raw[contentStart] : 0;
+        if (heading.origin == BlockOrigin::Markdown &&
+            (marker == L'#' || (doc.uses_clro_fullwidth_markdown && marker == L'＃'))) {
+            // Keep closing hashes, inline markup, whitespace and container prefixes.
+            out.append(model.raw, start, contentStart - start);
+            if (heading.level < 6) out.push_back(marker);
+            out.append(model.raw, contentStart, next - contentStart);
             continue;
         }
 
-        const BlockNode* heading = it->second;
-        if (!heading || heading->span.end <= heading->span.start) {
-            out += model.raw.substr(lineStart, nextLineStart - lineStart);
-            continue;
+        // A parser-owned heading can span several physical rows. Consume the
+        // whole owner once, including its Setext underline or outer tag pair.
+        size_t last = ResolveLineColumn(model,
+            heading.span.end > heading.span.start ? heading.span.end.value - 1 : heading.span.start.value).line - 1;
+        last = std::min(last, model.line_starts.size() - 1);
+        size_t bodyStart = contentStart;
+        size_t bodyEnd = lineEnd(last);
+        size_t consumedLast = last;
+        if (heading.origin == BlockOrigin::LegacyHeadingTag) {
+            Span opener;
+            if (FindNoteMarkupTagStartingAt(model.raw, {bodyStart}, &opener, doc.uses_clro_fullwidth_markdown)) {
+                bodyStart = opener.end.value;
+            }
+            Span closer;
+            if (FindNoteMarkupTagEndingAt(model.raw, heading.span.end, &closer, doc.uses_clro_fullwidth_markdown)) {
+                const auto token = std::wstring_view(model.raw).substr(closer.start.value, closer.end - closer.start);
+                const auto openName = std::wstring_view(model.raw).substr(opener.start.value + 1,
+                    opener.end.value > opener.start.value + 1 ? opener.end - opener.start - 2 : 0);
+                const auto foldName = [](wchar_t ch) { return std::towlower(FoldClroMarkupNameCharacter(ch)); };
+                const bool matchingName = token.size() == openName.size() + 3 &&
+                    std::equal(openName.begin(), openName.end(), token.begin() + 2,
+                        [&](wchar_t a, wchar_t b) { return foldName(a) == foldName(b); });
+                if (token.size() > 1 && (token[1] == L'/' || token[1] == L'／') &&
+                    (token.size() == 3 || matchingName)) bodyEnd = closer.start.value;
+            }
+        } else if (last + 1 < model.line_starts.size()) {
+            // MD4C's heading body excludes the underline. Ownership of that
+            // following row is established by the parsed Heading, not a scan
+            // for arbitrary equals/dash text elsewhere in the note.
+            consumedLast = last + 1;
         }
-
-        const int level = shiftHeadingLevels ? std::clamp(heading->level + 1, 1, 6) : std::clamp(heading->level, 1, 6);
+        out.append(model.raw, start, contentStart - start);
         out += BuildMarkdownHeadingPrefix(level);
-        out += model.raw.substr(heading->span.start.value, heading->span.end.value - heading->span.start.value);
-        out += lineBreak;
+        for (size_t row = line; row <= last; ++row) {
+            const size_t from = row == line ? bodyStart :
+                MarkdownBlockContentStart(model.raw, model.line_starts[row], lineEnd(row), doc.uses_clro_fullwidth_markdown);
+            const size_t to = std::min(lineEnd(row), bodyEnd);
+            if (to <= from) continue;
+            if (row != line && out.back() != L' ') out.push_back(L' ');
+            out.append(model.raw, from, to - from);
+        }
+        const size_t consumedNext = consumedLast + 1 < model.line_starts.size()
+            ? model.line_starts[consumedLast + 1] : model.raw.size();
+        const size_t consumedEnd = lineEnd(consumedLast);
+        out.append(model.raw, consumedEnd, consumedNext - consumedEnd);
+        line = consumedLast;
     }
-
     return out;
 }
+
+std::string RenderHtmlBlock(const ExportSource& source,
+                            const NoteDocument& doc,
+                            const std::vector<std::vector<size_t>>& children,
+                            size_t blockIndex,
+                            const MarkupExportConfig& config);
 
 std::string RenderHtmlInlineRange(const ExportSource& source,
                                   const NoteDocument& doc,
                                   size_t blockIndex,
-                                  const MarkupExportConfig& config) {
+                                  const MarkupExportConfig& config,
+                                  const std::vector<std::vector<size_t>>* children = nullptr) {
     const auto& model = source.model;
     if (blockIndex >= doc.blocks.size()) return {};
     const BlockNode& block = doc.blocks[blockIndex];
@@ -548,11 +628,20 @@ std::string RenderHtmlInlineRange(const ExportSource& source,
     });
 
     std::string out;
+    size_t nextChild = 0;
     for (const auto& seg : finalSegments) {
+        if (children) {
+            const auto& childBlocks = (*children)[blockIndex];
+            while (nextChild < childBlocks.size() &&
+                   doc.blocks[childBlocks[nextChild]].span.start <= seg.span.start) {
+                out += RenderHtmlBlock(source, doc, *children, childBlocks[nextChild++], config);
+            }
+        }
         std::string inner;
         if (seg.kind == Segment::Kind::Code) {
             inner = "<code>" + EscapeHtml(WideToUtf8(std::wstring(
-                std::wstring_view(model.raw).substr(seg.span.start.value, seg.span.end.value - seg.span.start.value)))) + "</code>";
+                std::wstring_view(model.raw).substr(seg.span.start.value, seg.span.end.value - seg.span.start.value))),
+                IsClroMarkdownFile(model.meta.file_name)) + "</code>";
         } else if (seg.kind == Segment::Kind::Math) {
             const MathSpan* math = seg.math;
             if (!math) continue;
@@ -566,7 +655,7 @@ std::string RenderHtmlInlineRange(const ExportSource& source,
         } else {
             std::wstring text = SliceRenderedMarkdownText(source, seg.span);
             if (text.empty()) continue;
-            inner = EscapeHtml(WideToUtf8(text));
+            inner = EscapeHtml(WideToUtf8(text), IsClroMarkdownFile(model.meta.file_name));
         }
 
         for (const auto& overlay : overlays) {
@@ -608,14 +697,14 @@ std::string RenderHtmlInlineRange(const ExportSource& source,
 
         out += inner;
     }
+    if (children) {
+        const auto& childBlocks = (*children)[blockIndex];
+        while (nextChild < childBlocks.size()) {
+            out += RenderHtmlBlock(source, doc, *children, childBlocks[nextChild++], config);
+        }
+    }
     return out;
 }
-
-std::string RenderHtmlBlock(const ExportSource& source,
-                            const NoteDocument& doc,
-                            const std::vector<std::vector<size_t>>& children,
-                            size_t blockIndex,
-                            const MarkupExportConfig& config);
 
 std::string RenderHtmlChildren(const ExportSource& source,
                                const NoteDocument& doc,
@@ -625,6 +714,11 @@ std::string RenderHtmlChildren(const ExportSource& source,
     const size_t bucket = (parentIndex == kInvalidIndex) ? doc.blocks.size() : parentIndex;
     std::string out;
     if (bucket >= children.size()) return out;
+    // MD4C omits paragraph callbacks in tight lists. Merge the item's own
+    // inline segments and child blocks once, preserving their source order.
+    if (parentIndex < doc.blocks.size() && doc.blocks[parentIndex].kind == BlockKind::ListItem) {
+        return RenderHtmlInlineRange(source, doc, parentIndex, config, &children);
+    }
     for (size_t child : children[bucket]) {
         out += RenderHtmlBlock(source, doc, children, child, config);
     }
@@ -778,9 +872,9 @@ std::optional<std::string> ExportMarkdown(const NoteTextModel& model,
     }
     if (config.includeTitleHeading) {
         auto rewritten = RewriteMarkdownHeadings(std::move(raw),
+                                                 model.meta,
                                                  config.title,
-                                                 config.includeTitleHeading,
-                                                 config.includeTitleHeading && config.shiftHeadingLevels);
+                                                 config.shiftHeadingLevels);
         if (!rewritten) return std::nullopt;
         raw = std::move(*rewritten);
     }

@@ -3,9 +3,12 @@
 // Keep the include order stable because later fragments depend on earlier shared helpers/state.
 
 #include "core/ui_prompts.h"
+#include "core/note_text_metadata.h"
 #include "core/identity_path_scope.h"
 #include "note/note_file_policy.h"
+#include "note/note_clro_markdown.h"
 #include "note/note_auto_bullet.h"
+#include "note/note_markdown_shortcut.h"
 #include "note/note_bottom_space.h"
 #include "diagnostics/normal_operations.h"
 #include "diagnostics/open_work_counters.h"
@@ -13,7 +16,7 @@
 #include "note/note_render_final_win32_adapter.h"
 #include "ui/noop_nav_guard.h"
 #include "ui/scroll_input_win32.h"
-#include "ui/bottom_space_frame.h"
+#include "ui/native_note_bottom_space.h"
 #include "workspace/workspace_write_lock.h"
 #include "workspace/file_ops.h"
 

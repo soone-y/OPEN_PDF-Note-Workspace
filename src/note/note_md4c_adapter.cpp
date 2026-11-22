@@ -516,6 +516,19 @@ void BeginBlock(ParseContext* ctx, MD_BLOCKTYPE type, void* detail) {
     case MD_BLOCK_CODE: {
         node.kind = BlockKind::CodeBlock;
         const auto* code = static_cast<const MD_BLOCK_CODE_DETAIL*>(detail);
+        if (code && code->fence_char && code->fence_begin < code->fence_end &&
+            code->fence_end <= ctx->model->raw.size()) {
+            node.code_fence_span = {{code->fence_begin}, {code->fence_end}};
+            node.fence_closed = code->fence_closed != 0;
+            size_t markerEnd = code->fence_begin;
+            while (markerEnd < code->fence_end && ctx->model->raw[markerEnd] == code->fence_char) ++markerEnd;
+            node.fence_marker_count = markerEnd - code->fence_begin;
+            const size_t openingEnd = FindNextLineBreak(ctx->model->raw, code->fence_begin);
+            frame.open_cursor = openingEnd == std::wstring::npos ? ctx->model->raw.size()
+                : SkipLineBreak(ctx->model->raw, openingEnd);
+            ctx->cursor = frame.open_cursor;
+            AbsorbRange(ctx, node.code_fence_span);
+        }
         if (code && code->lang.text && code->lang.size > 0) {
             node.info_string = AttributeToWString(&code->lang);
         } else if (code && code->info.text && code->info.size > 0) {
@@ -597,6 +610,9 @@ int LeaveBlock(MD_BLOCKTYPE, void*, void* userdata) {
     node.span = blockSpan;
     node.loc = ResolveLineColumn(*ctx->model, blockSpan.start.value);
     node.inline_count = ctx->out->inlines.size() - node.first_inline;
+    if (node.kind == BlockKind::CodeBlock && node.code_fence_span.end > node.code_fence_span.start) {
+        ctx->cursor = std::max(ctx->cursor, node.code_fence_span.end.value);
+    }
     return 0;
 }
 
@@ -784,8 +800,11 @@ NoteDocument ParseNoteDocumentWithMd4c(const NoteTextModel& model, bool permissi
                    MD_FLAG_STRIKETHROUGH |
                    MD_FLAG_TABLES |
                    MD_FLAG_TASKLISTS;
-    if (IsClroMarkdownFile(model.meta.file_name)) parser.flags |= MD_FLAG_DOUBLEUNDERSCOREUNDERLINE;
-    if (!model.meta.quote_lazy_continuation) parser.flags |= MD_FLAG_NOQUOTE_LAZY_CONTINUATION;
+    if (IsClroMarkdownFile(model.meta.file_name)) {
+        parser.flags |= MD_FLAG_DOUBLEUNDERSCOREUNDERLINE | MD_FLAG_REQUIRETABLEPIPES | MD_FLAG_NOSETEXTHEADINGS;
+        if (!model.meta.quote_lazy_continuation) parser.flags |= MD_FLAG_NOQUOTE_LAZY_CONTINUATION;
+        if (!model.meta.clro_list_implicit_continuation) parser.flags |= MD_FLAG_NOIMPLICITLISTCONTINUATION;
+    }
     if (permissiveHeadings) parser.flags |= MD_FLAG_PERMISSIVEATXHEADERS;
     parser.enter_block = EnterBlock;
     parser.leave_block = LeaveBlock;

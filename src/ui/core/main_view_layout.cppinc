@@ -1111,6 +1111,10 @@ static bool HandleManagedAbnormalExit(HWND hWnd) {
         return false;
     }
 
+    if (!SaveStartupLastOpenTarget()) {
+        ShowSoftNotice(hWnd, localization::Text(L"main.startup_state.save_failed"), SoftNoticeKind::Warning);
+        return false;
+    }
     RememberCurrentSessionFiles();
     s_managedAbnormalExit.reportText =
         BuildManagedAbnormalExitReportText(noteHadDirty, noteStageOk, annotHadDirty, annotStageOk);
@@ -1160,7 +1164,7 @@ static bool HandleAppExit(HWND hWnd) {
     // must not have to choose an internal checkpoint implementation detail.
     // On failure the transaction leaves recoverable work intact and exit is
     // canceled, so the original is never silently skipped or overwritten.
-    if (!file_output::RunSaveAndIntegrateTransaction(hWnd)) {
+    if (!file_output::RunSaveAndIntegrateTransactionForExit(hWnd)) {
         preview_trace::Append(
             L"HandleAppExit",
             L"abort=save_and_integrate_failed elapsed_ms=" + preview_trace::ElapsedMs(startTick));
@@ -1168,6 +1172,10 @@ static bool HandleAppExit(HWND hWnd) {
             hWnd,
             localization::Text(L"ui.layout.d7f54787589f").c_str(),
             localization::Text(L"ui.layout.f2484c529c40").c_str());
+    }
+    if (!SaveStartupLastOpenTarget()) {
+        ShowSoftNotice(hWnd, localization::Text(L"main.startup_state.save_failed"), SoftNoticeKind::Warning);
+        return false;
     }
     FinalizeAppExitState(hWnd, previewTempPath);
     preview_trace::Append(
@@ -1179,6 +1187,10 @@ static bool HandleAppExit(HWND hWnd) {
 
 static bool PrepareWorkspaceRestart(HWND hWnd) {
     if (!PrepareWorkspaceMemoRootChange()) return false;
+    if (!SaveStartupLastOpenTarget()) {
+        ShowSoftNotice(hWnd, localization::Text(L"main.startup_state.save_failed"), SoftNoticeKind::Warning);
+        return false;
+    }
     RememberCurrentSessionFiles();
     // A root switch must not force a potentially expensive original-file
     // integration.  Keep a recoverable checkpoint under the old root before

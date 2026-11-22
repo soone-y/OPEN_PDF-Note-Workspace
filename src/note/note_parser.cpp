@@ -203,7 +203,9 @@ std::vector<Span> CollectLiteralSpans(const NoteTextModel& model, const NoteDocu
     std::vector<Span> spans = CollectRawMarkdownLiteralSpans(model.raw);
     spans.reserve(spans.size() + doc.blocks.size() + doc.inlines.size());
     for (const auto& block : doc.blocks) {
-        if (block.kind == BlockKind::CodeBlock && block.span.end > block.span.start) {
+        if (block.kind == BlockKind::CodeBlock && block.code_fence_span.end > block.code_fence_span.start) {
+            spans.push_back(block.code_fence_span);
+        } else if (block.kind == BlockKind::CodeBlock && block.span.end > block.span.start) {
             spans.push_back(block.span);
         }
         if (block.kind == BlockKind::FencedContainer && block.span.end > block.span.start) {
@@ -495,11 +497,19 @@ struct StyleSpec {
     std::wstring value;
 };
 
+struct HeadingPromotion {
+    Span block_span{};
+    Span content_span{};
+    int level = 0;
+};
+
 struct StyleFrame {
     std::vector<StyleSpec> specs;
     std::vector<std::wstring> close_aliases;
     size_t content_start = 0;
     int heading_level = 0;
+    size_t heading_tag_start = 0;
+    int heading_tag_level = 0;
 };
 
 void AddCloseAlias(std::vector<std::wstring>* aliases, std::wstring_view alias) {
@@ -727,8 +737,14 @@ void AppendStyleSpan(NoteDocument* doc, StyleKind kind, Span span, std::wstring 
     doc->style_spans.push_back(std::move(styleSpan));
 }
 
-void CloseStyleFrame(NoteDocument* doc, StyleFrame* frame, size_t closePos) {
+void CloseStyleFrame(NoteDocument* doc, StyleFrame* frame, size_t closePos,
+                     size_t closeEnd = kInvalidIndex,
+                     std::vector<HeadingPromotion>* pairedHeadings = nullptr) {
     if (!doc || !frame) return;
+    if (pairedHeadings && frame->heading_tag_level > 0 && closeEnd != kInvalidIndex) {
+        pairedHeadings->push_back({{{frame->heading_tag_start}, {closeEnd}},
+                                  {{frame->content_start}, {closePos}}, frame->heading_tag_level});
+    }
     if (closePos <= frame->content_start) return;
     const Span span{frame->content_start, closePos};
     for (const auto& spec : frame->specs) {
@@ -736,7 +752,8 @@ void CloseStyleFrame(NoteDocument* doc, StyleFrame* frame, size_t closePos) {
     }
 }
 
-void ApplyLegacyMarkupStyleSpans(const NoteTextModel& model, NoteDocument* doc) {
+void ApplyLegacyMarkupStyleSpans(const NoteTextModel& model, NoteDocument* doc,
+                                 std::vector<HeadingPromotion>* pairedHeadings = nullptr) {
     if (!doc) return;
 
     struct HeadingInfo {
@@ -816,6 +833,31 @@ void ApplyLegacyMarkupStyleSpans(const NoteTextModel& model, NoteDocument* doc) 
             continue;
         }
 
+        if (pairedHeadings) {
+            const int level = ParseHeadingLevelToken(content);
+            const auto nextLine = std::upper_bound(model.line_starts.begin(), model.line_starts.end(), pos);
+            const size_t lineStart = nextLine == model.line_starts.begin() ? 0 : *std::prev(nextLine);
+            if (level > 0 && TrimLineStart(model.raw, lineStart, pos) == pos) {
+                // Unpaired row headings cannot accumulate as nested candidates.
+                // Their section tiers follow the same bounded heading stack.
+                while (!stack.empty() && stack.back().heading_level >= level) {
+                    StyleFrame previous = std::move(stack.back());
+                    stack.pop_back();
+                    CloseStyleFrame(doc, &previous, pos);
+                }
+                current_heading_level = level;
+                StyleFrame frame;
+                frame.heading_level = level;
+                frame.content_start = tagEnd;
+                frame.heading_tag_start = pos;
+                frame.heading_tag_level = level;
+                AddCloseAlias(&frame.close_aliases, content);
+                stack.push_back(std::move(frame));
+                pos = tagEnd;
+                continue;
+            }
+        }
+
         // A standalone heading opener already belongs to a heading block.
         // In particular, <m> here must not also open legacy line-height style.
         if (headingIndex > 0 && headings[headingIndex - 1].start == pos &&
@@ -832,7 +874,7 @@ void ApplyLegacyMarkupStyleSpans(const NoteTextModel& model, NoteDocument* doc) 
                 }
                 StyleFrame frame = std::move(stack[idx]);
                 stack.erase(stack.begin() + static_cast<std::ptrdiff_t>(idx));
-                CloseStyleFrame(doc, &frame, pos);
+                CloseStyleFrame(doc, &frame, pos, tagEnd, pairedHeadings);
                 break;
             }
             pos = tagEnd;
@@ -849,6 +891,7 @@ void ApplyLegacyMarkupStyleSpans(const NoteTextModel& model, NoteDocument* doc) 
                     }
                     StyleFrame frame = std::move(stack[idx]);
                     stack.erase(stack.begin() + static_cast<std::ptrdiff_t>(idx));
+                    // A section close ends its styles, not a paired title.
                     CloseStyleFrame(doc, &frame, pos);
                 }
                 current_heading_level = 0;
@@ -867,7 +910,7 @@ void ApplyLegacyMarkupStyleSpans(const NoteTextModel& model, NoteDocument* doc) 
                     }
                     StyleFrame frame = std::move(stack[idx]);
                     stack.erase(stack.begin() + static_cast<std::ptrdiff_t>(idx));
-                    CloseStyleFrame(doc, &frame, pos);
+                    CloseStyleFrame(doc, &frame, pos, tagEnd, pairedHeadings);
                     break;
                 }
             }
@@ -893,12 +936,6 @@ void ApplyLegacyMarkupStyleSpans(const NoteTextModel& model, NoteDocument* doc) 
         CloseStyleFrame(doc, &frame, model.raw.size());
     }
 }
-
-struct HeadingPromotion {
-    Span block_span{};
-    Span content_span{};
-    int level = 0;
-};
 
 [[nodiscard]] size_t HeadingTitleEnd(std::wstring_view raw, size_t start, size_t end, std::wstring_view name) {
     end = TrimLineEnd(raw, start, end);
@@ -1281,6 +1318,7 @@ void AppendMarkdownRegion(const NoteTextModel& source, Span region,
     };
     for (BlockNode& block : parsed.blocks) {
         translate(&block.span);
+        if (block.code_fence_span.end > block.code_fence_span.start) translate(&block.code_fence_span);
         if (block.loc.line == 1) block.loc.column += regionLocation.column - 1;
         block.loc.line += regionLocation.line - 1;
         block.parent = block.parent == static_cast<size_t>(-1) ? owner : blockBase + block.parent;
@@ -1366,6 +1404,17 @@ void AppendTaggedHeading(const NoteTextModel& model, const HeadingPromotion& hea
     std::sort(protectedSpans.begin(), protectedSpans.end(), [](Span lhs, Span rhs) {
         return lhs.start < rhs.start;
     });
+    std::vector<HeadingPromotion> pairedHeadings;
+    const bool clro = IsClroMarkdownFile(model.meta.file_name);
+    if (clro && HasStandaloneHeadingTags(model)) {
+        // Reuse the style stack's named/universal closing rules. This keeps
+        // nested style closes and literal code/math out of heading matching.
+        ApplyLegacyMarkupStyleSpans(model, &protectedDocument, &pairedHeadings);
+        std::sort(pairedHeadings.begin(), pairedHeadings.end(), [](const auto& lhs, const auto& rhs) {
+            return lhs.block_span.start < rhs.block_span.start;
+        });
+    }
+    size_t pairedHeadingIndex = 0;
     std::vector<size_t> stack;
     size_t protectedIndex = 0;
     size_t regionStart = 0;
@@ -1385,7 +1434,24 @@ void AppendTaggedHeading(const NoteTextModel& model, const HeadingPromotion& hea
         HeadingPromotion heading;
         if (TryParseLegacyHeadingOpen(model.raw, start, end, &heading)) {
             size_t afterHeading = next;
-            if (TrimLineStart(model.raw, heading.content_span.start.value, heading.content_span.end.value) >=
+            while (pairedHeadingIndex < pairedHeadings.size() &&
+                   pairedHeadings[pairedHeadingIndex].block_span.start < heading.block_span.start) ++pairedHeadingIndex;
+            if (pairedHeadingIndex < pairedHeadings.size() &&
+                pairedHeadings[pairedHeadingIndex].block_span.start == heading.block_span.start) {
+                const auto& candidate = pairedHeadings[pairedHeadingIndex];
+                const auto lastLine = std::upper_bound(model.line_starts.begin(), model.line_starts.end(),
+                                                       candidate.block_span.end.value - 1);
+                const size_t lineEnd = lastLine == model.line_starts.end() ? model.raw.size() : *lastLine;
+                // A heading is a block. Its closing token finishes its row.
+                if (TrimLineEnd(model.raw, candidate.block_span.end.value, lineEnd) ==
+                    candidate.block_span.end.value) {
+                    heading = candidate;
+                    afterHeading = lineEnd;
+                    line = static_cast<size_t>(lastLine - model.line_starts.begin()) - 1;
+                }
+            }
+            if (!clro &&
+                TrimLineStart(model.raw, heading.content_span.start.value, heading.content_span.end.value) >=
                     heading.content_span.end.value && line + 1 < model.line_starts.size()) {
                 const size_t titleStart = next;
                 size_t titleEnd = line + 2 < model.line_starts.size() ? model.line_starts[line + 2] : model.raw.size();
@@ -1508,18 +1574,34 @@ static void ProjectClroMarkupTags(std::wstring_view raw, const std::vector<Span>
 }
 
 static NoteDocument ParseNoteDocumentProjected(const NoteTextModel& model, std::wstring* projection) {
-    if (!HasClroFullwidthMarkdown(model)) {
+    const bool projectTags = HasClroFullwidthMarkdown(model);
+    const bool projectRules = IsClroMarkdownFile(model.meta.file_name) &&
+        model.raw.find(L"\u30FC\u30FC\u30FC") != std::wstring::npos;
+    if (!projectTags && !projectRules) {
         if (projection) *projection = model.raw;
         return ParseNoteDocumentCore(model);
     }
-    // Only recognized auxiliary tags accept fullwidth syntax. Markdown and
-    // ordinary Japanese punctuation are parsed exactly as written.
+    // Same-length parser projection preserves canonical UTF-16 positions.
+    // Only recognized tags and exact standalone long-vowel rules change;
+    // code, math and all other prose remain literal.
     NoteTextModel syntax = model;
     std::vector<Span> protectedRanges = CollectRawMarkdownLiteralSpans(model.raw);
     NoteDocument originalMath;
     ExtractTexMathSpans(model, &originalMath);
     for (const auto& math : originalMath.math_spans) protectedRanges.push_back(math.span);
-    ProjectClroMarkupTags(model.raw, protectedRanges, &syntax.raw);
+    if (projectTags) ProjectClroMarkupTags(model.raw, protectedRanges, &syntax.raw);
+    if (projectRules) {
+        for (size_t line = 0; line < model.line_starts.size(); ++line) {
+            const size_t start = model.line_starts[line];
+            size_t end = line + 1 < model.line_starts.size()
+                ? model.line_starts[line + 1] : model.raw.size();
+            while (end > start && (model.raw[end - 1] == L'\r' || model.raw[end - 1] == L'\n')) --end;
+            if (end - start == 3 && model.raw.compare(start, 3, L"\u30FC\u30FC\u30FC") == 0 &&
+                !ClroRangeContains(protectedRanges, start)) {
+                syntax.raw.replace(start, 3, L"---");
+            }
+        }
+    }
     NoteDocument doc = ParseNoteDocumentCore(syntax, false, &model);
     if (NoteDocumentHasFatalParseFailure(doc)) return doc;
     doc.uses_clro_fullwidth_markdown = syntax.raw != model.raw;

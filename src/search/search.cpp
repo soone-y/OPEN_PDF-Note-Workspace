@@ -1,8 +1,10 @@
 // file: search.cpp
 #include "search/search.h"
+#include "core/note_text_metadata.h"
 #include "search/note_search_worker.h"
 #include "search/search_process.h"
 #include "search/search_wire.h"
+#include "search/search_note_preferences.h"
 #include "search/search_groups.h"
 #include "diagnostics/write_checks.h"
 #include "ui/core/main_window_api.h"
@@ -1300,9 +1302,7 @@ static void SearchNoteText(const std::wstring& text,
     if (title.empty()) {
         title = ui.tagNote + L" (" + ui.metaCurrent + L")";
     }
-    note::NoteMetadata metadata;
-    metadata.file_name = path.filename().wstring();
-    metadata.title = note::DeriveTitleFromFileName(metadata.file_name);
+    auto metadata = BuildNoteTextMetadata(g_config, path.filename().wstring());
     const note::NoteContentKind contentKind = note::ContentKindForNotePath(path);
     search::NoteSearchInput input{snapshotIdentity, path.wstring(),
         std::move(metadata), text, contentKind, queryTermsLower, options};
@@ -2891,7 +2891,7 @@ static void RunSearchImpl(HWND hWnd, SearchCtx* ctx) {
         AppendInfo(ctx, range == SearchRange::CurrentLecture ? ui.msgNoLecture : ui.msgNoSession); return;
     }
     search::Writer request;
-    request.Put<uint32_t>(1);
+    request.Put<uint32_t>(search::kRequestVersion);
     request.Text(g_workspaceRoot); request.Text(g_config.classesDir); request.Text(g_config.cacheDir);
     request.Put<int32_t>(static_cast<int>(range)); request.Text(selectedRoot.wstring());
     request.Put<uint8_t>(range == SearchRange::WholeWorkspace && IsChecked(ctx->includeTempExternal));
@@ -2910,7 +2910,7 @@ static void RunSearchImpl(HWND hWnd, SearchCtx* ctx) {
     }
     request.Put<uint32_t>(targetMask); request.Text(query);
     request.Put<uint8_t>(options.normalizeWidthKana); request.Put<uint8_t>(options.ignoreCase);
-    request.Put<uint8_t>(g_config.clroAsciiOnly); request.Put<uint8_t>(g_config.noteQuoteLazyContinuation);
+    search::WriteNoteSyntaxPreferences(request, g_config);
     request.Put<uint32_t>(static_cast<uint32_t>(g_config.additionalNoteExtensions.size()));
     for (const auto& extension : g_config.additionalNoteExtensions) request.Text(extension);
     const auto currentEdit = CurrentEditSnapshotForNotePath(std::filesystem::path(g_currentNotePath));
@@ -3728,7 +3728,7 @@ static LRESULT CALLBACK SearchMessageHook(int code, WPARAM action, LPARAM data) 
 bool search::RunWorker(std::string_view request, search::Channel& channel) {
     try {
         search::Reader reader(request);
-        if (reader.Get<uint32_t>() != 1) return false;
+        if (reader.Get<uint32_t>() != search::kRequestVersion) return false;
         g_workspaceRoot = reader.Text(); g_config.classesDir = reader.Text(); g_config.cacheDir = reader.Text();
         if (!write_checks::IsSafeLocalPath(g_workspaceRoot)) return false;
         const auto range = static_cast<SearchRange>(reader.Get<int32_t>());
@@ -3762,8 +3762,7 @@ bool search::RunWorker(std::string_view request, search::Channel& channel) {
         job.options.normalizeWidthKana = reader.Get<uint8_t>() != 0;
         job.options.ignoreCase = reader.Get<uint8_t>() != 0;
         job.options.ignoreSeparators = job.options.normalizeWidthKana;
-        g_config.clroAsciiOnly = reader.Get<uint8_t>() != 0;
-        g_config.noteQuoteLazyContinuation = reader.Get<uint8_t>() != 0;
+        search::ReadNoteSyntaxPreferences(reader, g_config);
         const auto extensions = reader.Get<uint32_t>();
         if (extensions > 256) return false;
         for (uint32_t i = 0; i < extensions; ++i) g_config.additionalNoteExtensions.push_back(reader.Text(128));

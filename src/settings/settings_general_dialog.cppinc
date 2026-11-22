@@ -505,10 +505,6 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             beginSection(1, localization::Text(L"settings.general.4c8d20a2540f").c_str());
             addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.b87fc8e786dc").c_str(), defaultRenderModeLabel));
             ctx->cbNoteRenderMode = addCombo(IDC_NOTE_RENDER_MODE, false, controlW);
-            ctx->chkNoteQuoteLazyContinuation = addCheck(IDC_NOTE_QUOTE_LAZY_CONTINUATION,
-                localization::Text(L"settings.note.quote_lazy_continuation").c_str(), checkW);
-            ctx->chkClroAsciiOnly = addCheck(IDC_CLRO_ASCII_ONLY,
-                localization::Text(L"settings.general.clro_ascii_only").c_str(), checkW);
 
             const auto bottomSpaceGroup = beginSubgroup(L"settings.note.bottom_space");
             addLabel(localization::Text(L"settings.note.bottom_space_mode"));
@@ -536,7 +532,16 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.db92a1a5fee5").c_str(), defaultWrapLabel));
             ctx->chkNoteWrapEnabled = addCheck(IDC_NOTE_WRAP_ENABLED, localization::Text(L"settings.general.0b8b663d67e3").c_str(), checkW);
 
-            beginSection(2, localization::Text(L"settings.general.16a547980a7a").c_str());
+            beginSection(2, localization::Text(L"settings.note.clro_syntax").c_str());
+            ctx->chkClroAsciiOnly = addCheck(IDC_CLRO_ASCII_ONLY,
+                localization::Text(L"settings.note.clro_ascii_only").c_str(), checkW);
+            ctx->chkClroListImplicitContinuation = addCheck(IDC_CLRO_LIST_IMPLICIT_CONTINUATION,
+                localization::Text(L"settings.note.clro_list_implicit_continuation").c_str(), checkW);
+            ctx->chkNoteQuoteLazyContinuation = addCheck(IDC_NOTE_QUOTE_LAZY_CONTINUATION,
+                localization::Text(L"settings.note.quote_lazy_continuation").c_str(), checkW);
+            addLabel(localization::Text(L"settings.note.clro_syntax_hint"));
+
+            beginSection(3, localization::Text(L"settings.general.16a547980a7a").c_str());
             addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.111e520d0d01").c_str(), defaultBgLabel));
             ctx->cbNoteBgMode = addCombo(IDC_NOTE_BG_MODE, false, controlW);
             ctx->btnNoteBgCustom = addButton(IDC_NOTE_BG_CUSTOM,
@@ -570,7 +575,7 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
                 addCombo(IDC_NOTE_INLINE_MATH_VERTICAL_ALIGNMENT, false, controlW);
             endSubgroup(mathGroup);
 
-            beginSection(3, localization::Text(L"settings.general.f669fef9c21a").c_str());
+            beginSection(4, localization::Text(L"settings.general.f669fef9c21a").c_str());
             addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.0f0d1e700cd7").c_str(), defaultOverlayRefreshDelayLabel));
             ctx->cbNoteOverlayRefreshDelay = addCombo(IDC_NOTE_OVERLAY_REFRESH_DELAY, false, controlW);
 
@@ -1183,6 +1188,10 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             SendMessageW(ctx->chkNoteWrapEnabled, BM_SETCHECK,
                          g_noteWrapEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
         }
+        if (ctx->chkClroListImplicitContinuation) {
+            SendMessageW(ctx->chkClroListImplicitContinuation, BM_SETCHECK,
+                         g_config.clroListImplicitContinuation ? BST_CHECKED : BST_UNCHECKED, 0);
+        }
         if (ctx->chkNoteQuoteLazyContinuation) {
             SendMessageW(ctx->chkNoteQuoteLazyContinuation, BM_SETCHECK,
                          g_config.noteQuoteLazyContinuation ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -1353,9 +1362,10 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
         if (ctx->navList) {
                 SendMessageW(ctx->navList, CB_RESETCONTENT, 0, 0);
             if (showNoteSectionOnly) {
-                const std::array<std::wstring, 4> noteSectionLabels = {
+                const std::array<std::wstring, 5> noteSectionLabels = {
                     localization::Text(L"settings.general.d6ae379cb93d").c_str(),
                     localization::Text(L"settings.general.4c8d20a2540f").c_str(),
+                    localization::Text(L"settings.note.clro_syntax").c_str(),
                     localization::Text(L"settings.general.16a547980a7a").c_str(),
                     localization::Text(L"settings.general.f669fef9c21a").c_str(),
                 };

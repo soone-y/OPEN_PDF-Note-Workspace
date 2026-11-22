@@ -65,7 +65,7 @@ static void ApplyPdfScaleDirect(HWND pdfWnd, double newScale, POINT focusInClien
     if (g_pdf.editingText) {
         // Include IME composition text too, so the box size/wrapping stays stable while composing.
         RecalcEditingTextboxSize(true);
-        EnsureEditingTextBoxVisible(pdfWnd, L"zoom_edit_box");
+        EnsureEditingTextBoxVisible(pdfWnd, L"zoom_edit_box", TextBoxRevealIntent::Layout);
     }
     
     InvalidateRect(pdfWnd, nullptr, FALSE);
@@ -73,6 +73,21 @@ static void ApplyPdfScaleDirect(HWND pdfWnd, double newScale, POINT focusInClien
         g_bottomNoteMode == BottomNoteMode::Assist) {
         InvalidateRect(g_hBottomNote, nullptr, FALSE);
     }
+}
+
+static void StepPdfZoomAnimation(HWND pdfWnd) {
+    if (g_pdf.kind == DocKind::None || !g_zoomAnimating) {
+        StopPdfZoomAnimation(pdfWnd);
+        return;
+    }
+    // Geometry was applied synchronously by SetPdfScale. Only refresh pixels:
+    // replaying the old zoom anchor here would undo a later wheel/pan/scrollbar
+    // input. This pass must not claim ownership of the viewport again.
+    StopPdfZoomAnimation(pdfWnd);
+    g_pdf.renderScale = ComputePdfRenderScale(g_pdf.scale);
+    InvalidatePdfRenderGeneration();
+    UpdatePdfVirtualScrollCaches(pdfWnd);
+    InvalidateRect(pdfWnd, nullptr, FALSE);
 }
 
 static void CompleteInitialPdfFit(HWND pdfWnd, double fit) {
@@ -159,9 +174,9 @@ void SetPdfScale(HWND pdfWnd, double newScale, POINT focusInClient) {
     if (g_pdf.kind == DocKind::None) return;
     newScale = NormalizeZoomScaleValue(newScale);
     if (std::abs(newScale - g_pdf.scale) < 1e-6 && !g_zoomAnimating) return;
+    if (g_pdf.editingText) g_pdfTextEditViewFollow.Suspend();
 
     g_zoomTargetScale = newScale;
-    g_zoomFocusPoint = focusInClient;
     g_zoomAnchor = {};
     g_zoomAnchor.focusClient = focusInClient;
     int pageIndex = -1;

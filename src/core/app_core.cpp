@@ -2552,7 +2552,7 @@ static bool IsWorkspaceConfigKnownTopLevelField(const std::string& key) {
         "showMathList", "downKeyLastLineAction", "downKeyLastLineInsertNewline",
         "leftRightLineMoveAction", "autoPairBrackets", "fullWidthParenCaretInside", "fullWidthParenCancelNextLeft",
         "noteFontName", "noteFontPt", "noteRenderFontName", "noteRenderJpFontName",
-        "noteRenderFontPt", "noteSystem", "noteRenderEnabled", "noteRawOnly", "noteRenderMath", "clroAsciiOnly", "noteQuoteLazyContinuation",
+        "noteRenderFontPt", "noteSystem", "noteRenderEnabled", "noteRawOnly", "noteRenderMath", "clroAsciiOnly", "noteQuoteLazyContinuation", "clroListImplicitContinuation",
         "noteWrapEnabled", "noteVimModeEnabled", "noteVimCaretLineRawTextVisible",
         "noteVimClickEntersInsertMode", "noteOverlayRefreshDelayMs", "noteFullReparseDelayMs",
         "noteMathMarginTopPercent",
@@ -5795,6 +5795,7 @@ static void ApplyJsonToWorkspaceConfig(const std::string& json, WorkspaceConfig&
     }
     if (auto b = ParseJsonBoolField(json, "clroAsciiOnly")) cfg.clroAsciiOnly = *b;
     if (auto b = ParseJsonBoolField(json, "noteQuoteLazyContinuation")) cfg.noteQuoteLazyContinuation = *b;
+    if (auto b = ParseJsonBoolField(json, "clroListImplicitContinuation")) cfg.clroListImplicitContinuation = *b;
     if (auto b = ParseJsonBoolField(json, "noteWrapEnabled")) {
         cfg.noteWrapEnabled = *b;
     }
@@ -6383,6 +6384,7 @@ bool SaveWorkspaceConfigToFile(const std::filesystem::path& path, const Workspac
     ofs << "  \"noteRenderMath\": " << (cfg.noteRenderMath ? "true" : "false") << ",\n";
     ofs << "  \"clroAsciiOnly\": " << (cfg.clroAsciiOnly ? "true" : "false") << ",\n";
     ofs << "  \"noteQuoteLazyContinuation\": " << (cfg.noteQuoteLazyContinuation ? "true" : "false") << ",\n";
+    ofs << "  \"clroListImplicitContinuation\": " << (cfg.clroListImplicitContinuation ? "true" : "false") << ",\n";
     ofs << "  \"noteWrapEnabled\": " << (cfg.noteWrapEnabled ? "true" : "false") << ",\n";
     ofs << "  \"noteVimModeEnabled\": " << (cfg.noteVimModeEnabled ? "true" : "false") << ",\n";
     ofs << "  \"noteVimCaretLineRawTextVisible\": " << (cfg.noteVimCaretLineRawTextVisible ? "true" : "false") << ",\n";

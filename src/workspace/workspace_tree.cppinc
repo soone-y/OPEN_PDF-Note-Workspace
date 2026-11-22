@@ -458,7 +458,6 @@ void LoadFiles(const SessionEntry& session, std::wstring& preferredPdf, std::wst
     int noteIdx = CurrentNoteIndex();
     ui::RememberOpenListIndex(g_hNoteList, noteIdx);
     if (noteIdx >= 0) SendMessageW(g_hNoteList, LB_SETCURSEL, noteIdx, 0);
-    SaveStartupLastOpenTarget();
     preview_trace::Append(
         L"LoadFiles",
         L"end sessionPath=" + session.path +
@@ -586,8 +585,7 @@ void OnWorkspaceLoaded(HWND hWnd) {
         ShowSoftNotice(hWnd, localization::Text(L"ui.layout.a1495b07a2ac"), SoftNoticeKind::Warning);
     g_lastNoteBySession.clear();
     g_lastPdfBySession.clear();
-    g_lastStartupLecturePathSaved.clear();
-    g_lastStartupSessionPathSaved.clear();
+    g_lastStartupTargetSaved.clear();
     LoadSessionLastOpenMap();
     ResetSessionAndFiles();
     LoadLectures();

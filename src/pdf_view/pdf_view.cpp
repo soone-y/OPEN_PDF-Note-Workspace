@@ -2,6 +2,7 @@
 #include "pdf_view/pdf_view.h"
 #include "pdf_view/render_queue_policy.h"
 #include "pdf_view/scroll_travel.h"
+#include "pdf_view/text_edit_view_follow.h"
 #include "pdf_view/view_rotation_record.h"
 #include "pdf_view/text_input_accessibility.h"
 #include "pdf_view/textbox_font_update.h"
@@ -15,6 +16,7 @@
 #include "ui/empty_view_guide.h"
 #include "ui/shortcut_help.h"
 #include "core/annotation_rotation.h"
+#include "core/pdf_permissions.h"
 #include "ui/quarter_turn_bitmap.h"
 #include "ui/annotation_text_raster.h"
 #include "ui/vertical_text_gdi.h"
@@ -337,69 +339,6 @@ static bool ConfirmPdfYesNo(HWND owner, const std::wstring& title, const std::ws
     return ShowPdfDialog(owner, options) == SilentDialogResult::Yes;
 }
 
-bool PromptPasswordAndReopenCurrentPdf(HWND owner, const std::wstring& title,
-                                       const std::wstring& blockedMessage,
-                                       const std::wstring& confirmation) {
-    const std::wstring pdfPath = CurrentLogicalPdfPath();
-    if (pdfPath.empty()) return false;
-    const bool hadSelection = g_pdf.hasSelection;
-    const int selectionStartPage = g_pdf.selectionStartPage;
-    const int selectionEndPage = g_pdf.selectionEndPage;
-    const bool selectionByText = g_pdf.selectionByText;
-    const int selCharAnchor = g_pdf.selCharAnchor;
-    const int selCharFocus = g_pdf.selCharFocus;
-    const auto selectionAnchorPt = g_pdf.selectionAnchorPt;
-    const auto selectionFocusPt = g_pdf.selectionFocusPt;
-
-    SilentDialogOptions options;
-    options.title = title;
-    options.message =
-        blockedMessage +
-        (localization::Text(L"pdf.view.1f2723e36a6b"));
-    options.kind = SoftNoticeKind::Warning;
-    options.buttons = SilentDialogButtons::YesNo;
-    options.yesLabel = localization::Text(L"pdf.view.7eb7a2cc15ed");
-    options.noLabel = localization::Text(L"pdf.view.3672b0b92134");
-    options.defaultResult = SilentDialogResult::Yes;
-    options.escapeResult = SilentDialogResult::No;
-    if (ShowPdfDialog(owner, options) != SilentDialogResult::Yes) {
-        return false;
-    }
-
-    std::wstring password;
-    SecureWideStringScope passwordScope(&password);
-    const std::wstring promptMessage =
-        localization::Text(L"pdf.view.ee6127d8900a");
-    if (!PromptPasswordText(PdfDialogOwner(owner), title, promptMessage, password, confirmation)) {
-        return false;
-    }
-
-    std::string passwordUtf8 = WideToUTF8(password);
-    SecureStringScope passwordUtf8Scope(&passwordUtf8);
-    QueuePdfOpenPasswordForNextLoad(passwordUtf8);
-    if (!OpenPdfWithAnnotations(owner, pdfPath)) {
-        return false;
-    }
-
-    if (hadSelection && g_pdf.kind == DocKind::Pdf &&
-        selectionStartPage >= 0 && selectionEndPage >= 0 &&
-        selectionStartPage < g_pdf.pageCount &&
-        selectionEndPage < g_pdf.pageCount) {
-        g_pdf.hasSelection = true;
-        g_pdf.selectionStartPage = selectionStartPage;
-        g_pdf.selectionEndPage = selectionEndPage;
-        g_pdf.selectionByText = selectionByText;
-        g_pdf.selCharAnchor = selCharAnchor;
-        g_pdf.selCharFocus = selCharFocus;
-        g_pdf.selectionAnchorPt = selectionAnchorPt;
-        g_pdf.selectionFocusPt = selectionFocusPt;
-        if (g_hPdfView) {
-            InvalidateRect(g_hPdfView, nullptr, FALSE);
-        }
-    }
-    return true;
-}
-
 static HWND FindComboListBoxUnderCursor(POINT screenPt) {
     HWND h = WindowFromPoint(screenPt);
     while (h) {
@@ -670,6 +609,7 @@ static bool ShouldShowEmptyViewGuide() {
 #include "pdf_view/render.cppinc"
 
 #include "pdf_view/input.cppinc"
+#include "pdf_view/scroll_stability_tests.cppinc"
 #include "pdf_view/initial_viewport_work_tests.cppinc"
 #include "pdf_view/worker_concurrency_tests.cppinc"
 
@@ -2174,6 +2114,7 @@ static void CommitTextEditing(HWND hwnd, bool commit) {
     }
 
     g_pdf.editingText = false;
+    g_pdfTextEditViewFollow.Reset();
     EndPdfTextInputAccessibility(hwnd);
     g_pdf.editPage = -1;
     g_pdf.editText.clear();

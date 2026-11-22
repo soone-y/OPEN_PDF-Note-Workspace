@@ -27,6 +27,10 @@ Keep both files together when copying, moving, or sharing them. Save annotations
 
 - Select several files in **Open File**, or add files from the file list, then switch tabs. `Ctrl+Tab` selects the next tab; `Ctrl+Shift+Tab` selects the previous one.
 - Choose files and headings on the left and read the document on the right. You can open a folder and navigate back or up to its parent.
+- Navigate with **← Back** and **↑ Up** above the list. The parent folder is not mixed with files. Browseable folders have a **›** suffix; files show their PDF, note, annotation, or other file type.
+- You can narrow the window to 480 pixels at 100% display scaling. The sidebar temporarily hides in narrow windows and returns when you widen them. View controls that do not fit on the toolbar remain available in the **View** menu.
+- When the sidebar is hidden in a narrow window, choose **Documents** above the tabs to select a document. The same command is available in **File**, including in Focus Mode. The temporary list closes after selection or cancellation without widening the window.
+- When an opened folder contains `pdf/` or `note/`, the file tree displays their contents in expandable **PDF (pdf)** and **Notes (note)** groups. Either folder can be used on its own. Other folders and files directly in the opened folder remain visible. Select a subfolder within a group to browse it.
 - Drag tabs to reorder them, move them to another viewer window, or detach them by dragging outside the window. Separate windows let you read documents side by side. The tab context menu also provides move commands.
 - Press `Ctrl+F` to search document text or PDF text. `F3` finds the next result and `Shift+F3` the previous one.
 - Choose **View → Focus Mode** (`Ctrl+B`) to use the full area below the menu bar for reading. Switch documents from **Tab List** and change zoom or display format from **View**. The search field opens when requested and closes when you run a search or press `Esc`. Choose **Focus Mode** again or press `Ctrl+B` to restore the regular layout.
@@ -99,12 +103,18 @@ Page navigation, annotation visibility, and rotation apply to a PDF outside the 
 
 ## Export an annotated PDF copy
 
+Copying a selection that includes document text requires the open PDF's copy permission. Selections containing only separate-file annotations may still be copied. Export stops for encrypted or digitally signed PDFs because it cannot preserve those protections. The PDF pane shows the reason when a restriction stops an operation.
+
 Open the PDF with its matching `.clrop`, then use **File > Export Annotated PDF** (Ctrl+Alt+E) and choose a destination different from the source PDF. The same source path is rejected. This does not save changes into the original PDF, annotation file or note.
 
 The viewer draws annotations into page contents. This differs from the main application's standard PDF annotation export: the output writing is not intended for further individual annotation editing. Inspect the resulting appearance. Use [main-application output](Help_Reference.md#pdf-annotation-output) when standard annotations are needed, and retain the original PDF/CLROP pair for further work.
 
 ## Files and preferences
 
-Normal viewing operations do not edit or save the original PDF, `.clrop`, or note. To reopen selected materials next time, enable restoration in **Settings**, then mark tabs or a folder persistent in **Path Management**. These restoration preferences are saved to `readonly_setup.json` beside the executable. Use the main application to edit annotations or notes and to export standard PDF annotations.
+Normal viewing operations do not edit or save the original PDF, `.clrop`, or note. Use the main application to edit annotations or notes and to export standard PDF annotations.
+
+In **Next Startup**, enable **Reopen documents at next startup**, then register only the documents or folder you want with **Reopen this document next time** and **Reopen this folder next time**. **ON with zero registered targets is valid.** Enabling reopening never automatically registers the current PDF, note, or folder.
+
+Use **Review and manage startup targets** to inspect registrations and select **Remove ... from startup** to unregister an item. Closing a tab keeps its registration. Turning reopening OFF also keeps registrations, while preventing them from opening at startup. Changes are saved to `readonly_setup.json` beside the executable; a failed save restores the previous settings. Existing dedicated preferences take precedence, so an empty selection is never replenished from an older shared setup.
 
 Keep the bundled DLLs, `LICENSE.md`, and `licenses/` with the executable when moving it. The **Licenses** menu opens the guide and original notices. See [PDF and CLROP files](CLROP_Annotation_Format.md) for format details and [Using the Application](Using_the_App.md) for editing and output.

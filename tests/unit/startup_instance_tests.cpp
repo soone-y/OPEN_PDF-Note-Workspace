@@ -1,4 +1,5 @@
 #include "app/startup_instance.h"
+#include "app/startup_last_open.h"
 #include "app/main_window_liveness_policy.h"
 #include "app/main_window_recovery_notice.h"
 #include "core/constants.h"
@@ -280,10 +281,42 @@ static void TestAutomationExecutionPolicy() {
     }
 }
 
+static void TestStartupLastOpenRecord() {
+    using namespace startup_last_open;
+    for (int mask = 0; mask < 4; ++mask) {
+        Target input{L"C:\\授業\\講義", L"C:\\授業\\講義\\第１回",
+                     mask & 1 ? L"C:\\資料\\a.pdf" : L"",
+                     mask & 2 ? L"C:\\ノート\\a.clro" : L""};
+        auto line = Serialize(input);
+        Check(!line.empty() && line.back() == L'\n', "restart line terminator");
+        line.pop_back();
+        Target output;
+        Check(Parse(line, &output), "restart four-state parse");
+        Check(output.pdfPath == input.pdfPath && output.notePath == input.notePath,
+              "restart open/closed state");
+        Check(output.lecturePath == (mask ? input.lecturePath : L"") &&
+              output.sessionPath == (mask ? input.sessionPath : L""), "closed record omits directories");
+    }
+    const std::wstring escaped = L"C:\\t\\n\\r\\資料\t\r\n末尾\\";
+    Check(Unescape(Escape(escaped)) == escaped, "restart escaped fields roundtrip");
+    Target special{escaped, escaped, escaped, escaped}, restored;
+    auto line = Serialize(special); line.pop_back();
+    Check(Parse(line, &restored) && restored.notePath == escaped && restored.pdfPath == escaped,
+          "restart paths retain literal escapes and Unicode");
+    Target unchanged{L"keep", L"keep", L"keep", L"keep"};
+    for (const auto* invalid : {L"", L"course\tsession", L"v1\ta\tb\tc\td",
+                                L"v2\ta\tb\tc", L"v2\ta\tb\tc\td\textra", L"v2\ta\tb\tc\nd"}) {
+        Check(!Parse(invalid, &unchanged) && unchanged.pdfPath == L"keep", "reject bad/legacy record without publication");
+    }
+    Check(!Parse(std::wstring(L"v2\ta\tb\tc\t") + std::wstring(1, L'\0'), &unchanged), "reject embedded NUL");
+    Check(!Parse(line, nullptr), "reject null output");
+}
+
 int wmain(int argc, wchar_t** argv) {
     if (argc == 4 && std::wstring(argv[1]) == L"--child")
         return RunChild(argv[2], static_cast<DWORD>(std::stoul(argv[3])));
     try {
+        TestStartupLastOpenRecord();
         TestAutomationExecutionPolicy();
         main_window_liveness::Policy policy(100);
         Check(!policy.Observe(false, 15099) && policy.Observe(false, 15100), "startup grace");

@@ -12,9 +12,6 @@
 
 // pdf_view TU で実装。services 層からは本ヘッダ経由で参照する。
 void InvalidateAnnotHistoryForPath(const std::wstring& path);
-bool PromptPasswordAndReopenCurrentPdf(HWND owner, const std::wstring& title,
-                                       const std::wstring& blockedMessage,
-                                       const std::wstring& confirmation);
 
 namespace file_output {
 
@@ -174,6 +171,9 @@ void HandleAutoIntegrateTimer(HWND owner);
 // Integrate staged note/.clrop diffs into their original files (Ctrl+S / exit / manual).
 bool IntegrateStagedNoteAndAnnotations(HWND owner);
 bool RunSaveAndIntegrateTransaction(HWND owner);
+// Exit preserves dirty drafts without treating a closed, empty note pane as
+// an explicit request to bind a new note filename.
+[[nodiscard]] bool RunSaveAndIntegrateTransactionForExit(HWND owner);
 enum class SaveTransactionStartResult {
     Failed,
     CompletedSynchronously,
@@ -228,8 +228,16 @@ bool RestoreFromBackupMeta(HWND owner, const std::filesystem::path& backupMetaPa
 bool DeleteBackupMeta(const std::filesystem::path& backupMetaPath, std::wstring* outErr);
 
 // PDF export helpers.
-// One ordered segment of the current PDF. Every segment keeps its own output
-// settings; all segments are prepared in memory before one atomic destination save.
+// A reservation binds its options and annotations to one original file version.
+// Sources are reopened read-only on execution, so the queue owns no open files.
+struct ReservedPdfSource {
+    std::wstring path;
+    BY_HANDLE_FILE_INFORMATION identity{};
+    std::vector<Annotation> annotations;
+};
+[[nodiscard]] std::shared_ptr<const ReservedPdfSource> CaptureReservedPdfSource();
+
+// Each segment has independent settings. A null source means the current PDF.
 struct PdfExportPart {
     std::vector<PdfPageSpec> pages;
     bool standardTextAnnots = true;
@@ -237,6 +245,7 @@ struct PdfExportPart {
     bool matchPdfPaneTextLayout = true;
     pdf_annotation_export::TextColorOptions textColor;
     bool embedEditableData = true;
+    std::shared_ptr<const ReservedPdfSource> source;
 };
 [[nodiscard]] bool ExportPdfParts(HWND owner, const std::vector<PdfExportPart>& parts,
                                   const std::wstring& outPath);
@@ -268,6 +277,9 @@ bool ExportPdfPagePng(HWND owner, int pageIndex, const std::wstring& outPath, Pd
 bool ExportPdfPagePng(HWND owner, int pageIndex, PdfPngStyle style, bool includeAnnotations, int outWidthPx, int outHeightPx,
                       std::wstring* outSavedPath = nullptr);
 bool ExportPdfPagePng(HWND owner, int pageIndex, const std::wstring& outPath, PdfPngStyle style, bool includeAnnotations, int outWidthPx, int outHeightPx);
+[[nodiscard]] bool ExportPdfPagePng(HWND owner, const ReservedPdfSource& source, int pageIndex,
+                                    const std::wstring& outPath, PdfPngStyle style,
+                                    bool includeAnnotations, int outWidthPx, int outHeightPx);
 
 // Create a new one-page PDF from a PNG/JPEG without modifying the source image.
 // The source pixels and physical DPI determine the PDF page content and size.

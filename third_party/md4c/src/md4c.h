@@ -323,6 +323,10 @@ typedef struct MD_BLOCK_CODE_DETAIL {
     MD_ATTRIBUTE info;
     MD_ATTRIBUTE lang;
     MD_CHAR fence_char;         /* The character used for fenced code block; or zero for indented code block. */
+    /* App source coordinates, independent of whether the body emits text. */
+    MD_OFFSET fence_begin;
+    MD_OFFSET fence_end;
+    int fence_closed;
 } MD_BLOCK_CODE_DETAIL;
 
 /* Detailed info for MD_BLOCK_TABLE. */
@@ -385,6 +389,7 @@ typedef struct MD_BLOCK_BLANK_DETAIL {
  * The following flags may allow some extensions or deviations from it.
  */
 #define MD_FLAG_COLLAPSEWHITESPACE          0x1      /* In MD_TEXT_NORMAL, collapse non-trivial whitespace into single ' ' */
+#define MD_FLAG_NOSETEXTHEADINGS            0x10000000 /* App extension: do not infer headings from a following underline. */
 #define MD_FLAG_PERMISSIVEATXHEADERS        0x2      /* Do not require space in ATX headers ( ###header ) */
 #define MD_FLAG_PERMISSIVEURLAUTOLINKS      0x4      /* Recognize URLs as autolinks even without '<', '>' */
 #define MD_FLAG_PERMISSIVEEMAILAUTOLINKS    0x8      /* Recognize e-mails as autolinks even without '<', '>' and 'mailto:' */
@@ -392,6 +397,7 @@ typedef struct MD_BLOCK_BLANK_DETAIL {
 #define MD_FLAG_NOHTMLBLOCKS                0x20     /* Disable raw HTML blocks. */
 #define MD_FLAG_NOHTMLSPANS                 0x40     /* Disable raw HTML (inline). */
 #define MD_FLAG_TABLES                      0x100    /* Enable tables extension. */
+#define MD_FLAG_REQUIRETABLEPIPES           0x8000000 /* App extension: a table body row must contain a literal pipe. */
 #define MD_FLAG_STRIKETHROUGH               0x200    /* Enable strikethrough extension. */
 #define MD_FLAG_PERMISSIVEWWWAUTOLINKS      0x400    /* Enable WWW autolinks (even without any scheme prefix, if they begin with 'www.') */
 #define MD_FLAG_TASKLISTS                   0x800    /* Enable task list extension. */
@@ -409,6 +415,7 @@ typedef struct MD_BLOCK_BLANK_DETAIL {
 #define MD_FLAG_PRESERVEBLANKLINES          0x400000 /* Report blank line runs as MD_BLOCK_BLANK. */
 #define MD_FLAG_INSERT                      0x800000 /* Enable insert extension. */
 #define MD_FLAG_NOQUOTE_LAZY_CONTINUATION   0x1000000 /* App extension: require explicit quote markers on continuation lines. */
+#define MD_FLAG_NOIMPLICITLISTCONTINUATION  0x4000000 /* App extension: require list markers outside literal blocks. */
 
 #define MD_FLAG_PERMISSIVEAUTOLINKS         (MD_FLAG_PERMISSIVEEMAILAUTOLINKS | MD_FLAG_PERMISSIVEURLAUTOLINKS | MD_FLAG_PERMISSIVEWWWAUTOLINKS)
 #define MD_FLAG_NOHTML                      (MD_FLAG_NOHTMLBLOCKS | MD_FLAG_NOHTMLSPANS)
