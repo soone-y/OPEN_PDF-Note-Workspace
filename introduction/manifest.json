@@ -94,6 +94,8 @@
       "id": "design_philosophy",
       "when": "このプロジェクトが解こうとしている課題、PDF・注釈・ノート・数式・ワークスペースの関係、または設計思想について質問された場合",
       "read": [
+        "core/principles.md",
+        "core/rationale.md",
         "core/use_cases.md",
         "core/ui_concepts.md",
         "../README.md",
@@ -157,8 +159,32 @@
       "when": "PDF、.clrop、.clro、Markdown、TeX、テキスト、CSVの扱いについて質問された場合",
       "read": [
         "core/file_formats.md",
+        "core/data_schemas.md",
         "../docs/ja/File_Formats.md",
         "../docs/ja/Save_and_Recovery.md"
+      ]
+    },
+    {
+      "id": "code_structure",
+      "when": "C++ ソースコードのレイヤー構造、関数・ファイルの位置、コード変更時に守る方針について質問された場合",
+      "read": [
+        "core/architecture_layers.md",
+        "core/code_symbol_index.md",
+        "core/answering_guidelines.md",
+        "core/repository_reference_map.md"
+      ],
+      "distinguish_policy_from_verified_implementation": true
+    },
+    {
+      "id": "english_material",
+      "when": "英語で概要、主な機能、ファイル形式と保存、開発の考え方を読みたい場合",
+      "read": [
+        "en/index.md",
+        "en/project_overview.md",
+        "en/features_and_scenarios.md",
+        "en/file_formats.md",
+        "en/development.md",
+        "../docs/en/README.md"
       ]
     }
   ],

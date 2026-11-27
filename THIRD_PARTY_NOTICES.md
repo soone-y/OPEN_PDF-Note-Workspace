@@ -3,14 +3,14 @@
 本書は、`PDF Note Workspace` が利用または配布時に同梱する第三者コンポーネントの実態を整理したものです。
 プロジェクト本体と、別ライセンス表記のないリポジトリ同梱素材のライセンスは `LICENSE.md` を参照してください。
 
-release パッケージ利用時は、まず `docs/THIRD_PARTY_NOTICES.md` と `licenses/` 配下を参照してください。本書中の `third_party/...` は、リポジトリ上の元配置を示します。
+release パッケージ利用時は、まず `docs/legal/THIRD_PARTY_NOTICES.md` と `licenses/` 配下（`licenses/README.txt` を含む）を参照してください。本書中の `third_party/...` は、リポジトリ上の元配置を示します。
 
 ## 1. 同梱/配布する第三者コンポーネント
 
 | コンポーネント | 用途 | 同梱形態 | ライセンス参照 |
 | --- | --- | --- | --- |
 | PDFium package `160.0.8179.0` | PDF の読み込み、描画、テキスト抽出、書き出し | `third_party/pdfium/` を同梱。release では `pdfium.dll` と対応ライセンス文書を配布 | `third_party/pdfium/LICENSE`, `third_party/pdfium/licenses/` |
-| MD4C | Markdown 解析 | `third_party/md4c/` をリポジトリへ配置。導入時は `md4c.c`, `md4c.h`, `LICENSE.md` を参照 | `third_party/md4c/LICENSE.md` |
+| MD4C `0.6.0+git.f9e5eb2` | Markdown 解析 | `third_party/md4c/` をリポジトリへ配置。導入時は `md4c.c`, `md4c.h`, `LICENSE.md` を参照 | `third_party/md4c/LICENSE.md` |
 | LibreOffice custom runtime `26.2.7.3` / 比較用 image `26.2.3.2` | 同梱フォントのアプリ内 private font 利用。docx/pptx から PDF への headless 変換 | `image/` は比較・フォント・license 参照用。通信機能を除いた custom runtime を標準 release へ配置する | runtime および `third_party/libreoffice/image/` の `license.txt`, `LICENSE.html`, `NOTICE` |
 | MinGW-w64 runtime DLLs | `pdf_note_workspace.exe` と `readonly_viewer.exe` 実行に必要な C++/GCC runtime | `libstdc++-6.dll`, `libgcc_s_seh-1.dll`, `libwinpthread-1.dll` を `out/bin/` と release へコピー | `third_party/mingw_runtime_licenses/mingw-w64/` |
 | zlib runtime `1.4` | DOCX staging copy の ZIP 展開/検証 | `third_party/zlib/` の固定成果物から `zlib1.dll` を `out/bin/` と release へコピー | `third_party/zlib/LICENSE` |
@@ -98,12 +98,12 @@ release パッケージ利用時は、まず `docs/THIRD_PARTY_NOTICES.md` と `
 
 - `third_party/md4c/` には vendor 化した `MD4C` を配置します。
 - 保持対象は `src/`, `LICENSE.md`, `README.md`, `CHANGELOG.md` です。
-- Markdown 解析移行では、現在次を build へ組み込み済みです。
+- build へ組み込むのは次の2ファイルです。
   - `third_party/md4c/src/md4c.c`
   - `third_party/md4c/src/md4c.h`
 - `scripts/build/build_workspace.ps1` は `third_party/md4c/src/md4c.c` を直接コンパイルします。
 - `md4c-html.*` は現時点では使用前提にしません。
-- `VERSION` で v0.6.0 の完全な upstream commit を固定し、全角空白・日本語句読点対応だけを `patches/` の局所パッチとして保持します。
+- `VERSION` で v0.6.0 の完全な upstream commit を固定し、局所変更は `patches/` の6本（0001〜0006：全角空白・日本語句読点、明示的な引用継続、二重下線、明示的な表継続、CLRO の行境界、コードフェンスの位置情報）として保持します。
 
 ### 4.2 ライセンス文書
 
@@ -121,7 +121,7 @@ release パッケージ利用時は、まず `docs/THIRD_PARTY_NOTICES.md` と `
 ### 4.4 ローカル方針
 
 - 当プロジェクトでは Markdown から AST への解析機能のみを利用します。
-- vendor tree は必要な `src/md4c.c` と `src/md4c.h` に限定し、全角空白・日本語句読点対応は `patches/0001-japanese-whitespace-and-punctuation.patch` で再現可能にしています。
+- vendor tree は必要な `src/md4c.c` と `src/md4c.h` に限定し、局所変更は `patches/0001`〜`0006` を順に適用して再現可能にしています。
 - HTML 出力、Linux package metadata、upstream CMake 構成はアプリのビルド・配布へ組み込みません。
 ## 5. LibreOffice
 
@@ -135,7 +135,7 @@ release パッケージ利用時は、まず `docs/THIRD_PARTY_NOTICES.md` と `
 - `image/Fonts/` 配下から選んだ欧文・記号フォントは、アプリ起動時に `AddFontResourceExW(..., FR_PRIVATE, ...)` でプロセス private font として読み込み、システムへインストールしません。
 - headless 変換専用とし、ユーザー原本ではなくアプリ管理下のコピーを入力にします。
 - custom patch `0051` は、長いlocal pathのURL/native変換、directory列挙、一時ファイルの予約を修正します。改変の再現入力は `third_party/libreoffice/custom_build/patches/` に保持し、通常版のライセンス資料へ同梱します。元のMPL/Apache表示を保持します。
-- release パッケージでは、アプリ側 private font 利用のため選択したフォントファイルを `libreoffice/image/Fonts/` に置き、検証済みカスタム runtime を `libreoffice/custom_runtime/instdir/` 配置で標準同梱し、LibreOffice ライセンス/NOTICE 文書を同梱します。変換機能を含めない軽量配布は `-Lite` を指定します。
+- 標準 release パッケージでは、検証済みカスタム runtime を `lo/` に置き、アプリ側 private font 利用のため選択したフォントファイルを `lo/image/Fonts/` に置き（Lite版では `libreoffice/image/Fonts/`）、LibreOffice ライセンス/NOTICE 文書を同梱します。変換機能を含めない軽量配布は `-Lite` を指定します。
 - カスタム Office 変換 runtime を release に含める場合は、`scripts/release/pack_release.ps1` が同梱 runtime 自身の `license.txt`, `LICENSE.html`, `NOTICE` を `licenses/libreoffice/` へコピーし、`third_party/libreoffice/custom_build/communication_free_options.input`、`release_reduction_manifest.json`、`patches/*.patch` も `licenses/libreoffice/custom_build/` へコピーします。
 
 ### 5.2 ローカル方針
@@ -190,8 +190,8 @@ release パッケージ利用時は、まず `docs/THIRD_PARTY_NOTICES.md` と `
 - 新規 LibreOffice 文書作成は行わず、既存 Office ファイルの PDF 変換だけを行うため、次の template 類も削除済みです。
   - `image/share/template/`
 - `image/program/libcurl.dll` は `mergedlo.dll` と `LanguageToollo.dll` の import 依存があるため保持します。
-- 起動時は `PYTHONDONTWRITEBYTECODE=1` と `PYTHONPYCACHEPREFIX` を設定し、third_party 配下に Python bytecode を生成させないでください。
-- 変換前後に LibreOffice image 配下の `__pycache__` を削除し、変換生成物を `third_party/` に残さないでください。
+- 起動時は `PYTHONDONTWRITEBYTECODE=1` と `PYTHONPYCACHEPREFIX` を設定し、Python cache の出力先を選択したワークスペースの `__pdf_note_workspace__/__tmp__/lo/` 内にします。配布 runtime や `third_party/` 配下に Python bytecode を生成させません。
+- 配布 runtime の cache を自動で走査・削除することはしません。変換生成物を `third_party/` に残さないでください。
 - `-env:UserInstallation=file:///...` で専用 profile を指定し、利用者の通常 LibreOffice profile を使わないでください。
 
 ### 5.3 ライセンス文書
@@ -204,7 +204,7 @@ release パッケージ利用時は、まず `docs/THIRD_PARTY_NOTICES.md` と `
 
 ### 5.4 配布時の扱い
 
-- `scripts/release/pack_release.ps1` は `third_party/libreoffice/image/Fonts/` から英語・記号向けの選択フォントだけを release の `libreoffice/image/Fonts/` へコピーし、上記ライセンス/NOTICE 文書を release の `licenses/libreoffice/` へコピーします。
+- `scripts/release/pack_release.ps1` は `third_party/libreoffice/image/Fonts/` から英語・記号向けの選択フォントだけを release の `lo/image/Fonts/`（Lite版では `libreoffice/image/Fonts/`）へコピーし、上記ライセンス/NOTICE 文書を release の `licenses/libreoffice/` へコピーします。
 - 標準 release には LibreOffice runtime 本体、runtime 側 license/NOTICE、custom build 入力を含めます。変換機能を含めない軽量配布は `scripts/release/pack_release.ps1 -Lite` を指定してください。`-NoLibreOfficeRuntime` は `-Lite` と併用する変換なし配布用の指定であり、標準 release では使用できません。
 - release 同梱前に、外部通信経路、マクロ、外部リンク/リモート画像参照、クラッシュレポート、更新確認が実行されないことを実機で再確認してください。
 - 不要になった license/notice を削る判断は、対応する実体ファイルを release から除外済みであることを確認してから行います。現時点で Git 管理している LibreOffice license 文書3件は、選択フォントの配布に対応するため保持します。

@@ -39,7 +39,7 @@ Structured display can scroll past the end. Typing, inserting a newline, or movi
 | `c` | Math tags | `<math>x^2</math>` (TeX inside) |
 | `T` | Scripts, fractions, roots | Put `x_i^2`, `\frac{a}{b}`, or `\sqrt{x}` inside math delimiters |
 | `T` | Matrices, cases, alignment | `\begin{pmatrix}...\end{pmatrix}` and related environments |
-| `T` | Symbols and functions | `\alpha`, `\sum`, `\sin`, etc.; full supported list later |
+| `T` | Symbols and functions | `\alpha`, `\sum`, `\sin`, etc.; common names listed later |
 
 ## CLRO syntax settings
 
@@ -334,7 +334,7 @@ The math tag, attribute names, and display values ignore case. Unclosed or neste
 
 Math uses MicroTeX and XITS Math. `\!` is a negative thin space. `\displaystyle`, `\textstyle`, `\mathrm`, `\mathbf`, `\mathit`, `\mathsf`, `\mathtt`, `\mathbb`, `\mathcal`, and `\textrm` are supported. Complete TeX documents and additional packages are not executed. `\newcommand`, `\renewcommand`, and custom environment definitions are unsupported. Input that cannot be typeset remains editable and savable as source. The former superscript/subscript proportion setting is retired; the renderer controls script placement.
 
-For matrices, cases, and aligned equations, separate columns with `&` and rows with `\\`. Use `\\[8pt]` to add row spacing. Supported environments are `matrix`, `pmatrix`, `bmatrix`, `Bmatrix`, `vmatrix`, `Vmatrix`, `cases`, `aligned`, and `align`.
+For matrices, cases, and aligned equations, separate columns with `&` and rows with `\\`. Use `\\[8pt]` to add row spacing. The main environments are `matrix`, `pmatrix`, `bmatrix`, `Bmatrix`, `vmatrix`, `Vmatrix`, `cases`, `aligned`, and `align`. Others such as `smallmatrix`, `rcases`, `array`, `gather`, `gathered`, `split`, `multline`, `alignat`, and `equation` are also supported.
 
 ```text
 $$
@@ -347,7 +347,7 @@ $$
 
 #### Math symbols and functions
 
-Prefix each supported command name below with `\`, preserving case: for example, `\alpha` and `\Gamma`.
+The table lists common supported command names. Prefix each name with `\`, preserving case: for example, `\alpha` and `\Gamma`.
 
 | Group | Names |
 | --- | --- |

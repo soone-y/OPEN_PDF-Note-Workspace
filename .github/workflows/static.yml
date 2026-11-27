@@ -13,6 +13,8 @@ on:
       - "LICENSE.md"
       - "LICENSES_INDEX.md"
       - "THIRD_PARTY_NOTICES.md"
+      - "STATISTICS.md"
+      - "docs/statistics/**"
       - ".github/SECURITY.md"
       - "docs/ja/**"
       - "docs/en/**"
@@ -45,6 +47,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # 各ページの「最終更新」を原稿ごとの最終コミットから求めるため、履歴をすべて取得する
+          fetch-depth: 0
 
       # 公開snapshot内の正本から文書ポータルを生成する。紹介ページは使わない。
       - name: Build documentation portal

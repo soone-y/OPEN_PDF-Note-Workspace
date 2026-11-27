@@ -12,7 +12,7 @@
 
 `.clro` builds on Markdown-style notation and treats physical newlines as line boundaries. Line prefixes decorate their own row, while paired syntax may span multiple rows. Use `#` or `<m>` heading tags. A following line of `-` or `=` does not promote preceding text to a heading. `.md` and `.markdown` use Markdown continuation and heading rules.
 
-New notes, suggested names, and default naming use `.clro`. Existing `.md` files are never renamed or converted automatically, and copy, rename, and link operations keep the selected extension.
+New notes, suggested names, and default naming use `.clro` by default; the **Default format for new notes** setting can change the format of new notes to `.md`, `.txt`, or `.csv`. Existing `.md` files are never renamed or converted automatically, and copy, rename, and link operations keep the selected extension.
 
 ## What it is good for
 

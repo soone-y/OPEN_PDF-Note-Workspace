@@ -69,7 +69,7 @@
       "evidence_path": "introduction/project_context.xml"
     },
     {
-      "intent": "C++ ソースコードのレイアー構造や関数位置を知りたい",
+      "intent": "C++ ソースコードのレイヤー構造や関数位置を知りたい",
       "keywords": ["C++", "Win32", "PDFium", "atomic_write", "コード構造", "関数"],
       "target_node": "introduction/core/code_symbol_index.md",
       "evidence_path": "introduction/core/architecture_layers.md"

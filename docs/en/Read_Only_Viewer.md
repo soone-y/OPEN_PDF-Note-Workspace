@@ -86,12 +86,12 @@ Images are read once and closed; the original file is never modified.
 
 | Key | View |
 | --- | --- |
-| `Ctrl+1` | Reading |
+| `Ctrl+1` | Document View |
 | `Ctrl+2` | Raw |
 | `Ctrl+3` | Hex |
 | `Ctrl+4` | Diagram list |
 
-Available views depend on the file. Inspect unsupported diagram syntax in the source view. Use the zoom buttons or `Ctrl++` / `Ctrl+-` to change the display size, and `Ctrl+0` to reset it.
+**Binary** has no shortcut key; choose it from the **View** menu. Available views depend on the file. Inspect unsupported diagram syntax in the source view. Use the zoom buttons or `Ctrl++` / `Ctrl+-` to change the display size, and `Ctrl+0` to reset it.
 
 Right-click an inline diagram to open that diagram in a separate window. Its initial view fits the drawing; use zoom, reset, **Fit to Window**, and the horizontal or vertical scrollbars to inspect it. The main zoom controls also operate on the diagram list. Ordinary wheel scrolling over an inline diagram scrolls the document.
 
@@ -110,15 +110,15 @@ Open **Settings → Shortcut reference** to see the viewer's keys.
 | `Ctrl+Shift+A` | Show/hide annotations |
 | `Ctrl+Shift+Left` / `Ctrl+Shift+Right` | Rotate this tab left/right 90 degrees |
 | `Ctrl+Shift+0` | Reset this tab's view rotation |
-| `Ctrl+Alt+E` | Open the existing annotated PDF export |
+| `Ctrl+Alt+E` | Start an annotated PDF export (choose a destination) |
 
 Page navigation, annotation visibility, and rotation apply to a PDF outside the search input field; native text selection takes priority there. Export starts by choosing a destination and leaves the original unchanged. Earlier `Ctrl+R` / `Ctrl+Shift+R` rotation keys remain available. Workspace memo, the unified output dialog, and quick output belong to the main application.
 
 ## Export an annotated PDF copy
 
-Copying a selection that includes document text requires the open PDF's copy permission. Selections containing only separate-file annotations may still be copied. Export stops for encrypted or digitally signed PDFs because it cannot preserve those protections. The PDF pane shows the reason when a restriction stops an operation.
+Open the PDF with its matching `.clrop`, then use **File > Export annotated PDF** (Ctrl+Alt+E) and choose a destination different from the source PDF. The same source path is rejected. This does not save changes into the original PDF, annotation file or note.
 
-Open the PDF with its matching `.clrop`, then use **File > Export Annotated PDF** (Ctrl+Alt+E) and choose a destination different from the source PDF. The same source path is rejected. This does not save changes into the original PDF, annotation file or note.
+Copying a selection that includes document text requires the open PDF's copy permission. Selections containing only separate-file annotations may still be copied. Export stops for encrypted or digitally signed PDFs because it cannot preserve those protections. The PDF pane shows the reason when a restriction stops an operation.
 
 The viewer draws annotations into page contents. This differs from the main application's standard PDF annotation export: the output writing is not intended for further individual annotation editing. Inspect the resulting appearance. Use [main-application output](Help_Reference.md#pdf-annotation-output) when standard annotations are needed, and retain the original PDF/CLROP pair for further work.
 

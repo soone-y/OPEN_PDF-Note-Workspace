@@ -8,9 +8,11 @@
 
 - Windows 10 / 11
 - PowerShell
-- `g++` が `PATH` にあること
+- `g++`、`gcc`、`windres` が `PATH` にあること
+- Python が `PATH` にあること（ビルド時のロケールカタログ生成と、`release.ps1` の事前検査に使います）
 - `third_party/pdfium/lib/pdfium.dll.lib` があること
 - `third_party/pdfium/bin/pdfium.dll` があること
+- `third_party/` の zlib・md4c・MicroTeX があること（リポジトリに同梱）
 - リポジトリ版番号は `REPO_VERSION.txt` で管理すること
 
 依存関係はリポジトリに vendor 配置し、ビルドや実行時に外部通信を行わない方針です。
@@ -41,9 +43,9 @@
 ./scripts/build/build_workspace.ps1 -Edition Full -Rebuild
 ```
 
-`Full` はOffice-to-PDF変換を含む通常版、`Lite` は変換機能を持たないLite版です。`build_readonly_viewer.ps1` は旧 TextViewer を統合した唯一の閲覧専用ビルド対象です。
+`Full` はOffice-to-PDF変換を含む通常版、`Lite` は変換機能を持たないLite版です。`build_readonly_viewer.ps1` は旧 TextViewer を統合した、配布用の唯一の閲覧専用ビルド対象です。`src/readonly_viewer_next/build.ps1` は比較用の試作版で、`out/readonly_viewer_next/` に出力し、配布物には含めません。
 
-出力先は、通常版アプリと閲覧専用ビューアが `out/bin/`、Lite版アプリが `out/bin_lite/` です。どちらのアプリも配布時には `pdf_note_workspace.exe` という同じ名前になり、対応する配布フォルダ内にだけ入ります。
+出力先は、通常版アプリと閲覧専用ビューアが `out/bin/`、Lite版アプリが `out/bin_lite/` です（`-Locale en` では `out/bin_en/` と `out/bin_lite_en/`）。どちらのアプリも配布時には `pdf_note_workspace.exe` という同じ名前になり、対応する配布フォルダ内にだけ入ります。
 
 ## 検証
 
@@ -53,7 +55,7 @@ python tests/python/validate_codebase.py
 python -m unittest tests/python/test_python_tools.py
 ```
 
-`run_repo_checks.ps1` は、`REPO_VERSION.txt` と最新ビルドの Full / Lite / 閲覧専用ビューアの `.buildinfo.txt` を比較し、版番号の不一致を検出します。通常の検査で `-SkipBuild` を付けた場合も、既存のビルド成果物についてこの確認を行います。配布版番号はrelease setのmanifest、ZIP、チェックサム、locale別タグとRelease Notesで固定・照合されます。利用者文書には、置換前提の版番号マーカーを置きません。
+`run_repo_checks.ps1` は、`REPO_VERSION.txt` と最新ビルドの Full / Lite / 閲覧専用ビューアの `.buildinfo.txt` を比較し、版番号の不一致を検出します。通常の検査で `-SkipBuild` を付けた場合も、既存のビルド成果物についてこの確認を行います。配布版番号はrelease setのmanifest、ZIP、チェックサム、locale別タグとRelease Notesで固定・照合されます。日本語の利用者文書の3行目には「同梱リポジトリ版:」で始まる版番号マーカーを置き、release作成時に `pack_release.ps1` が `REPO_VERSION.txt` の版へ置き換えます。公開サイトではこの行を表示せず、各ページのタイトル下に最終更新の日時と版を表示します。
 
 検査の一覧は `./tests/scripts/run_repo_checks.ps1 -ListSteps` で確認できます。関連するステップだけを実行する例は次のとおりです。複数指定は PowerShell から配列で渡します。部分実行は全体の合格を意味せず、選択した検査の前提や既存成果物は各自で用意してください。追加検査は従来の `-Include...` 指定も必要です。指定したステップが省略された場合は失敗します。全体の通常検査は上記の引数なしのコマンドです（追加検査は別途指定）。
 
@@ -73,11 +75,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests/scripts/run_atomic_wri
 
 ```powershell
 ./release.ps1
-# 実機テストのサイクルを早めるため、Lite版のみを短時間で試作・パックする場合:
-./build.ps1 -Lite
+# 両言語のrelease setを作る場合:
+./release.ps1 -AllLocales
 ```
 
-配布時は `out/` を直接渡さず、release set 内に作られる通常版と Lite版のフォルダまたは ZIP を使います。`./release.ps1` は通常版・Lite版・閲覧専用ビューアをビルドしてから、配布物、ZIP、チェックサム、公開スナップショットを作ります。ZIP名には言語とeditionを含め、展開後の最上位フォルダは `PDF-Note-Workspace-<version>` です。Lite版だけを開発用にビルド・実機確認したい場合は `./build.ps1 -Lite` を使います。通常版には検証済み LibreOffice conversion runtime を必ず同梱し、Lite版には同梱しません。通常版からruntimeだけを除いた配布物は作れません。通常利用者には、二つの版を混ぜず、用途に応じてどちらか一方を配布してください。
+配布時は `out/` を直接渡さず、release set 内に作られる通常版と Lite版のフォルダまたは ZIP を使います。`./release.ps1` は通常版・Lite版・閲覧専用ビューアをビルドしてから、配布物、ZIP、チェックサム、公開スナップショットを作ります。既定では `-Locale ja` の1言語だけを作り、両言語には `-AllLocales` を付けます。出力先は既定でリポジトリの外（親フォルダーの `PDF-Note-ReleaseSet/`）です。`-Lite` は指定できません。ZIP名には言語とeditionを含め、展開後の最上位フォルダは `PDF-Note-Workspace-<version>` です。Lite版だけを開発用にビルド・実機確認したい場合は `./build.ps1 -Lite` を使います。通常版には検証済み LibreOffice conversion runtime を必ず同梱し、Lite版には同梱しません。通常版からruntimeだけを除いた配布物は作れません。通常利用者には、二つの版を混ぜず、用途に応じてどちらか一方を配布してください。
 
 配布名、出力先、同梱物などを個別に調整する場合だけ、`scripts/release/make_release_set.ps1` または `scripts/release/pack_release.ps1` を使います。
 

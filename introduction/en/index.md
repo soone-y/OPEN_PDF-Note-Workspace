@@ -1,6 +1,6 @@
 # Background, Design, and Verification Material
 
-This is an English entry point for selected background, design, and verification material for PDF Note Workspace. For the software overview, packages, and Standard/Lite editions, read the [Project overview](../../README.md). For setup, use, saving, and recovery, read the [English user documentation](../../docs/en/README.md).
+This is an English entry point for selected background, design, and verification material for PDF Note Workspace. For the software overview, packages, and Full/Lite editions, read the [Project overview](../../README.md). For setup, use, saving, and recovery, read the [English user documentation](../../docs/en/README.md).
 
 The translated documents below cover the software's purpose, principal features, file handling, and the developer's approach. The project overview reference explains terminology and the limits of what the documents establish for developers, users, and people evaluating the software. AI-assisted research can use the same distinctions. The developer's responsibility to explain is covered separately.
 

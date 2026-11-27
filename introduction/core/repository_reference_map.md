@@ -13,7 +13,7 @@
 | カスタマイズ、操作、画面 | `core/user_guidance_reference.md`、`core/ui_concepts.md` | `docs/ja/Using_the_App.md`、`src/help/`、設定の読込・保存コード |
 | 保存、stage、復元、データ形式 | `core/file_formats.md`、`core/data_schemas.md` | `docs/ja/Save_and_Recovery.md`、`src/file_output/`、`src/clrop/`、関連テスト |
 | 安全性、外部通信、無音 | `core/safety_and_nonnegotiables.md`、`core/troubleshooting_quick.md` | 対象ソース、設定、検査結果。一般警告音は未解消の既知問題として扱う |
-| コード構造・変更 | `core/architecture_layers.md`、`core/code_symbol_index.md`、`core/ai_guardrails.md` | `src/`、呼び出し元、`tests/` |
+| コード構造・変更 | `core/architecture_layers.md`、`core/code_symbol_index.md`、`core/answering_guidelines.md` | `src/`、呼び出し元、`tests/` |
 | 公開・ライセンス・配布 | `core/documentation_contract.md` | `LICENSE.md`、`LICENSES_INDEX.md`、`THIRD_PARTY_NOTICES.md`、公開用設定 |
 
 ## 2. リポジトリと公開先の役割

@@ -18,7 +18,7 @@ The application's own atomic saves and moves briefly release and reacquire prote
 
 A completed move updates references to its destination independently of protection recovery. If protection fails after a save has replaced the original, the error distinguishes the completed replacement from pending protection. The save remains incomplete and protected work and recovery data are retained.
 
-`File > Close Files` closes both the PDF and the note. `View > Close > PDF / Note` closes only the selected display. Both routes protect edits internally before closing and keep the selected lecture and session. If that protection fails, the displays stay open.
+`File > Close PDF and Note` closes both the PDF and the note. `View > Close > PDF / Note` closes only the selected display. Both routes protect edits internally before closing and keep the selected lecture and session. If that protection fails, the displays stay open.
 
 Closing a note ends that editor's undo/redo history. Unsaved edits remain in the internal recovery data and are restored when the note is reopened.
 
@@ -27,7 +27,7 @@ Closing a note ends that editor's undo/redo history. Unsaved edits remain in the
 - Continue editing: automatic work protection keeps the in-progress state.
 - Commit a checkpoint: use `Ctrl+S` or `Save > Save Work`.
 - Review work that could not be saved: open `Save > Review Save Status...`.
-- Restore a PDF position or last-open time: select the item from `Settings > Restore`. Use `Save > Saved file backups` to restore or individually delete a saved backup. Select an item and choose **Details...** to review and copy its full restore-destination and metadata paths first.
+- Restore a PDF position or last-open time: select the item from `Settings > Restore`. Use `Save > Saved File Backups` to restore or individually delete a saved backup. Select an item and choose **Details...** to review and copy its full restore-destination and metadata paths first.
 
 ## Retry unsaved settings
 
@@ -47,7 +47,7 @@ Even when the application cannot start, you can open the recovery tool directly 
 
 For PDFs, drag an annotation group from a failed file into the original group to append it. Existing annotations remain. Check the finished PDF in the center and the type/page lists; individual annotations are not edited here. If the target is wrong, choose a PDF and check the annotation overlay before saving. For notes, edit the final text while consulting read-only source versions.
 
-The review screen returns to the recovery tool list when you choose **Save and close** or **Defer and close**. The window close button offers save, defer, or continue. Deferring protects the candidate for resumption without updating the original. Failed saves or protection leave the screen open. **Save to a new file and close** can rescue work when the original destination is missing; existing files are never overwritten by this action.
+The review screen returns to the recovery tool list when you choose **Save and finish** or **Keep for later and finish**. The window close button offers save, defer, or continue. Deferring protects the candidate for resumption without updating the original. Failed saves or protection leave the screen open. **Save as a new file and finish** can rescue work when the original destination is missing; existing files are never overwritten by this action.
 
 Candidates and failed source data remain under `__pdf_note_workspace__/__recovery__/`. Keep these files while investigating a problem. A failed new-file PDF/annotation save also retains its candidate and any files already created; retry with another new name.
 
@@ -64,12 +64,14 @@ Location (`__pdf_note_workspace__\__unsaved__\` directly under the workspace):
 - `note\` Unintegrated note content. `note_<id>_r<number>.stage` is the text, in the same encoding and line endings as the original note. In the file with the same name plus `.meta.txt`, `target=` is the original note and `rev=` is the revision.
 - `clrop\` Unintegrated PDF annotations. `clrop_<id>_r<number>.clrop.stage` is annotation data in the same format as .clrop. In its `.meta.txt`, `target=` is the original PDF and `dest=` is the .clrop to write.
 - `clrop_journal\` Annotations added after the last stage. These cannot be integrated manually.
+- `note_journal\` Records of note edits made after the last stage (`notej_*.bin` and `notee_*.bin`). These cannot be integrated manually.
 - Pre-save backups are in `__pdf_note_workspace__\__backup__\`; recovery tool candidates are in `__pdf_note_workspace__\__recovery__\`. See [Management folder](Help_Reference.md#management-folder-__pdf_note_workspace__) and `__pdf_note_workspace__/DELETE_OR_KEEP.txt` for which folders may be deleted.
 
 Restore a note:
 1. Open the `.meta.txt` in `note\` with Notepad and check the target in `target=`. If several share a target, the highest `rev=` is the newest.
 2. Open the matching `.stage` in Notepad or a similar editor and check the content.
 3. Copy the `.stage`, rename it to the file name in `target=` (including the extension), and place it at the original note's location. If the original note still exists, copy it first, then replace it.
+4. If `note_journal\` contains files, the `.stage` may lack edits made after the last stage. Those edits cannot be restored manually. Integrate them with the application or the recovery tool.
 
 Restore PDF annotations:
 1. In the `.meta.txt` in `clrop\`, check `target=` (PDF) and `dest=` (.clrop). The highest `rev=` is the newest.
@@ -78,9 +80,9 @@ Restore PDF annotations:
 4. If `clrop_journal\` has files with the same id, those annotations cannot be restored manually. Integrate them with the application or the recovery tool.
 
 Clean up:
-Keep the contents of `__unsaved__` until you have opened and checked the restored content in the application. Afterwards, discard the stage from Diff Manager in the application.
+Keep the contents of `__unsaved__` until you have opened and checked the restored content in the application. Afterwards, discard the stage from **Save > Review Save Status...** in the application.
 
-The management folder is named `__pdf_note_workspace__`. Folders using the previous name are not automatically renamed, migrated, or read for compatibility.
+The management folder is named `__pdf_note_workspace__`. Folders using the previous name are not automatically renamed, migrated, or read for compatibility. The new version also does not read, move, or delete `__tmp__/__stage__/` (unintegrated edits) or `__escape__/` (backups, recovery candidates, and other data) inside `__pdf_note_workspace__`, which versions before 0.9.620 used. To recover unintegrated edits from an older version, open and save them in that version, or follow [Recover manually with Explorer](#recover-manually-with-explorer) using `__tmp__/__stage__/` instead of `__unsaved__`. Deleting `__tmp__` also deletes the older version's unintegrated edits, so do not delete it before checking its contents.
 
 Check for unintegrated changes before restoring. Use undo/redo for a recent edit; use Restore/Backup for a previously saved state. Do not remove or move `__pdf_note_workspace__` before investigating a problem.
 

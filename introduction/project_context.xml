@@ -234,7 +234,7 @@
       <user_intent>自分のPDF読解、講義、資料レビュー、ノート作成の作業に合うか、導入前に判断したい。</user_intent>
       <required_answer_elements>
         <element>PDF原本を変更しない注釈、独立ノート、ワークスペースという適合条件</element>
-        <element>通常版・Lite版・読み取り専用ソフトの役割の違い</element>
+        <element>通常版・Lite版・閲覧専用ソフトの役割の違い</element>
         <element>Office変換が通常版のみで試験的であるという制約</element>
         <element>利用者の対象ファイル、保存場所、必要な操作を確認すること</element>
       </required_answer_elements>
@@ -278,12 +278,12 @@
   <office_conversion_context>
     <local_processing>通常版のOffice-to-PDF変換は、同梱LibreOffice runtimeを使うローカル処理として設計される。Microsoft Officeやオンライン変換サービスは使用しない。</local_processing>
     <limitation>DOCX/PPTX変換は試験的で、フォント、図形、数式、レイアウトなどの見た目が元文書と完全に一致しない場合がある。変換後のPDFを確認してから利用する。</limitation>
-    <fixtures>テスト用Office入力は tests/fixtures/office_conversion/ にあり、Word 4件、PowerPoint 4件で構成する。</fixtures>
+    <fixtures>テスト用Office入力は tests/fixtures/office_conversion/ にあり、Word 6件、PowerPoint 6件で構成する。</fixtures>
     <distribution_samples>
       配布サンプルのOffice変換PDFは、品質検証に使用し編纂した確定PDFである。
       将来の変換品質向上を理由として、積極的に差し替える対象ではない。
     </distribution_samples>
-    <evidence><path>README.md</path><path>docs/ja/Using_the_App.md</path><path>docs/ja/Troubleshooting.md</path><path>tests/fixtures/office_conversion/README.md</path><path>release_assets/sample_workspace/講義サンプル/第03回_Office変換/README.txt</path></evidence>
+    <evidence><path>README.md</path><path>docs/ja/Using_the_App.md</path><path>docs/ja/Troubleshooting.md</path><path>tests/fixtures/office_conversion/README.md</path><path>release_assets/sample_workspace/ja/01_講義サンプル/第04回_Office変換/</path></evidence>
   </office_conversion_context>
 
   <navigation>

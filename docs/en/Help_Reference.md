@@ -62,7 +62,7 @@ At 100 MB or more, the application asks before starting. Notices distinguish 100
 
 ### Create a note or remove an empty note
 
-Select a session and use **Create Note** or **File > Create > Note**. Enter a name and choose a format; the note opens for typing. The default is `.clro`. Change it to `.clro`, `.md`, `.txt` or `.csv` under **Settings > Note > Files** or the creation button's context menu. This changes future creation only. Typing with a session open and no note selected also creates a note in that default format.
+Select a session and use **New Note** or **File > Create > Note**. Enter a name and choose a format; the note opens for typing. The default is `.clro`. Change it to `.clro`, `.md`, `.txt` or `.csv` under **Settings > Note > Files** or the creation button's context menu. This changes future creation only. Typing with a session open and no note selected also creates a note in that default format.
 
 Use `.clro` or `.md` for formatted notes, `.txt` or `.csv` for plain text. CSV has no spreadsheet processing. Delete an empty `.clro` from the file-list context menu. After clearing an existing note, save and wait for completion before deleting it. A newly created empty note can be deleted immediately. A BOM-only file counts as empty; spaces and line breaks count as body text and are retained.
 
@@ -80,7 +80,7 @@ The session list also shows nested folders using paths relative to the lecture, 
 
 **Reload list** rescans the directory shown in that list to reflect items added or removed outside the app. It is also available from the list's blank area. In the PDF and note lists, it refreshes both file lists for the current session. Open PDFs, notes and unsaved edits are retained.
 
-**Edit > Rename > Note**, or the file list context menu, shows the full filename including its extension. PDF names must keep `.pdf` (case-insensitive). Standard note extensions are `.txt`, `.csv`, `.md`, `.markdown`, `.note`, `.tex`, `.icr` and `.clro`. Other extensions require confirmation that they will be treated as plain text, like txt. Approved extensions are saved for the workspace, and files with the same extension become note candidates. Renaming does not convert the contents. Declining keeps the draft and original file. Missing extensions, invalid filenames, and restricted PDF, image, Office and executable formats are rejected.
+**Edit > Rename > Note**, or the file list context menu, shows the full filename including its extension. PDF names must keep `.pdf` (case-insensitive). Standard note extensions are `.txt`, `.csv`, `.md`, `.markdown`, `.tex` and `.clro`. Other extensions require confirmation that they will be treated as plain text, like txt. Approved extensions are saved for the workspace, and files with the same extension become note candidates. Renaming does not convert the contents. Declining keeps the draft and original file. Missing extensions, invalid filenames, and restricted PDF, image, Office and executable formats are rejected.
 
 Use **Settings > Note > Files > Additional allowed note extensions** to view, add or remove entries separated by commas or spaces. Clear the field to remove the additional permissions. Restricted PDF, image, Office and executable formats remain excluded from this permission list.
 
@@ -141,7 +141,7 @@ Select a session and use **Tools > Create blank PDF**. Choose paper size, orient
 
 ## PDF view and navigation
 
-Open a PDF from the current session's PDF list. Select the note separately to read and write alongside it. **View > Close** closes only the chosen PDF or note; **File > Close Files** closes both after protecting edits. See [Protecting open originals](Save_and_Recovery.md#protecting-open-originals) before moving files externally.
+Open a PDF from the current session's PDF list. Select the note separately to read and write alongside it. **View > Close** closes only the chosen PDF or note; **File > Close PDF and Note** closes both after protecting edits. See [Protecting open originals](Save_and_Recovery.md#protecting-open-originals) before moving files externally.
 
 ### Zoom, page navigation and reading direction
 
@@ -167,7 +167,7 @@ Scrolling immediately after zooming keeps the new position when rendering finish
 
 While editing PDF text, ten seconds of inactivity, scrolling, or zooming pauses automatic following of the edit position. The text and editing session remain intact. Typing, pasting, IME input, or moving the text cursor resumes following and brings the box into view. While editing, `Ctrl`+`+`/`-` changes the text size when the whole edit box is within the view, and changes the PDF zoom when any part of it is outside. After it changes the PDF zoom once, it keeps changing the zoom, even when the box comes fully into view, until you resume typing or move the text cursor. During IME composition it changes the text size.
 
-Touchpad scrolling preserves fine input deltas. **Touchpad scroll stabilization** in Basic settings defaults to ON. In PDF and rendered note views it reduces small reversals during continuous scrolling. Sustained movement in the opposite direction takes effect. Turn it OFF to bypass this suppression. High-resolution wheels that send fine input deltas may also receive stabilization. The note's raw text editor uses standard Windows scrolling.
+Touchpad scrolling preserves fine input deltas. **Touchpad scroll stabilization** under **Touchpad** on **Environment > Window and shared controls** defaults to ON. In PDF and rendered note views it reduces small reversals during continuous scrolling. Sustained movement in the opposite direction takes effect. Turn it OFF to bypass this suppression. High-resolution wheels that send fine input deltas may also receive stabilization. The note's raw text editor uses standard Windows scrolling.
 
 The annotation, lecture, session, PDF and note lists, and the application's file picker, accumulate fine scroll input separately for each list and move to the nearest row. Movement starts after about half a row of input and follows the Windows wheel setting. Ordinary annotation-list updates retain your browsing position; an action that reveals a newly added annotation brings that item into view.
 
@@ -175,7 +175,7 @@ For PDF scrolling, arrow keys move by a fixed amount. With the PDF focused, hold
 
 ## Annotation tools and colors
 
-Open a PDF, choose a tool in the annotation pane, choose its subtype and color/width/opacity options, then work on the page. Options below the visible pane can be reached with its wheel or vertical scrollbar; keyboard focus also scrolls settings into view. Images and read-only previews do not offer the same editing operations as a PDF. **Settings > Annotation > Tools and display** changes creation defaults; use an existing annotation's editor to change that item.
+Open a PDF, choose a tool in the annotation pane, choose its subtype and color/width/opacity options, then work on the page. Options below the visible pane can be reached with its wheel or vertical scrollbar; keyboard focus also scrolls settings into view. Images and read-only previews do not offer the same editing operations as a PDF. **Settings > Annotations > Tools and display** changes creation defaults; use an existing annotation's editor to change that item.
 
 Annotations are stored in the PDF's same-named `.clrop`, leaving the PDF original unchanged. Ctrl+S saves work; output creates a separate shareable result. Save failures and recoverable drafts are covered by [Saving and Recovery](Save_and_Recovery.md).
 
@@ -246,7 +246,7 @@ After placing a shape, a temporary rotation handle appears, connected by a line 
 
 ### Math on the PDF
 
-Open a PDF and select **View > Bottom pane (temporary) > MathBox input**. Type an expression such as `\frac{a}{b}` and inspect the preview. Drag the preview onto a PDF page and release to place it; releasing outside a page does not place it. **Add as LaTeX** or Ctrl+Enter places it in the current view's center. **Add as Markup** is also available.
+Open a PDF and select **View > Bottom pane (temporary) > MathBox input**. Type an expression such as `\frac{a}{b}` and inspect the preview. Drag the preview onto a PDF page and release to place it; releasing outside a page does not place it. **Add LaTeX MathBox** or Ctrl+Enter places it in the current view's center. **Add Markup MathBox** is also available.
 
 Use the annotation list's **Edit** command to revise its source, color or position. MathBox is saved in `.clrop`; equations written in a note are saved in the note instead. Math rendering is experimental, so inspect exported results too. See the [note writing guide](Note_Writing_Guide.md) for supported expressions.
 
@@ -275,7 +275,7 @@ Click the open note and type. Markdown-family notes (`.clro`, `.md`, `.markdown`
 
 The edited line or selection displays source. Tables switch as a whole, and a block equation switches over its equation range. Leaving that range restores structured display. Turning rendering off shows all source. Vim Normal/Insert choices are described under [keyboard controls](#keyboard-controls). Display wrapping and lower editing space do not insert line breaks or blank lines into the saved note.
 
-Use the bottom pane's **Headings** mode to inspect note structure, **Note** to return to editing, **MathBox input** to place PDF equations, or **Status assist** for viewing and input-state controls. Temporary pane changes use View; save the next-launch default in Settings.
+Use the bottom pane's **Heading list** mode to inspect note structure, **Extend note text** to return to editing, **MathBox input** to place PDF equations, or **Status assist** for viewing and input-state controls. Temporary pane changes use View; save the next-launch default in Settings.
 
 ### Input and formatting palette
 
@@ -322,7 +322,7 @@ While the search window has focus, press Ctrl+C during a search or choose **Stop
 
 ### Memo
 
-One plain-text memo per workspace holds search terms, source locations and working notes. Tools > Workspace memo and the search screen's Open memo button open the same editor. Closing search or settings leaves it open. Markdown and rich formatting are not supported.
+One plain-text memo per workspace holds search terms, source locations and working notes. Tools > Workspace memo... and the search screen's Open memo button open the same editor. Closing search or settings leaves it open. Markdown and rich formatting are not supported.
 
 Ctrl+S while typing and the Save button save only this memo. Closing it and exiting the application also save automatically. Failure cancels closing or switching and keeps the text. The original is `__pdf_note_workspace__/__memo__/workspace_memo.txt` inside the workspace (UTF-8, maximum 1 MiB). Settings presets do not include it.
 
@@ -338,7 +338,8 @@ You may edit the original directly. Conflicting external changes stop saving ins
 | Commit work | **Save > Save Work** (`Ctrl+S`) creates pre-save backups, verifies safe writes, then updates notes and `.clrop`. It does not rewrite the PDF. Normal exit and pre-output saving use this protection. |
 | Save only the current note | The current-note save command excludes PDF annotation integration. |
 | Inspect failed or pending work | **Save > Review Save Status** lists protected work. Choose its recovery operation after reviewing the target. Discarding a draft leaves the saved original unchanged. |
-| Recover a saved file | **Save > Saved file backups > Restore** opens the backup list. Select a candidate and inspect Details for the original, time and full destination path before restoring. |
+| Retry failed settings saves | **Save > Content not saved…** lists temporary-path registrations, themes and palettes that failed to save; review them and choose **Retry**. See [Retry unsaved settings](Save_and_Recovery.md#retry-unsaved-settings). |
+| Recover a saved file | **Save > Saved File Backups > Restore** opens the backup list. Select a candidate and inspect Details for the original, time and full destination path before restoring. |
 | Remove a backup | Use Delete in the same backup submenu. Select only an unneeded copy and read the confirmation. This removes that recovery source, not the original or working draft. |
 | Restore viewing/list state | **Settings > Restore** selects PDF position, lecture recent order, or session last-open PDF/note state. It is distinct from file-content backup restoration. |
 
@@ -347,7 +348,7 @@ Before restoration, review protected work so an old original and a newer draft a
 
 ## Output
 
-Use **Output > Output Dialog...** to choose PDF output, single-page PNG, TXT, Markdown, or HTML. Set the destination folder and file name. **Export current** exports the current document with those settings. **Add to queue** keeps the source, settings, and destination in the list. The queue stays available until the app exits, including when you close the dialog or open a different document.
+Use **Export > Output Dialog...** to choose PDF output, single-page PNG, TXT, Markdown, or HTML. Set the destination folder and file name. **Export current** exports the current document with those settings. **Add to queue** keeps the source, settings, and destination in the list. The queue stays available until the app exits, including when you close the dialog or open a different document.
 
 Below the list, **Export selected** runs one reservation and **Export all queued** creates a separate file for each reservation. Successful jobs leave the queue. Failed or canceled jobs remain available to retry. Select a reservation to load its destination and file name into the fields, then choose **Update destination** after editing them. Use **Remove selected** or **Clear reservations** to cancel jobs. Choose a different destination for each reservation. The app integrates current edits before exporting and asks before replacing an existing output.
 
@@ -361,11 +362,11 @@ The results dialog lists the merged file, and the completed reservations leave t
 
 After output, **Show in Explorer** in the results dialog reveals the selected output. PDF and Markdown files open in the read-only viewer, and other formats open with their default app.
 
-**Browse** opens the app's file picker, where you can navigate to a destination folder and enter a file name together. Selecting a listed file copies its name into the input. Choosing a destination does not export or overwrite anything. Quick PDF, Quick Note and other output-path prompts use the same picker. **Windows Dialog** switches to the Windows save dialog and retains the folder and entered name. When **Use Windows standard file/folder selection** is enabled in General settings, output destination selection opens the Windows save dialog directly. Canceling leaves the destination unchanged. The folder hierarchy display remains a separate browsing and operation feature.
+**Browse** opens the app's file picker, where you can navigate to a destination folder and enter a file name together. Selecting a listed file copies its name into the input. Choosing a destination does not export or overwrite anything. Quick PDF, Quick Note and other output-path prompts use the same picker. **Windows Dialog** switches to the Windows save dialog and retains the folder and entered name. When **Use Windows file/folder picker** is enabled on **Environment > Window and shared controls**, output destination selection opens the Windows save dialog directly. Canceling leaves the destination unchanged. The folder hierarchy display remains a separate browsing and operation feature.
 
 The app's file and folder picker shows folders whose names include terms such as **course** or **lecture** in an upper **Suggestions** pane. When choosing a workspace, the current workspace is also suggested if it appears in the listing. Below a divider, **All entries (name order)** lists every folder followed by every file, including the suggestions. Either pane leads to the same location; selecting the same location in both panes for a multiple selection returns it once. Temporary path registration, opening files and choosing output destinations share this display. Locations without suggestions and the drive list use only the normal listing.
 
-**Quick PDF** uses the PDF output settings saved with **Save as Quick PDF** in the dialog. **Quick Note** always creates TXT; save its text, math, comment-line, and markup choices with **Save as Quick Note**. **View quick output settings** opens a compact, immediately closable summary of both current quick-output configurations. Output always creates a separate result and does not overwrite the open original.
+**Quick PDF** uses the PDF output settings saved with **Set as Quick PDF** in the dialog. **Quick Note** always creates TXT; save its text, math, comment-line, and markup choices with **Save as Quick Note**. **View quick output settings** opens a compact, immediately closable summary of both current quick-output configurations. Output always creates a separate result and does not overwrite the open original.
 
 ### Text color output options
 
@@ -422,7 +423,7 @@ Once a PDF is open, you can save your own annotations in a separate `.clrop` fil
 
 ## Settings
 
-Open **Settings > Settings dialog**, then choose a group and page on the left. Moving between pages retains the draft. **Save** applies changes and stays open; **Save and close** applies and closes. **Revert this tab** returns only the current page's unapplied draft. Follow the save/discard/continue choice when closing with edits. Palette, shortcut and priority editors use their own saving controls; the main dialog's discard does not undo independently saved changes.
+Open **Settings > Settings dialog**, then choose a group and page on the left. Moving between pages retains the draft. **Save settings** applies changes and stays open; **Save and close** applies and closes. **Revert this page** returns only the current page's unapplied draft. Follow the save/discard/continue choice when closing with edits. Palette, shortcut and priority editors use their own saving controls; the main dialog's discard does not undo independently saved changes.
 
 | Group | Pages and effects |
 | --- | --- |
@@ -455,7 +456,7 @@ Under **Note > Text and display**, choose a font and size and inspect the previe
 
 **Note > Markup** sets heading font/color, bold, underline and left bar, mark font/color and custom-tag style presets. It changes how supported syntax appears, whereas the input palette inserts syntax into the note. Review existing notes after changing it; the writing guide supplies the notation examples.
 
-**Annotation > Tools and display** sets creation defaults for text, markers, lines, shapes, pen, eraser and magnifier. Lines, arrows and waves may share color and width. Tool visibility choices are On, Off (disabled) or Off (hidden); individual direct-key bindings remain independent, while read-only and save-time restrictions still apply. Pen correction offers four mutually exclusive modes: Off, Smooth (hand tremor reduction), Pause and Auto (line or shape conversion). Converted shape style offers line/geometric/automatic choices; corrected shape fill offers Off, Use geometric setting and Always fill. Style and fill apply to conversions in Pause or Auto, while Smooth keeps a freehand path. Inspect corrected strokes and Undo unwanted results. Edit an existing item through the annotation list instead of changing creation defaults.
+**Annotations > Tools and display** sets creation defaults for text, markers, lines, shapes, pen, eraser and magnifier. Lines, arrows and waves may share color and width. Tool visibility choices are On, Off (disabled) or Off (hidden); individual direct-key bindings remain independent, while read-only and save-time restrictions still apply. Pen correction offers four mutually exclusive modes: Off, Smooth (hand tremor reduction), Pause and Auto (line or shape conversion). Converted shape style offers line/geometric/automatic choices; corrected shape fill offers Off, Use geometric setting and Always fill. Style and fill apply to conversions in Pause or Auto, while Smooth keeps a freehand path. Inspect corrected strokes and Undo unwanted results. Edit an existing item through the annotation list instead of changing creation defaults.
 
 **Environment > Colors and palettes** manages reusable annotation colors. Selecting a color for one tool is distinct from editing palette contents. Select a screen theme in Window and shared controls; create a custom theme by duplicating the current one, then edit and save it separately. Palette/theme saves are not reversed by canceling the main settings dialog.
 
@@ -467,7 +468,7 @@ Open PDF and note files individually from their lists. **Files inside a session*
 
 ### Automatic protection interval
 
-Under **Save > Automatic protection and saving**, annotation work protection offers Off, 5 seconds, 30 seconds, 1 minute or 5 minutes. It adjusts periodic internal protection, not timed writes into the PDF original. Off stops this periodic protection; boundary protection and explicit saving are separate. Notes are protected on line movement, focus departure, before saving and after 6–20 seconds idle. Use Ctrl+S to commit originals and check save status before sharing.
+Under **Saving > Automatic protection and saving**, annotation work protection offers Off, 5 seconds, 30 seconds, 1 minute or 5 minutes. It adjusts periodic internal protection, not timed writes into the PDF original. Off stops this periodic protection; boundary protection and explicit saving are separate. Notes are protected on line movement, focus departure, before saving and after 6–20 seconds idle. Use Ctrl+S to commit originals and check save status before sharing.
 
 ### Presets, priorities and diagnostic settings
 
@@ -475,7 +476,7 @@ Save a `.pnssettings` preset to carry workspace settings, palettes, annotation s
 
 In **Environment > File lists > Lecture order**, set priorities from 0–9999 or right-click an entry and choose Change priority. Lower numbers come first; ties use names and unassigned entries come last. Priority ordering combines lectures and temporary paths. Name/recent ordering puts temporary paths first in priority order. New temporary paths take the first free value from 5000 upwards; existing values remain. Free a value if 5000–9999 are all occupied. This editor saves immediately. Lecture priorities belong to the workspace; temporary-path priorities belong to the application across its workspaces.
 
-Developer mode exposes diagnostic commands; it is not needed for normal editing. Some logging settings take effect on next startup. Use **Check sizes** to inspect management logs and generated files without deleting them; see [Troubleshooting](Troubleshooting.md). Failed settings save notices retain input and may offer [Retry unsaved settings](Save_and_Recovery.md#retry-unsaved-settings).
+Developer mode exposes diagnostic commands; it is not needed for normal editing. Some logging settings take effect on next startup. Use **Measure size** to inspect management logs and generated files without deleting them; see [Troubleshooting](Troubleshooting.md). Failed settings save notices retain input and may offer [Retry unsaved settings](Save_and_Recovery.md#retry-unsaved-settings).
 
 ### Status assist
 
@@ -495,7 +496,7 @@ Changes saved or applied in the settings dialog are persistent settings. Items w
 
 Open **Settings → Annotation → Controls and shortcuts → Open shortcut overview and bindings** to review and edit bindings in one panel. Common fixed keys appear beside the editable list. Direct tool bindings are independent of annotation bar visibility, disabled state, and order, including hidden buttons. Image, read-only preview, and save-time editing restrictions remain in effect. Text entry takes priority.
 
-New defaults use `Ctrl+1–9` and `Ctrl+0` for Select, Pan, Magnifier, Text, Marker, Free marker, Pen, Line, Shape, and Eraser. Existing custom settings are retained. Use **Add unassigned Ctrl+0–9**, review the list, and save to add only unused combinations.
+New defaults use `Ctrl+1–9` and `Ctrl+0` for Select, Pan, Magnifier, Text, Marker, Free marker, Pen, Line, Shape, and Eraser. Numpad `1–9` and `0` follow the same order. `Ctrl+Alt+1–8` select the Select, Pan, Magnifier, Text, Marker, Pen, Shape, and Eraser categories, `Ctrl+Alt+9` and `Ctrl+Alt+0` select Marker and Pen, and `Ctrl+Alt+U`, `C`, `A`, and `W` select Underline, Text color, Arrow, and Wave. Existing custom settings are retained. Use **Add unassigned Ctrl+0–9**, review the list, and save to add only unused combinations.
 
 Choose a main key and the Ctrl, Shift, and Alt checkboxes, then choose a tool. Top-row digits and numpad keys are separate choices. The composed chord, duplicate or reserved-key conflicts, and any overridden common action appear immediately. **Press keys to assign** records an actual combination while suppressing its original action. Esc cancels recording only.
 
@@ -548,7 +549,7 @@ Open **Help > Checks > Operation and write checks** to see all 16 built-in check
 
 Checks cover the current PDF and note directories and direct PDF and note placement in the session root separately. Rows with the same destination share the latest result. Checks do not change the file layout setting. Like **Asset presence check**, the buttons start with **Details** and **Refresh** and end with **Close**.
 
-Select a row and choose **Run check**. Write checks create a dedicated new file, write and read it back, compare its contents and remove it. Existing settings and documents are preserved. PDF conversion uses a fixed DOCX demo in a dedicated temporary area and validates the generated and placed PDFs and byte equality. Shared LibreOffice cache writes are not a check item. Success applies to the shown time, target and operation; it does not guarantee future saves or conversion fidelity for every document.
+Select a row and choose **Run selected check**. Write checks create a dedicated new file, write and read it back, compare its contents and remove it. Existing settings and documents are preserved. PDF conversion uses a fixed DOCX demo in a dedicated temporary area and validates the generated and placed PDFs and byte equality. Shared LibreOffice cache writes are not a check item. Success applies to the shown time, target and operation; it does not guarantee future saves or conversion fidelity for every document.
 
 Conversion data stays inside `__pdf_note_workspace__/__tmp__/lo` in the selected workspace. The conversion temporary-parent write check targets `__tmp__`. If it cannot be written, conversion stops without falling back to AppData or the Windows temporary folder. Writes outside the application folder are allowed for the selected workspace, folders registered through **Temporary Path**, and explicitly chosen save or export destinations. **Temporary Path** registers external folders; it does not select the conversion temporary area.
 
@@ -574,7 +575,7 @@ Normal startup-setting reads, workspace listings and PDF opens also update resul
 
 Open **Help > Checks > Asset presence check** for a separate window with the same description, report list and action-button arrangement as the operation and write checks. Rows show item, presence, type and target name. Use **Details** or double-click a row to inspect its location; **Copy path** copies the complete path. Outside cooldown, presence is checked when a new window opens and when you choose **Refresh presence**, without changing settings or documents. Bringing an already open window to the front does not recheck presence, and there is no automatic monitoring. File content viewing remains available; **Open in Explorer** opens the selected folder. Save or load presets through **Settings > Presets**.
 
-Use **Check sizes** to inspect the management directory and its logs, temporary work, recovery data and backups in the background. Sizes, observed file counts and size changes are separate from presence checks. Original documents outside the management directory are excluded; no files are created, changed or deleted. Parent rows include child rows. Cancellation and inspection errors show partial results. See [Inspect log and generated-file sizes](Troubleshooting.md#inspect-log-and-generated-file-sizes) for scope and limits.
+Use **Measure size** to inspect the management directory and its logs, temporary work, recovery data and backups in the background. Sizes, observed file counts and size changes are separate from presence checks. Original documents outside the management directory are excluded; no files are created, changed or deleted. Parent rows include child rows. Cancellation and inspection errors show partial results. See [Inspect log and generated-file sizes](Troubleshooting.md#inspect-log-and-generated-file-sizes) for scope and limits.
 
 ### Use the bundled help
 

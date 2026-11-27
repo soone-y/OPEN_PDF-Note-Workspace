@@ -6,9 +6,11 @@ This document is for developers building from source. To use a release package, 
 
 - Windows 10 or 11
 - PowerShell
-- `g++` available on `PATH`
+- `g++`, `gcc`, and `windres` available on `PATH`
+- Python available on `PATH` (used to generate locale catalogs during the build and for the `release.ps1` preflight checks)
 - `third_party/pdfium/lib/pdfium.dll.lib`
 - `third_party/pdfium/bin/pdfium.dll`
+- zlib, md4c, and MicroTeX under `third_party/` (vendored in the repository)
 - The repository version is managed in `REPO_VERSION.txt`.
 
 Dependencies are vendored in the repository. The build and the application must not make external network connections.
@@ -39,7 +41,7 @@ To build individual targets:
 ./scripts/build/build_workspace.ps1 -Edition Full -Rebuild
 ```
 
-Full includes Office-to-PDF conversion; Lite does not. The normal application and read-only viewer are written to `out/bin/`; the Lite application is written to `out/bin_lite/`.
+Full includes Office-to-PDF conversion; Lite does not. `build_readonly_viewer.ps1` is the only read-only viewer build for distribution; `src/readonly_viewer_next/build.ps1` builds a comparison prototype into `out/readonly_viewer_next/`, which is not distributed. The normal application and read-only viewer are written to `out/bin/`; the Lite application is written to `out/bin_lite/` (with `-Locale en`, `out/bin_en/` and `out/bin_lite_en/`).
 
 ## Verification
 
@@ -67,9 +69,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests/scripts/run_atomic_wri
 
 ```powershell
 ./release.ps1
+# To create release sets for both languages:
+./release.ps1 -AllLocales
 ```
 
-Do not distribute `out/` directly. Use the Full or Lite folder or ZIP created in a release set. ZIP filenames include locale and edition; their extracted top-level folder is `PDF-Note-Workspace-<version>`. The Full edition includes the verified LibreOffice conversion runtime; Lite does not. To make a short development build of Lite only, use `./build.ps1 -Lite`.
+Do not distribute `out/` directly. Use the Full or Lite folder or ZIP created in a release set. By default, `./release.ps1` creates a single locale (`-Locale ja`); add `-AllLocales` for both. The default output is outside the repository, in `PDF-Note-ReleaseSet/` in the parent folder. `-Lite` is rejected. ZIP filenames include locale and edition; their extracted top-level folder is `PDF-Note-Workspace-<version>`. The Full edition includes the verified LibreOffice conversion runtime; Lite does not. To make a short development build of Lite only, use `./build.ps1 -Lite`.
 
 Use `scripts/release/make_release_set.ps1` or `scripts/release/pack_release.ps1` only when adjusting release names, output paths, or bundled contents.
 

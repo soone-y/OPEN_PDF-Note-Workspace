@@ -9,7 +9,7 @@ This is the bilingual license document for the repository root. The English lice
 
 リポジトリ直下の `LICENSE` には、下記の英語原文だけを置いています。GitHubなどがライセンスを自動で判定するためのファイルで、内容は本書の英語原文と同じです。
 
-release パッケージを受け取った利用者は、まず `docs/LICENSE.md`, `docs/LICENSES_INDEX.md`, `docs/THIRD_PARTY_NOTICES.md`, `licenses/` を参照してください。本書中の `third_party/...` 表記は、リポジトリ上の元配置を示します。
+release パッケージを受け取った利用者は、まず同梱の `LICENSE.md`（本書）、`docs/legal/LICENSE.md`、`docs/legal/THIRD_PARTY_NOTICES.md`、`licenses/`（`licenses/README.txt` を含む）を参照してください。本書中の `third_party/...` 表記は、リポジトリ上の元配置を示します。
 
 ## 1. 本プロジェクトのライセンス
 
@@ -77,7 +77,7 @@ Copyright (c) 2026 Soone-Y
 ### フォント
 
 - 画面表示と通常の描画は、原則として実行環境にインストール済みのフォントをフェイス名で指定して行います（Windows標準フォントなど）。
-- 一部、LibreOffice に同梱されている欧文・記号フォントを `third_party/libreoffice/image/Fonts/` に保持し、アプリ起動時にプロセス専用（private font）として読み込んで利用します。このフォントのライセンスは LibreOffice の利用条件に従います。
+- 一部、LibreOffice に同梱されている欧文・記号フォントを `third_party/libreoffice/image/Fonts/` に保持し（release では通常版が `lo/image/Fonts/`、Lite版が `libreoffice/image/Fonts/`）、アプリ起動時にプロセス専用（private font）として読み込んで利用します。このフォントのライセンスは LibreOffice の利用条件に従います。
 - 既定の候補名は `src/core/font_list.h` に定義されており、Windows 系フォントや上記 LibreOffice 側フォントに加えて、`Noto Sans JP`、`Source Han Sans JP`、`Hiragino Sans` など「その環境に存在する場合だけ使える」名前も含みます。
 - 標準テキスト注釈付き PDF 書き出しでは、書き出し元マシン上のフォントデータを Windows レジストリ/GDI から取得して PDFium に渡し、実フォントとして埋め込める場合があります。失敗時はビットマップ描画へフォールバックします。
 - したがって、書き出し PDF に含まれるフォントデータのライセンスは「このリポジトリ」ではなく、「書き出しを行ったマシンにインストールされている各フォント」または「同梱されている LibreOffice フォント」の利用条件に従います。
@@ -90,7 +90,7 @@ Copyright (c) 2026 Soone-Y
 ## 3. サードパーティ依存の参照先
 
 - release パッケージでの参照先:
-  - `docs/THIRD_PARTY_NOTICES.md`
+  - `docs/legal/THIRD_PARTY_NOTICES.md`
   - `licenses/pdfium/`
   - `licenses/mingw-w64/`
   - `licenses/md4c/`
@@ -103,6 +103,7 @@ Copyright (c) 2026 Soone-Y
   - `third_party/pdfium/licenses/`
   - `third_party/mingw_runtime_licenses/mingw-w64/`
   - `third_party/md4c/LICENSE.md`
+  - `third_party/zlib/LICENSE`
   - `third_party/libreoffice/image/license.txt`, `third_party/libreoffice/image/LICENSE.html`, `third_party/libreoffice/image/NOTICE`
   - `third_party/microtex/LICENSE`
   - `third_party/microtex/res/xits/OFL.txt`, `third_party/microtex/res/xits/FONTLOG.txt`, `third_party/microtex/res/xits/README.txt`
@@ -127,14 +128,14 @@ The repository-root `LICENSE` file contains only the English license text below,
 
 ### Fonts and bundled materials
 
-- Normal display and drawing select fonts installed in the running environment by face name. Some European and symbol fonts bundled with LibreOffice are retained in `third_party/libreoffice/image/Fonts/` and loaded as private fonts for this process. Their licenses are governed by LibreOffice's terms.
+- Normal display and drawing select fonts installed in the running environment by face name. Some European and symbol fonts bundled with LibreOffice are retained in `third_party/libreoffice/image/Fonts/` (in a release package, `lo/image/Fonts/` for the Full edition and `libreoffice/image/Fonts/` for the Lite edition) and loaded as private fonts for this process. Their licenses are governed by LibreOffice's terms.
 - PDF export with standard text annotations can obtain font data from the exporting machine through the Windows registry/GDI and pass it to PDFium for embedding. If that fails, it falls back to bitmap drawing. Licenses for fonts embedded in an exported PDF therefore come from the fonts installed on the exporting machine or the bundled LibreOffice fonts, not from this repository.
 - Repository-bundled materials without a separate license notice are distributed under the same zlib License as the project. When adding externally sourced material, record its origin and license in `THIRD_PARTY_NOTICES.md` or a separate notice.
 
 ### Third-party components
 
-- In a release package, consult `docs/THIRD_PARTY_NOTICES.md` and the license texts in `licenses/pdfium/`, `licenses/mingw-w64/`, `licenses/md4c/`, `licenses/zlib/`, `licenses/libreoffice/`, `licenses/microtex/`, and `licenses/xits/`.
-- In this repository, their corresponding source locations include `third_party/pdfium/`, `third_party/mingw_runtime_licenses/mingw-w64/`, `third_party/md4c/LICENSE.md`, the LibreOffice license files under `third_party/libreoffice/image/`, `third_party/microtex/LICENSE`, and the XITS Math license files under `third_party/microtex/res/xits/`.
+- In a release package, consult `docs/legal/THIRD_PARTY_NOTICES.md` and the license texts in `licenses/pdfium/`, `licenses/mingw-w64/`, `licenses/md4c/`, `licenses/zlib/`, `licenses/libreoffice/`, `licenses/microtex/`, and `licenses/xits/`.
+- In this repository, their corresponding source locations include `third_party/pdfium/`, `third_party/mingw_runtime_licenses/mingw-w64/`, `third_party/md4c/LICENSE.md`, `third_party/zlib/LICENSE`, the LibreOffice license files under `third_party/libreoffice/image/`, `third_party/microtex/LICENSE`, and the XITS Math license files under `third_party/microtex/res/xits/`.
 
 ### Use by individuals, educational institutions, and other organizations
 

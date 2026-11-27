@@ -71,7 +71,7 @@ Use the distributed ZIP by extracting it. Persistent files are kept in the follo
 | Location | What is kept there |
 | --- | --- |
 | Extracted application folder | EXEs, DLLs, and setup files such as `pdf_note_workspace_setup.json` and `readonly_setup.json` |
-| Workspace you choose | PDFs, notes, and `.clrop` files. `__pdf_note_workspace__` holds automatic work protection, backups, logs, and temporary Office-conversion data. |
+| Workspace you choose | PDFs, notes, and `.clrop` files. `__pdf_note_workspace__` holds automatic work protection, backups, workspace settings, themes and memo, lectures and sessions deleted in the app, logs, temporary Office-conversion data, and more. |
 | Output destination you choose / external folder registered as a temporary path | Files that you explicitly save, export, or use for external work |
 
 The application does not use AppData, the Windows temporary folder, or the launch working directory as an implicit storage location. If it cannot write to a location you chose, it reports the failure instead of saving automatically somewhere else. This describes persistent file storage, not the memory used while the application is running.
@@ -108,7 +108,7 @@ If you want to keep your current default PDF app, do not choose **Always** for P
 
 ## 5. Try the bundled samples
 
-The bundled `sample_workspace` contains one practice PDF and companion note in `01_Lecture_Samples/Session_01_Basics`. `Session_02_Note_Formats` contains one Markdown, TeX, plain-text, CSV, and standard-note example, plus a paired PDF and annotation file for a round-trip note-to-PDF link; it is included in both editions. Sessions 03 and 04 each include a concise `.clro` note. Session 04 contains one Full-edition-only PowerPoint-to-PDF native-chart example and is absent from Lite.
+The bundled `sample_workspace` contains one practice PDF and companion note in `01_Lecture_Samples/Session_01_Basics`. `Session_02_Note_Formats` contains one Markdown, TeX, plain-text, CSV, and standard-note example, plus a paired PDF and annotation file for a round-trip note-to-PDF link; it is included in both editions. Sessions 03 and 04 each include a concise `.clro` note. Session 04 contains one Full-edition-only PowerPoint-to-PDF native-chart example and is absent from Lite. `Session_05_Math_Display` contains a math-display note and a math-placement practice PDF.
 
 The `.clrop` file with the same name as the link-practice PDF is its paired application data. Do not move, rename, or delete only one of them; always handle them as a pair.
 
@@ -121,6 +121,8 @@ The application does not automatically check for, download, or install updates. 
 The application simply runs from the files in its extracted folder. There is no registration or cleanup step, so updating only means replacing files, either the whole folder or just the EXEs.
 
 With either method, first make sure your workspace is outside the distribution folder. On first start, the workspace is the bundled `sample_workspace` inside the distribution folder. If you kept working there, close the application and move the whole `sample_workspace` folder, including `__pdf_note_workspace__`, outside the distribution folder. Then select it with **File > Choose Workspace...**.
+
+> **Finish saving in the old version before you update.** While still using the old version, choose **Save > Save Work**, then use **Save > Review Save Status...** to confirm that no unintegrated changes remain, and close the application. Version 0.9.620 changed the layout of the management folder: the new version does not read `__tmp__/__stage__` or `__escape__` inside `__pdf_note_workspace__`, which earlier versions used. Unintegrated changes, backups made before saving, and records of interrupted operations are not carried over, so integrate them before you update. The old folders are neither moved nor deleted; do not delete them until you have checked their contents. Settings (`__settings__`) and themes (`__theme__`) carry over unchanged.
 
 ### Update the whole folder (standard)
 
@@ -157,7 +159,7 @@ The following remain after the distribution folder is deleted. Review and delete
 
 | What remains | Contents and handling |
 | --- | --- |
-| Workspace outside the distribution folder | PDFs, notes, `.clrop` files, and the management folder `__pdf_note_workspace__`, which holds automatic work protection, backups, logs, workspace settings, and temporary Office-conversion data. Changes you chose **Keep for later and finish** for in the recovery tool also remain inside `__pdf_note_workspace__`. To remove only the management data while keeping your work, first confirm that no work remains and that you need none of its backups, then delete `__pdf_note_workspace__`. |
+| Workspace outside the distribution folder | PDFs, notes, `.clrop` files, and the management folder `__pdf_note_workspace__`, which holds automatic work protection, backups, logs, workspace settings, themes and memo, lectures and sessions deleted in the app, content set aside because it could not be written, and temporary Office-conversion data. Changes you chose **Keep for later and finish** for in the recovery tool also remain inside `__pdf_note_workspace__`. To remove only the management data while keeping your work, first check each folder in `__pdf_note_workspace__/DELETE_OR_KEEP.txt`, and confirm that no work remains and that you need none of its backups, the workspace memo, the lectures and sessions deleted in the app, or the content set aside. Then delete `__pdf_note_workspace__`. Deleting it returns the workspace settings and themes to their defaults. |
 | External folders registered as temporary paths | Files you saved, renamed, or moved there, and the `.clrop` files of PDFs whose annotations you saved. These stay as your data. |
 | Destinations chosen for saving or export | Exported PDFs and other files you wrote. |
 | Items you created | Desktop and Start-menu shortcuts. Change any association you chose in [4. Choose the app for opening files](#4-choose-the-app-for-opening-clro--clrop--pdf-files-optional) in Windows **Settings > Apps > Default apps**. |

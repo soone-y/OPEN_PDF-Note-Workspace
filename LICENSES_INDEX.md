@@ -13,15 +13,15 @@ release パッケージを受け取った利用者は、`docs/` と `licenses/` 
 
 | 対象 | ライセンス | 著作権表示 | 対象範囲 | 対象外 | 配布時の扱い |
 | --- | --- | --- | --- | --- | --- |
-| `PDF Note Workspace` 本体 | zlib License | `Copyright (c) 2026 Soone-Y` | `src/`, `scripts/`, `tests/`, `docs/` の本体コードと文書、および別ライセンス表記のない同梱素材 | `third_party/` 配下、利用者環境のフォント、ローカルツールチェーン由来 DLL | `docs/LICENSE.md` を release に同梱する |
+| `PDF Note Workspace` 本体 | zlib License | `Copyright (c) 2026 Soone-Y` | `src/`, `scripts/`, `tests/`, `docs/` の本体コードと文書、および別ライセンス表記のない同梱素材 | `third_party/` 配下、利用者環境のフォント、ローカルツールチェーン由来 DLL | ルートの `LICENSE.md` と `docs/legal/LICENSE.md` を release に同梱する |
 
 ## 2. 配布物に含めるライセンス文書一覧
 
 | 区分 | 配布先の例 | 含めるファイル | 用途 |
 | --- | --- | --- | --- |
-| 本体 | `docs/LICENSE.md` | `LICENSE.md` | 本体 zlib License |
-| ライセンス索引 | `docs/LICENSES_INDEX.md` | `LICENSES_INDEX.md` | 配布物と license 文書の対応表 |
-| 第三者通知 | `docs/THIRD_PARTY_NOTICES.md` | `THIRD_PARTY_NOTICES.md` | 第三者コンポーネントの一覧と扱い |
+| 本体 | `LICENSE.md`、`docs/legal/LICENSE.md` | `LICENSE.md` | 本体 zlib License |
+| ライセンス索引 | 同梱しない（公開リポジトリと文書ポータルで参照） | `LICENSES_INDEX.md` | 配布物と license 文書の対応表 |
+| 第三者通知 | `docs/legal/THIRD_PARTY_NOTICES.md`（release 言語版） | `THIRD_PARTY_NOTICES.md` | 第三者コンポーネントの一覧と扱い |
 | PDFium パッケージ | `licenses/pdfium/LICENSE` | `third_party/pdfium/LICENSE` | PDFium 配布パッケージ自体の MIT 系ライセンス |
 | PDFium 本体・依存 | `licenses/pdfium/` | `third_party/pdfium/licenses/*.txt`, `*.md`, `*.ijg` | PDFium と PDFium 同梱コンポーネントのライセンス原文 |
 | MinGW-w64 runtime | `licenses/mingw-w64/gcc/` | `COPYING3.txt`, `COPYING.RUNTIME.txt` | GCC runtime / GPLv3 / GCC Runtime Library Exception |
@@ -40,8 +40,11 @@ release パッケージを受け取った利用者は、`docs/` と `licenses/` 
 | PDFium 本体 | PDF 読み込み、描画、テキスト抽出、書き出し | `pdfium.dll` | BSD 3-Clause + Apache 2.0 系 | 中 | `pdfium.txt` と関連 license 群を同梱 |
 | Abseil | PDFium 依存 | PDFium 同梱 | Apache License 2.0 | 中 | LICENSE、NOTICE がある場合は NOTICE、改変表示 |
 | Anti-Grain Geometry / AGG 2.3 | PDFium 依存 | PDFium 同梱 | permissive notice | 低 | 著作権表示を保持 |
+| Dragonbox | PDFium 依存 | PDFium 同梱 | Apache 2.0 with LLVM Exceptions / Boost Software License 1.0 | 低 | 著作権表示とライセンス文を保持 |
 | fast_float | PDFium 依存 | PDFium 同梱 | MIT License | 低 | 著作権表示とライセンス文を保持 |
 | FreeType | フォント描画関連 | PDFium / LibreOffice 依存で含まれる可能性 | FreeType Project License | 中 | FreeType 利用クレジットを保持 |
+| HarfBuzz | PDFium 依存 | PDFium 同梱 | Old MIT License | 低 | 著作権表示とライセンス文を保持 |
+| Highway | PDFium 依存 | PDFium 同梱 | Apache License 2.0 | 中 | LICENSE、NOTICE がある場合は NOTICE、改変表示 |
 | ICU | Unicode / 国際化関連 | PDFium / LibreOffice 依存で含まれる可能性 | Unicode License V3 / ICU License + third-party notices | 中 | ICU ライセンスと同梱 notice を保持 |
 | Little CMS / lcms2 | 色管理 | PDFium / LibreOffice 依存で含まれる可能性 | MIT 系 | 低 | 著作権表示とライセンス文を保持 |
 | libjpeg-turbo / IJG | JPEG 画像処理 | PDFium / LibreOffice 依存で含まれる可能性 | IJG License + Modified BSD 3-Clause + zlib | 中 | IJG 表示文、BSD 文、改変時表示を保持 |
@@ -53,7 +56,7 @@ release パッケージを受け取った利用者は、`docs/` と `licenses/` 
 | zlib | 圧縮 | PDFium 依存等 | zlib License | 低 | 出所詐称禁止、改変表示、通知保持 |
 | MinGW-w64 runtime DLLs | C++/GCC runtime | `libstdc++-6.dll`, `libgcc_s_seh-1.dll`, `libwinpthread-1.dll` | GPLv3 + GCC Runtime Library Exception / MIT + BSD 系 | 中 | `COPYING3.txt`, `COPYING.RUNTIME.txt`, `COPYING.txt` を同梱 |
 | zlib runtime `1.4` | DOCX staging copy の ZIP 展開/検証 | `third_party/zlib/` の固定成果物から `zlib1.dll` を同梱 | zlib License | 低 | `third_party/zlib/LICENSE` を同梱 |
-| MD4C | Markdown 解析 | `third_party/md4c/src/md4c.c`, `md4c.h` をビルドに使用 | MIT License | 低 | `LICENSE.md` を同梱。局所パッチを管理 |
+| MD4C `0.6.0+git.f9e5eb2` | Markdown 解析 | `third_party/md4c/src/md4c.c`, `md4c.h` をビルドに使用 | MIT License | 低 | `LICENSE.md` を同梱。局所パッチを管理 |
 | MicroTeX openmath `086f4eb` | ノートと PDF 数式注釈の数式組版・描画 | `third_party/microtex/` の固定 source を静的に組み込み | MIT License | 低 | `licenses/microtex/LICENSE.txt` を同梱。出典・局所 patch を `third_party/microtex/` に記録 |
 | XITS Math | 数式用フォント（CLM2 形式へ変換済みの輪郭・metrics） | `resources/math/xits/XITSMath-Regular.clm2` を同梱 | SIL OFL 1.1 | 中 | `licenses/xits/` に OFL・FONTLOG・README を同梱。単独販売しない。予約名 `STIX Fonts`・`TM Math` を改変版の名称に用いない |
 | LibreOffice custom runtime `26.2.7.3` | docx/pptx から PDF への headless 変換 | 検証済みカスタム runtime を標準 release へ配置。`image/` の 26.2.3.2 管理者展開物は比較・フォント・license 参照専用 | MPL 2.0 中心 + LGPL/GPL/MPL/Apache 等多数 | 中〜高 | `license.txt`, `LICENSE.html`, `NOTICE` と custom build 入力・patch を同梱 |
@@ -103,8 +106,8 @@ MinGW-w64 の DLL を release に含める場合、次を同梱します。
 | 使用箇所 | Markdown 解析 |
 | 使用ファイル | `third_party/md4c/src/md4c.c`, `third_party/md4c/src/md4c.h` |
 | 不使用方針 | `md4c-html.*` は現時点では使用前提にしない |
-| ローカル変更 | upstream commit を `VERSION` に固定し、全角空白・日本語句読点対応を `patches/0001-japanese-whitespace-and-punctuation.patch` で再現 |
-| ライセンス | MIT License、`Copyright © 2016-2024 Martin Mitáš` |
+| ローカル変更 | upstream commit を `VERSION` に固定し、局所変更を `patches/0001`〜`0006` の6本で再現（全角空白・日本語句読点、明示的な引用継続、二重下線、明示的な表継続、CLRO の行境界、コードフェンスの位置情報） |
+| ライセンス | MIT License、`Copyright © 2016-2026 Martin Mitáš` |
 | 配布対応 | `licenses/md4c/LICENSE.md` を同梱 |
 
 ## 7. LibreOffice チェックリスト
@@ -123,7 +126,7 @@ MinGW-w64 の DLL を release に含める場合、次を同梱します。
 
 - 選択フォントだけを release に含める場合でも、LibreOffice の `license.txt`, `LICENSE.html`, `NOTICE` は保持する。
 - 公式管理者展開イメージ `third_party/libreoffice/image` は外部通信可能な import/marker が残るため、Office 変換 runtime として採用しない。
-- 標準 release は検証済みカスタム runtime を `libreoffice/custom_runtime/instdir/` へコピーし、その `instdir` に存在する `license.txt`, `LICENSE.html`, `NOTICE` を `licenses/libreoffice/` へコピーする。変換機能を含めない軽量配布は `-Lite` を指定する。`-NoLibreOfficeRuntime` は `-Lite` と併用する変換なし配布用の指定であり、標準 release では使用できない。
+- 標準 release は検証済みカスタム runtime を `lo/` へコピーし、runtime に存在する `license.txt`, `LICENSE.html`, `NOTICE` を `licenses/libreoffice/` へコピーする。変換機能を含めない軽量配布は `-Lite` を指定する。`-NoLibreOfficeRuntime` は `-Lite` と併用する変換なし配布用の指定であり、標準 release では使用できない。
 - release にコピーした runtime は、`tools/release_checks/sanitize_libreoffice_runtime_release.py` により `sdk/` を除外し、ローカル絶対パス/ビルドユーザー名を等長置換し、`program/version.ini` の更新 URL を空にする。
 - カスタム build は LibreOffice source に patch を当てているため、`third_party/libreoffice/custom_build/patches/*.patch` と `communication_free_options.input` を、改変内容と build 条件を示す再現入力として保持する。
 - `scripts/release/pack_release.ps1` は、release 内に `soffice.com` または `mergedlo.dll` を検出した場合、bundled runtime 側の LibreOffice license 文書を `licenses/libreoffice/` へコピーし、custom build options/patches も `licenses/libreoffice/custom_build/` へコピーする。
@@ -144,7 +147,7 @@ MinGW-w64 の DLL を release に含める場合、次を同梱します。
 ### 7.2 LibreOffice 運用上の注意
 
 - `image/program/libcurl.dll` は `mergedlo.dll` と `LanguageToollo.dll` の import 依存があるため保持します。
-- 起動時は `PYTHONDONTWRITEBYTECODE=1` と `PYTHONPYCACHEPREFIX` を設定し、`third_party/` 配下に Python bytecode を生成させません。
+- 起動時は `PYTHONDONTWRITEBYTECODE=1` と `PYTHONPYCACHEPREFIX` を設定し、配布 runtime（`lo/`）や `third_party/` 配下に Python bytecode を生成させません。
 - 変換用profile・一時データと子processのPython cache先は、選択したワークスペースの `__pdf_note_workspace__/__tmp__/lo/` 内に指定します。配布runtimeのcacheを自動走査・削除せず、変換生成物を `third_party/` に残しません。
 - `-env:UserInstallation=file:///...` で専用 profile を指定し、利用者の通常 LibreOffice profile を使いません。
 - release 同梱前に、外部通信経路、マクロ、外部リンク/リモート画像参照、クラッシュレポート、更新確認が実行されないことを実機確認します。
@@ -179,27 +182,34 @@ PDF Note Workspace release/
   readonly_viewer.exe.buildinfo.txt
   pdf_note_workspace.exe
   pdf_note_workspace.exe.buildinfo.txt
-  pdf_workspace_setup.json
+  pdf_note_workspace_setup.json
   pdfium.dll
   libstdc++-6.dll
   libgcc_s_seh-1.dll
   libwinpthread-1.dll
   zlib1.dll
-  libreoffice/
+  README.md
+  LICENSE.md
+  SECURITY.md
+  lo/
+    # 標準 release で同梱する検証済み Office 変換 runtime（license.txt、LICENSE.html、NOTICE を含む）
     image/
       Fonts/
-        # release で同梱する選択フォントのみ
-    custom_runtime/
-      instdir/
-        # 標準 release で同梱する検証済み Office 変換 runtime
+        # release で同梱する選択フォントのみ（Lite版では libreoffice/image/Fonts/）
+  resources/
+    math/
+      xits/
+        XITSMath-Regular.clm2
   sample_workspace/
   docs/
     README.md
-    LICENSE.md
-    LICENSES_INDEX.md
-    THIRD_PARTY_NOTICES.md
     CONTENTS.txt
+    # 選択した言語の利用者文書
+    legal/
+      LICENSE.md
+      THIRD_PARTY_NOTICES.md
   licenses/
+    README.txt
     pdfium/
       LICENSE
       abseil.txt
@@ -223,6 +233,12 @@ PDF Note Workspace release/
         COPYING.txt
     md4c/
       LICENSE.md
+    microtex/
+      LICENSE.txt
+    xits/
+      FONTLOG.txt
+      OFL.txt
+      README.txt
     zlib/
       LICENSE
     libreoffice/
@@ -230,7 +246,6 @@ PDF Note Workspace release/
       LICENSE.html
       NOTICE
       custom_build/
-        autogen_26.2.7.3.input
         communication_free_options.input
         release_reduction_manifest.json
         patches/
@@ -239,7 +254,7 @@ PDF Note Workspace release/
   checksums.sha256
 ```
 
-標準 release は `libreoffice/custom_runtime/instdir/` を同梱し、runtime 側の `license.txt`, `LICENSE.html`, `NOTICE`、`communication_free_options.input`、`release_reduction_manifest.json`、custom build の patch 一式も必ず含めます。配布 runtime は SDK とローカルビルド情報を含めず、更新 URL を空にします。変換機能を含めない軽量配布は `-Lite` を指定します。`-NoLibreOfficeRuntime` は `-Lite` と併用する変換なし配布用の指定であり、標準 release では使用できません。
+標準 release は検証済み runtime を `lo/` に同梱し、runtime 側の `license.txt`, `LICENSE.html`, `NOTICE`、`communication_free_options.input`、`release_reduction_manifest.json`、custom build の patch 一式も必ず含めます。build 環境に依存する `autogen_*.input` は同梱しません。配布 runtime は SDK とローカルビルド情報を含めず、更新 URL を空にします。変換機能を含めない軽量配布は `-Lite` を指定します。`-NoLibreOfficeRuntime` は `-Lite` と併用する変換なし配布用の指定であり、標準 release では使用できません。
 
 ## 11. 追加時ルール
 

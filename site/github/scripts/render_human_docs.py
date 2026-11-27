@@ -318,6 +318,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       border-radius: 0 6px 6px 0;
     }}
 
+    .doc-updated {{ margin: -8px 0 16px; color: var(--text-muted); font-size: 0.84em; }}
+
     .document-outline {{
       margin: 0 0 1.8em;
       padding: 0 16px 12px;
@@ -388,10 +390,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       font-size: 0.92em;
     }}
 
+    /* 表の共通規則: 見出し語が1文字ずつ縦に折れない最小幅、上揃え、行の縞。 */
     th, td {{
       border: 1px solid var(--border-color);
       padding: 8px 12px;
+      min-width: 5em;
       text-align: left;
+      vertical-align: top;
       overflow-wrap: normal;
       word-break: normal;
     }}
@@ -402,10 +407,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       word-break: normal;
     }}
 
+    /* 長いコード表記(空白区切りの名前一覧など)だけは空白で折り返す。語の途中では分割しない。 */
+    th code.code-wrap, td code.code-wrap {{ white-space: normal; }}
+
     th {{
       background-color: var(--code-bg);
       font-weight: 600;
     }}
+
+    .table-scroll tr:nth-child(odd):not(:first-child) td {{
+      background-color: color-mix(in srgb, var(--code-bg) 55%, transparent);
+    }}
+    html[data-contrast="high"] .table-scroll tr td {{ background-color: transparent; }}
 
     ul, ol {{
       padding-left: 1.6em;
@@ -711,7 +724,7 @@ def simple_markdown_to_html(md_text: str, root_rel: str) -> str:
             source_cells = [c.strip() for c in line.split("|")[1:-1]]
             if source_cells and all(re.fullmatch(r":?-{3,}:?", c) for c in source_cells):
                 continue  # セル全体が区切り指定の行だけをスキップ
-            cells = [allow_path_breaks_in_code(format_inline(c, root_rel)) for c in source_cells]
+            cells = [format_table_cell_code(format_inline(c, root_rel)) for c in source_cells]
             if not in_table:
                 html_lines.append('<div class="table-scroll"><table>')
                 in_table = True
@@ -901,16 +914,25 @@ def render_mermaid_flowchart(lines: list[str]) -> str | None:
     return '<figure class="flowchart-diagram" aria-label="フロー図"><figcaption>フロー図</figcaption>' + "\n".join(edge_html) + "</figure>"
 
 
-def allow_path_breaks_in_code(cell_html: str) -> str:
-    """表のセル内のコード表記で、パス区切り「/」の直後だけを改行可能にする。
+TABLE_CODE_WRAP_MIN_CHARS = 32
 
-    語の途中では分割せず、長いパスが列幅を押し広げて表が横スクロールになるのを防ぐ。
+
+def format_table_cell_code(cell_html: str) -> str:
+    """表のセル内のコード表記に、語の途中を分割しない折り返し位置を与える。
+
+    - パス区切り「/」の直後は常に改行可能にする。
+    - 空白を含む長い表記(名前の一覧など)は空白で折り返せるようにする。
+      短い表記は1行に保ち、列幅を押し広げて横スクロールになるのを防ぐ。
     """
-    return re.sub(
-        r"<code>([^<]*)</code>",
-        lambda m: "<code>" + m.group(1).replace("/", "/<wbr>") + "</code>",
-        cell_html,
-    )
+
+    def replace(match: re.Match[str]) -> str:
+        content = match.group(1)
+        visible = html.unescape(content)
+        wrap = " " in visible and len(visible) >= TABLE_CODE_WRAP_MIN_CHARS
+        opening = '<code class="code-wrap">' if wrap else "<code>"
+        return opening + content.replace("/", "/<wbr>") + "</code>"
+
+    return re.sub(r"<code>([^<]*)</code>", replace, cell_html)
 
 
 def format_inline(text: str, root_rel: str) -> str:
@@ -937,11 +959,13 @@ def format_inline(text: str, root_rel: str) -> str:
         return value
 
     text = re.sub(r"(?<!`)(`+)(?!`)(.*?)(?<!`)\1(?!`)", protect_code, text)
-    # エスケープ前に基本処理
+    # 本文中の <...> は文字として表示する。原稿にHTMLを直接書く用途はなく、
+    # XML形式の説明などが要素として解釈されて中身だけが散らばるのを防ぐ。
+    text = html.escape(text, quote=False)
     # 画像
     def replace_image(m):
-        label = html.escape(restore_codes(m.group(1), plain=True))
-        url = html.escape(restore_codes(m.group(2), source=True))
+        label = html.escape(html.unescape(restore_codes(m.group(1), plain=True)))
+        url = html.escape(html.unescape(restore_codes(m.group(2), source=True)))
         return f'<img src="{url}" alt="{label}"><br><em>{label}</em>'
 
     text = re.sub(
@@ -953,7 +977,7 @@ def format_inline(text: str, root_rel: str) -> str:
     # 生の Markdown も同じ場所に残し、各HTMLページから直接開ける。
     def replace_link(m):
         label = m.group(1)
-        url = restore_codes(m.group(2), source=True)
+        url = html.unescape(restore_codes(m.group(2), source=True))
         if "#" in url:
             path_part, anchor_part = url.split("#", 1)
             anchor_str = "#" + anchor_part
@@ -1263,7 +1287,34 @@ def navigation_html(*, root_rel: str, rel_path: Path) -> str:
     </details>"""
 
 
-def convert_md_file_to_html(md_path: Path, site_dir: Path) -> Path:
+def page_update_html(update: dict[str, str] | None, language_code: str) -> str:
+    """原稿の最終更新日時と、その時点の版を1行で示す。更新を見直す目安にする。"""
+    if not update or not update.get("datetime"):
+        return ""
+    stamp = update["datetime"]
+    match = re.match(r"(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})", stamp)
+    if not match:
+        return ""
+    shown = f"{match.group(1)} {match.group(2)}"
+    version = update.get("version", "")
+    english = language_code == "en"
+    label = "Last updated" if english else "最終更新"
+    # release: その版に含まれる / after: その版の公開後の更新 / at: その時点の版（タグがない履歴）
+    kind = update.get("version_kind", "at")
+    v = f"v{html.escape(version)}"
+    if kind == "release":
+        version_text = v
+    elif kind == "after":
+        version_text = f"after {v}" if english else f"{v} 公開後"
+    else:
+        version_text = f"as of {v}" if english else f"{v} 時点"
+    version_html = f' <span class="doc-updated-version">({version_text})</span>' if version else ""
+    return (f'<p class="doc-updated">{label} <time datetime="{html.escape(stamp)}">{shown}</time>'
+            f"{version_html}</p>")
+
+
+def convert_md_file_to_html(md_path: Path, site_dir: Path,
+                            page_update: dict[str, str] | None = None) -> Path:
     """Markdown ファイルを読み込み、対応する HTML ファイルを生成します。"""
     content = md_path.read_text(encoding="utf-8").lstrip("\ufeff")
     rel_path = md_path.relative_to(site_dir)
@@ -1284,6 +1335,12 @@ def convert_md_file_to_html(md_path: Path, site_dir: Path) -> Path:
     outline_html = document_outline_html(body_html, language_code)
     if outline_html:
         body_html = re.sub(r"(</h1>)", r"\1\n" + outline_html, body_html, count=1)
+    updated_html = page_update_html(page_update, language_code)
+    if updated_html:
+        if "</h1>" in body_html:
+            body_html = body_html.replace("</h1>", "</h1>\n" + updated_html, 1)
+        else:
+            body_html = updated_html + "\n" + body_html
     body_html = collapse_reference_sections(body_html, rel_path)
     full_html = HTML_TEMPLATE.format(
         title=html.escape(title),
@@ -1304,7 +1361,9 @@ def convert_md_file_to_html(md_path: Path, site_dir: Path) -> Path:
     html_path.write_text(full_html, encoding="utf-8")
     return html_path
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None,
+         page_updates: dict[str, dict[str, str]] | None = None) -> int:
+    """page_updates はサイト内の Markdown 相対パスごとの最終更新（日時・版）。"""
     args = argv if argv is not None else sys.argv[1:]
     if len(args) < 1:
         print("Usage: python render_human_docs.py <site_directory>", file=sys.stderr)
@@ -1317,6 +1376,10 @@ def main(argv: list[str] | None = None) -> int:
 
     count = 0
     rendered: set[Path] = set()
+    updates = page_updates or {}
+
+    def update_for(markdown_file: Path) -> dict[str, str] | None:
+        return updates.get(markdown_file.resolve().relative_to(site_dir).as_posix())
     for relative_dir in (Path("."), Path("docs/ja"), Path("docs/en"), Path("docs/statistics"), Path("introduction")):
         directory = site_dir / relative_dir
         if not directory.exists() or not directory.is_dir():
@@ -1328,7 +1391,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         for markdown_file in markdown_files:
             if markdown_file.is_file():
-                convert_md_file_to_html(markdown_file, site_dir)
+                convert_md_file_to_html(markdown_file, site_dir, update_for(markdown_file))
                 rendered.add(markdown_file.resolve())
                 count += 1
 
@@ -1339,7 +1402,7 @@ def main(argv: list[str] | None = None) -> int:
         site_dir / "docs" / "案内ドキュメントの構成.md",
     ):
         if markdown_file.is_file() and markdown_file.resolve() not in rendered:
-            convert_md_file_to_html(markdown_file, site_dir)
+            convert_md_file_to_html(markdown_file, site_dir, update_for(markdown_file))
             count += 1
 
     print(f"Successfully generated {count} HTML documentation pages in {site_dir}")

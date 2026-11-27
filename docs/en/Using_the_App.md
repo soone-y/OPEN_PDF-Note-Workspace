@@ -32,7 +32,7 @@ Ctrl+E fits the current page, Ctrl+G goes to a page number, and Ctrl+wheel chang
 | --- | --- |
 | Marks directly over a passage or diagram | Annotation tools; stored in same-named `.clrop` without changing the PDF original |
 | Structured writing, headings or equations | Create a note; stored separately in `.clro` or another chosen format |
-| Working terms and short reminders | Tools > Workspace memo; one plain-text memo for this workspace |
+| Working terms and short reminders | Tools > Workspace memo...; one plain-text memo for this workspace |
 
 ### Add markers, handwriting or text
 
@@ -45,7 +45,7 @@ The [Annotation reference](Help_Reference.md#annotation-tools-and-colors) covers
 
 ## Create a note and save your work
 
-Select a session and **Create Note**, then enter a name. Normally choose `.clro`; use `.md` for exchange with Markdown tools or `.txt` for literal text. **Settings > Note > Files** changes the default for new notes, leaving existing formats intact.
+Select a session and **New Note**, then enter a name. Normally choose `.clro`; use `.md` for exchange with Markdown tools or `.txt` for literal text. **Settings > Note > Files** changes the default for new notes, leaving existing formats intact.
 
 Click the note and type, for example:
 
@@ -67,7 +67,7 @@ A failed save requires reviewing the message and **Save > Review Save Status**. 
 ## Export the PDF and annotations together
 
 1. Open the annotated PDF.
-2. Choose **Output > Quick PDF**.
+2. Choose **Export > Quick PDF**.
 3. Select a destination and name different from the original. For an existing output file, the application asks whether to overwrite it.
 4. Open the completed result and check colors, text, math and orientation before sharing.
 
@@ -79,7 +79,7 @@ The main application writes standard PDF annotations rather than flattening mark
 
 ## Export one page as PNG or use other formats
 
-Choose **Output > Output Dialog**, select single-page PNG, its page number, annotation inclusion, style and resolution. Use 144 DPI standard, 288 DPI high detail, 72 DPI small, or custom pixels. This creates a separate image. See [Output](Help_Reference.md#output) for selected pages, crops, note TXT/Markdown/HTML, queues and merged PDFs.
+Choose **Export > Output Dialog...**, select single-page PNG, its page number, annotation inclusion, style and resolution. Use 144 DPI standard, 288 DPI high detail, 72 DPI small, or custom pixels. This creates a separate image. See [Output](Help_Reference.md#output) for selected pages, crops, note TXT/Markdown/HTML, queues and merged PDFs.
 
 ## Full and Lite editions
 
@@ -91,7 +91,7 @@ Dropping DOCX/PPTX or images copies their original formats. Request Full's Offic
 
 ## Finding settings
 
-Open **Settings > Settings dialog**, then choose Environment, PDF, Note, Annotation, Save or Export. Save applies while staying open; Save and close applies and exits. Palette and key bindings save separately in their editors. The [Settings reference](Help_Reference.md#settings) explains each page, effects and cancellation scope.
+Open **Settings > Settings dialog**, then choose Environment, PDF, Note, Annotation, Save or Export. Save settings applies while staying open; Save and close applies and exits. Palette and key bindings save separately in their editors. The [Settings reference](Help_Reference.md#settings) explains each page, effects and cancellation scope.
 
 The center guide before opening documents, startup resumption, opening zoom/position and quick-output defaults are configurable. Distinguish temporary viewing changes from saved next-launch defaults.
 

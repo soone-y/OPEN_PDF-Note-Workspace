@@ -2,10 +2,11 @@
 
 | Extension | Purpose |
 | --- | --- |
-| `.clro` | The application's standard note format; UTF-8 text. |
-| `.md` / `.markdown` | Markdown-compatible notes; existing files are never renamed automatically. |
+| `.clro` | The application's standard note format; UTF-8 text. New notes use it by default (change this with the **Default format for new notes** setting to `.md`, `.txt` or `.csv`). |
+| `.md` / `.markdown` | Markdown-compatible notes without the `.clro`-only syntax; existing files are never renamed automatically. |
 | `.tex` | Existing TeX source files. |
 | `.txt` / `.csv` | Plain-text notes; `.csv` is not processed as a spreadsheet. |
+| Additional allowed extensions | Extensions registered in the **Additional allowed note extensions** setting (for example `.log`, `.memo`) are handled as plain text like `.txt`. Register `.note` or similar extensions here to use them. PDF, Office, image and executable files and `.clrop` cannot be registered. |
 | `.clrop` | Annotation data associated with a PDF, not a note. |
 
 ## Use an external folder
@@ -37,6 +38,7 @@ For the role and notation of `.clro`, see [`.clro` Note Format](CLRO_Note_Format
 - Notes exchanged with Markdown tools: use `.md` or `.markdown`; application-specific formatting may differ elsewhere.
 - Literal text: use `.txt`, or `.csv` to inspect/edit CSV as ordinary text without spreadsheet processing.
 - Existing TeX source: open `.tex` as source.
+- Office documents (`.docx` / `.pptx`): Full can convert them to PDF; dropping them only copies the original file. Lite has no conversion (see [Convert Office documents](Help_Reference.md#convert-office-documents)).
 - PDF annotations: let the app manage `.clrop` beside the PDF.
 
-Existing files keep their extension unless you explicitly rename them. Renaming does not convert their contents. `.clro` and Markdown notes share supported formatting; plain text does not interpret Markdown, math or note links. Images imported as PNG/JPG/JPEG remain images until you request one-page PDF conversion.
+Existing files keep their extension unless you explicitly rename them. Renaming does not convert their contents. `.clro` and Markdown notes share most formatting, but only `.clro` treats `__text__` as underline, disables underline-style (setext) headings, requires `|` at both ends of table rows, does not continue quotes and lists onto unmarked lines by default, and accepts fullwidth markup tags and a standalone `ーーー` rule. Plain text does not interpret Markdown, math or note links. Images imported as PNG/JPG/JPEG remain images until you request one-page PDF conversion.

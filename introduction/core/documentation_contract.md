@@ -38,4 +38,4 @@ python site/github/scripts/build_public_site.py --replace --documentation-portal
 python site/github/scripts/validate_public_site.py --site site/github/output/public
 ```
 
-検査は、公開対象の限定、UTF-8復号、JSON/XML構文、ローカルのMarkdown/HTMLリンク・画像参照、manifestの経路、開発者専用資料の除外を確認する。意味内容や実装との一致は、変更者が一次資料を確認して判断する。サイトの更新は release や `publish.ps1 -Mode Submit` から切り離された手動作業であり、必要なときに上記の生成・検査を明示実行する。
+検査は、公開対象の限定、UTF-8復号、JSON/XML構文、ローカルのMarkdown/HTMLリンク・画像参照、manifestの経路、開発者専用資料の除外を確認する。意味内容や実装との一致は、変更者が一次資料を確認して判断する。サイトの文書だけを更新するときは、開発者が `publish.ps1 -Mode Pages` を明示実行する。このモードは公開リポジトリの入力を同期し、上記の生成・検査を通してから反映する。release の `publish.ps1 -Mode Submit` も、公開snapshotに含まれる Pages 出力を検査する。

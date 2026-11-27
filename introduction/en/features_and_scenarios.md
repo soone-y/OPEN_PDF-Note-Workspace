@@ -21,7 +21,7 @@ EVIDENCE:
   - docs/en/File_Formats.md
 
 [NODE: OFFICE_CONVERSION]
-FACT_STANDARD_EDITION: The bundled LibreOffice runtime converts DOCX and PPTX files to PDF locally.
+FACT_FULL_EDITION: The bundled LibreOffice runtime converts DOCX and PPTX files to PDF locally.
 FACT_LITE_EDITION: The conversion runtime is not included; Office conversion is unavailable.
 LIMITATION: Conversion is experimental. Check for font and layout differences before use.
 EVIDENCE:
@@ -30,10 +30,36 @@ EVIDENCE:
 
 [NODE: IMAGE_CONVERSION]
 FACT: PNG, JPG, and JPEG files can be converted locally into a one-page PDF and added to a workspace without changing the original image.
-COMPATIBILITY: Available in both Standard and Lite editions.
+COMPATIBILITY: Available in both Full and Lite editions.
 EVIDENCE:
   - docs/en/Using_the_App.md
   - introduction/core/file_formats.md
+
+[NODE: BLANK_PDF]
+FACT: A blank PDF of 1 to 500 pages can be created and written on with the same separate annotation file as other PDFs.
+EVIDENCE:
+  - docs/en/Help_Reference.md
+
+[NODE: MATH]
+FACT: Notes display math written as `$...$` or `$$...$$`, and math annotations can be placed on PDFs.
+EVIDENCE:
+  - docs/en/Help_Reference.md
+
+[NODE: SEARCH_AND_MEMO]
+FACT: Notes, PDFs, and annotations can be searched within a chosen scope; search groups can be saved. Each workspace has one plain-text memo.
+EVIDENCE:
+  - docs/en/Help_Reference.md
+
+[NODE: EXPORT]
+FACT: Quick PDF and quick note export, and an export dialog for PDF, PNG, txt, Markdown, and HTML. Exports go to separate files, not the originals.
+EVIDENCE:
+  - docs/en/Help_Reference.md
+
+[NODE: READONLY_VIEWER]
+FACT: Both editions include a read-only viewer (readonly_viewer.exe) that opens PDFs and text files in tabs and displays annotations from a .clrop with the same base name. It does not edit.
+EVIDENCE:
+  - README.md
+  - docs/en/Help_Reference.md
 ```
 
 ## 2. Continuing work locally

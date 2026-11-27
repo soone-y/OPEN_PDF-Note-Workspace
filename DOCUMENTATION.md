@@ -40,9 +40,9 @@ Canonical locations, languages, and update priorities
 
 #### [公開統計 / Project statistics](STATISTICS.md)
 
-固定入力による規模・配布容量・検証範囲と履歴
+固定入力による source 規模と過去版の履歴
 
-Fixed-input source scale, distribution sizes, verification scope and history
+Fixed-input source scale and release history
 
 パス / Path: `STATISTICS.md`
 
@@ -128,9 +128,9 @@ Japanese version: multiple tabs and PDFs with CLROP annotations
 
 #### [日本語：ヘルプ / Japanese: help reference](docs/ja/Help_Reference.md)
 
-日本語版：メニュー、設定、ショートカットの参照
+日本語版：機能・操作・設定の詳細
 
-Japanese version: menus, settings, and shortcuts
+Japanese version: detailed feature operations and settings
 
 パス / Path: `docs/ja/Help_Reference.md`
 
@@ -376,11 +376,11 @@ Japanese version: roles and reference contract for public material
 
 パス / Path: `introduction/core/documentation_contract.md`
 
-#### [回答・参照指針 / Answering guidelines](introduction/core/answering_guidelines.md)
+#### [実装と確認で守る方針 / Implementation and verification principles](introduction/core/answering_guidelines.md)
 
-日本語版：AI・支援者向けの回答と参照の指針
+日本語版：実装・変更・評価を行う人が確認する、プロジェクトの重要な方針
 
-Japanese version: guidance for answers and references
+Japanese version: key project principles for people who implement, change, or evaluate the software
 
 パス / Path: `introduction/core/answering_guidelines.md`
 

@@ -39,7 +39,7 @@
 | `c` | 数式タグ | `<math>x^2</math>`（中身はTeX） |
 | `T` | 添字・分数・根号など | `x_i^2`・`\frac{a}{b}`・`\sqrt{x}` を数式の囲みに書く |
 | `T` | 行列・場合分け・整列 | `\begin{pmatrix}...\end{pmatrix}` など |
-| `T` | 記号・関数 | `\alpha`・`\sum`・`\sin` など。対応一覧は後半 |
+| `T` | 記号・関数 | `\alpha`・`\sum`・`\sin` など。主な名前は後半 |
 
 ## CLROの記法設定
 
@@ -332,7 +332,7 @@ Markdown系ノートでは `<math>...</math>` または `<math>...</>` も使え
 
 数式は MicroTeX と XITS Math で組版します。`\!` は負の薄い空白です。`\displaystyle`・`\textstyle`、`\mathrm`・`\mathbf`・`\mathit`・`\mathsf`・`\mathtt`・`\mathbb`・`\mathcal`・`\textrm` も使えます。TeX文書全体や追加パッケージを実行する機能はありません。`\newcommand`・`\renewcommand`・独自環境の定義は使えません。組版できない入力も原文で編集・保存できます。旧設定の「上付き・下付きの配分」は廃止し、添字の配置は組版エンジンの規則に従います。
 
-行列・場合分け・式の整列では、列を `&`、行を `\\` で分けます。`\\[8pt]` のように行間を追加できます。環境名は `matrix`・`pmatrix`・`bmatrix`・`Bmatrix`・`vmatrix`・`Vmatrix`・`cases`・`aligned`・`align` を使えます。
+行列・場合分け・式の整列では、列を `&`、行を `\\` で分けます。`\\[8pt]` のように行間を追加できます。主な環境名は `matrix`・`pmatrix`・`bmatrix`・`Bmatrix`・`vmatrix`・`Vmatrix`・`cases`・`aligned`・`align` です。このほか `smallmatrix`・`rcases`・`array`・`gather`・`gathered`・`split`・`multline`・`alignat`・`equation` なども使えます。
 
 ```text
 $$
@@ -345,7 +345,7 @@ $$
 
 #### 数式の記号・関数名
 
-以下は対応するコマンド名です。各名前の前に `\` を付け、大文字小文字を保ちます。例えば `\alpha`、`\Gamma`。
+以下は対応するコマンド名のうち主なものです。各名前の前に `\` を付け、大文字小文字を保ちます。例えば `\alpha`、`\Gamma`。
 
 | 種類 | 名前 |
 | --- | --- |

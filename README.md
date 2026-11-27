@@ -116,7 +116,7 @@ Both editions include `readonly_viewer.exe`, which opens PDFs and text files in 
 ## 文書 / Documentation
 
 - 文書全体の入口 / Documentation map: [DOCUMENTATION.md](DOCUMENTATION.md)
-- 固定入力による規模・配布容量・検証範囲 / Source scale, distribution sizes and verification scope: [STATISTICS.md](STATISTICS.md)
+- 固定入力による source 規模と過去版の履歴 / Fixed-input source scale and release history: [STATISTICS.md](STATISTICS.md)
 - 日本語: [docs/ja/README.md](docs/ja/README.md) — セットアップ、基本操作、保存と復元、ファイル形式、ノート記法、閲覧専用ソフト、トラブル対処、ビルド方法。
 - English: [docs/en/README.md](docs/en/README.md) — Setup, everyday use, saving and recovery, file formats, note syntax, the read-only viewer, troubleshooting, and building from source.
 
@@ -126,9 +126,9 @@ Use [Issues](https://github.com/soone-y/OPEN_PDF-Note-Workspace/issues) for bug 
 
 ## ライセンス / License
 
-The project license is the zlib License. The English text is the legally controlling text.
-
 本プロジェクトのライセンスは zlib License です。英語原文が法的な正本です。
+
+The project license is the zlib License. The English text is the legally controlling text.
 
 - 日英併記のライセンス情報: [LICENSE.md](LICENSE.md)
 - Third-party notices: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
@@ -170,7 +170,7 @@ Windows system DLLs and the Universal C Runtime (UCRT) are loaded from the OS. T
 | `lo/` | 通常版のメインソフトがOffice文書をPDFへ変換するときに使うLibreOffice一式。入口は `lo/program/soffice.com`。その1ファイルだけでなく、`lo/` 内のDLL・設定・共有データも必要です。Lite版には含めず、閲覧専用ソフトは使用しません。 / Full-edition Office conversion runtime, entered through `lo/program/soffice.com`. Keep the entire `lo/` tree, including its DLLs, configuration, and shared data. Not included in Lite or used by the read-only viewer. |
 | 通常版 / Full: `lo/image/Fonts/`、Lite: `libreoffice/image/Fonts/` | メインソフトが読み込む同梱フォント。通常版は変換runtimeと同じ `lo/` 配下、Lite版はフォント専用の `libreoffice/` 配下に置きます。 / Bundled fonts loaded by the main app. Full keeps them under `lo/` alongside the conversion runtime; Lite uses the font-only `libreoffice/` tree. |
 | `resources/math/xits/` | メインソフトと閲覧専用ソフトが数式の表示に使う XITS Math フォント（`XITSMath-Regular.clm2`）。通常版・Lite版の両方に含めます。 / XITS Math font (`XITSMath-Regular.clm2`) used by both the main app and the viewer to display formulas. Included in both Full and Lite. |
-| `docs/`、`LICENSE.md`、`licenses/` | 操作説明、プロジェクトと依存物のライセンス文書。起動用DLLではありませんが、説明やライセンスの閲覧・再配布のために配布物と一緒に保管します。 / User guides and project/component licenses. Not startup DLLs, but keep them with the package for reading the documentation, checking licenses, and redistribution. |
+| `README.md`、`SECURITY.md`、`docs/`、`LICENSE.md`、`licenses/` | 概要・脆弱性報告の案内、操作説明、プロジェクトと依存物のライセンス文書。起動用DLLではありませんが、説明やライセンスの閲覧・再配布のために配布物と一緒に保管します。 / Overview, vulnerability-reporting guidance, user guides, and project/component licenses. Not startup DLLs, but keep them with the package for reading the documentation, checking licenses, and redistribution. |
 
 ### 設定と作業ファイル / Configuration and working files
 

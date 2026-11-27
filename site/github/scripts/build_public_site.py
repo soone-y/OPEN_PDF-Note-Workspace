@@ -10,10 +10,13 @@ ready to take its place.
 from __future__ import annotations
 
 import shutil
+import subprocess
 import sys
 import uuid
 import argparse
 import json
+import re
+from datetime import datetime
 from pathlib import Path
 
 
@@ -23,6 +26,9 @@ OUTPUT_DIR = GITHUB_SITE_ROOT / "output" / "public"
 ALLOWLIST_PATH = GITHUB_SITE_ROOT / "documentation_portal_allowlist.json"
 VERSION_TOKEN = "__APP_VERSION__"
 DOCUMENT_COUNT_TOKEN = "__PUBLIC_DOCUMENT_COUNT__"
+RELEASE_VERSION_MARKER = "(ZIP配布物ではここにバージョンが記載されます)"
+RELEASE_VERSION_MARKER_LINE = re.compile(
+    r"^[^\r\n]*" + re.escape(RELEASE_VERSION_MARKER) + r"[ \t]*(?:\r?\n(?:[ \t]*\r?\n)?|$)", re.MULTILINE)
 WEB_ANALYTICS_SNIPPET = """<!-- Cloudflare Web Analytics -->
 <script type='module' src='https://static.cloudflareinsights.com/beacon.min.js' data-cf-beacon='{"token": "385b96f498964281bc0c2a771cebd04f"}'></script>
 <!-- End Cloudflare Web Analytics -->"""
@@ -77,10 +83,16 @@ def load_allowlist() -> dict:
     return allowlist
 
 
-def copy_allowlisted_content(staging_dir: Path, allowlist: dict) -> None:
+def copy_allowlisted_content(staging_dir: Path, allowlist: dict) -> dict[str, Path]:
+    """Copy the allowlisted inputs and return staged Markdown paths mapped to their sources."""
     rules = allowlist.get("documentation_portal", allowlist)
     if not isinstance(rules, dict):
         raise ValueError("Allowlist documentation_portal profile must be an object")
+    markdown_sources: dict[str, Path] = {}
+
+    def record(source: Path, destination: Path) -> None:
+        if destination.suffix.lower() == ".md":
+            markdown_sources[destination.resolve().relative_to(staging_dir.resolve()).as_posix()] = source
 
     for entry in rules.get("files", []):
         if not isinstance(entry, dict):
@@ -90,6 +102,7 @@ def copy_allowlisted_content(staging_dir: Path, allowlist: dict) -> None:
             staging_dir, entry.get("destination", ""), label="allowlist file destination"
         )
         copy_file(source, destination)
+        record(source, destination)
 
     for entry in rules.get("trees", []):
         if not isinstance(entry, dict):
@@ -100,10 +113,14 @@ def copy_allowlisted_content(staging_dir: Path, allowlist: dict) -> None:
         )
         excluded = tuple(entry.get("exclude_prefixes", []))
         copy_tree(source, destination, exclude_prefixes=excluded)
+        for source_file in source.rglob("*.md"):
+            relative = source_file.relative_to(source).as_posix()
+            if source_file.is_file() and not any(relative.startswith(prefix) for prefix in excluded):
+                record(source_file, destination / relative)
 
     document_rule = rules.get("document_markdown")
     if document_rule is None:
-        return
+        return markdown_sources
     if not isinstance(document_rule, dict):
         raise ValueError("Allowlist document_markdown entry must be an object")
     source = resolve_repo_relative_path(document_rule.get("source", ""), label="allowlist document source")
@@ -115,12 +132,93 @@ def copy_allowlisted_content(staging_dir: Path, allowlist: dict) -> None:
     for markdown_file in source.glob("*.md"):
         if markdown_file.name not in excluded:
             copy_file(markdown_file, destination / markdown_file.name)
+            record(markdown_file, destination / markdown_file.name)
+    return markdown_sources
+
+
+def run_git(*args: str) -> str | None:
+    """Run a read-only local git query; None when git or the history is unavailable."""
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), *args],
+            capture_output=True, text=True, encoding="utf-8", check=False,
+        )
+    except OSError:
+        return None
+    return completed.stdout if completed.returncode == 0 else None
+
+
+RELEASE_TAG_PATTERN = "v[0-9]*"
+
+
+def release_version_for_commit(commit: str, version_source: str) -> dict[str, str]:
+    """Name the release a commit belongs to, using the release tags (vX.Y.Z).
+
+    - "release": the first release tag that contains the commit.
+    - "after": no release contains it yet; the latest release before it.
+    - "at": no usable release tag (such as the development history);
+      REPO_VERSION.txt as it was in that commit.
+    """
+    def tag_version(tag: str) -> str:
+        # Some releases were tagged per language (v0.9.500-en / v0.9.500-ja); show one version.
+        return re.sub(r"-(?:en|ja)$", "", tag[1:])
+
+    contained = run_git("tag", "--contains", commit, "--list", RELEASE_TAG_PATTERN, "--sort=v:refname")
+    first = next((line.strip() for line in (contained or "").splitlines() if line.strip()), "")
+    if first:
+        return {"version": tag_version(first), "version_kind": "release"}
+    previous = (run_git("describe", "--tags", "--abbrev=0", "--match", RELEASE_TAG_PATTERN, commit) or "").strip()
+    if previous:
+        return {"version": tag_version(previous), "version_kind": "after"}
+    return {"version": (run_git("show", f"{commit}:{version_source}") or "").strip(), "version_kind": "at"}
+
+
+def collect_page_updates(markdown_sources: dict[str, Path], version_source: str,
+                         current_version: str) -> dict[str, dict[str, str]]:
+    """Map each staged Markdown page to the date and release of its source's last change.
+
+    Only sources whose content changed get a new date. The release comes from
+    release_version_for_commit. A source with uncommitted changes is dated now
+    and given the current version as "at".
+    """
+    updates: dict[str, dict[str, str]] = {}
+    versions: dict[str, dict[str, str]] = {}
+    if (run_git("rev-parse", "--is-shallow-repository") or "").strip() != "false":
+        # A shallow clone would date every page by its newest commit.
+        print("Public-site build: full git history unavailable; page update lines omitted", file=sys.stderr)
+        return {}
+    for staged, source in sorted(markdown_sources.items()):
+        repo_relative = source.relative_to(REPO_ROOT).as_posix()
+        dirty = run_git("status", "--porcelain", "--", repo_relative)
+        if dirty is None:
+            print("Public-site build: git history unavailable; page update lines omitted", file=sys.stderr)
+            return {}
+        if dirty.strip():
+            updates[staged] = {
+                "datetime": datetime.now().astimezone().isoformat(timespec="minutes"),
+                "version": current_version,
+                "version_kind": "at",
+            }
+            continue
+        log = run_git("log", "-1", "--format=%H%x09%cI", "--", repo_relative)
+        if not log or "\t" not in log:
+            continue
+        commit, committed_at = log.strip().split("\t", 1)
+        if commit not in versions:
+            versions[commit] = release_version_for_commit(commit, version_source)
+        updates[staged] = {"datetime": committed_at, **versions[commit]}
+    return updates
 
 
 def replace_version_tokens(site_dir: Path, version: str) -> None:
     for markdown_file in site_dir.rglob("*.md"):
         text = markdown_file.read_text(encoding="utf-8")
-        markdown_file.write_text(text.replace(VERSION_TOKEN, version), encoding="utf-8")
+        text = text.replace(VERSION_TOKEN, version)
+        # The ZIP release replaces this marker with its version (pack_release.ps1).
+        # The site shows each page's last update under the title instead, so the
+        # placeholder line is dropped rather than published unreplaced.
+        text = RELEASE_VERSION_MARKER_LINE.sub("", text)
+        markdown_file.write_text(text, encoding="utf-8")
 
 
 def replace_document_count_tokens(site_dir: Path) -> None:
@@ -196,13 +294,15 @@ def build_site(*, replace: bool = False, documentation_portal: bool = False) -> 
         staging_dir.mkdir()
 
         allowlist = load_allowlist()
-        copy_allowlisted_content(staging_dir, allowlist)
+        markdown_sources = copy_allowlisted_content(staging_dir, allowlist)
 
-        version_source = resolve_repo_relative_path(allowlist.get("version_source", ""), label="allowlist version source")
+        version_source_name = allowlist.get("version_source", "")
+        version_source = resolve_repo_relative_path(version_source_name, label="allowlist version source")
         version = version_source.read_text(encoding="utf-8").strip()
         if not version:
             raise ValueError("REPO_VERSION.txt must contain a version")
         replace_version_tokens(staging_dir, version)
+        page_updates = collect_page_updates(markdown_sources, version_source_name, version)
 
         # Keep human-readable HTML local and leave raw Markdown unchanged for AI clients.
         tool_directory = Path(__file__).resolve().parent
@@ -212,7 +312,7 @@ def build_site(*, replace: bool = False, documentation_portal: bool = False) -> 
         finally:
             sys.path.pop(0)
 
-        if render_human_docs([str(staging_dir)]) != 0:
+        if render_human_docs([str(staging_dir)], page_updates=page_updates) != 0:
             raise RuntimeError("render_human_docs.py failed")
 
         replace_document_count_tokens(staging_dir)

@@ -47,15 +47,19 @@ EVIDENCE: docs/ja/Using_the_App.md
 <persistence_model>
   <step id="stage" type="temporary_protection">
     <description>編集途中の保護領域 (クラッシュ・電源断対策)</description>
-    <path>__pdf_note_workspace__/__tmp__/__stage__/</path>
+    <path>__pdf_note_workspace__/__unsaved__/</path>
   </step>
   <step id="backup" type="recovery_copy">
-    <description>Ctrl+S 統合保存時に生成されるバックアップ</description>
-    <path>__pdf_note_workspace__/__escape__/backup/</path>
+    <description>Ctrl+S／「作業保存」、通常終了、出力の直前に、原本を上書きする前に生成されるバックアップ</description>
+    <path>__pdf_note_workspace__/__backup__/</path>
   </step>
-  <step id="note_recovery" type="emergency_dump">
-    <description>ノート保存失敗時の退避データ</description>
-    <path>__pdf_note_workspace__/__escape__/note_recovery/</path>
+  <step id="recovery" type="recovery_review">
+    <description>保存に失敗した編集内容の復旧確認と stage の控え</description>
+    <path>__pdf_note_workspace__/__recovery__/</path>
+  </step>
+  <step id="failed" type="emergency_dump">
+    <description>書き込めなかった内容・壊れて読めないファイルの退避</description>
+    <path>__pdf_note_workspace__/__failed__/</path>
   </step>
   <step id="consolidated_save" type="explicit_write">
     <description>Ctrl+S または保存メニュー選択による正規ファイル統合</description>

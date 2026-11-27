@@ -25,7 +25,7 @@ EVIDENCE:
   - docs/ja/File_Formats.md
 
 [NODE: OFFICE_CONVERSION]
-FACT_STANDARD_EDITION: 同梱LibreOffice runtimeによるローカルPDF変換 (DOCX, PPTX)
+FACT_FULL_EDITION: 同梱LibreOffice runtimeによるローカルPDF変換 (DOCX, PPTX)
 FACT_LITE_EDITION: 変換runtime非同梱 (Office変換非対応)
 LIMITATION: 変換機能は試験的 (Experimental)。フォント・レイアウトズレの事前確認が必要
 EVIDENCE:
@@ -38,6 +38,33 @@ COMPATIBILITY: 通常版・Lite版の両方で利用可能 (完全ローカル�
 EVIDENCE:
   - docs/ja/Using_the_App.md
   - introduction/core/file_formats.md
+
+[NODE: BLANK_PDF]
+FACT: 白紙PDF (1～500ページ) を作成し、他のPDFと同じ別ファイル注釈で書き込み可能
+EVIDENCE:
+  - docs/ja/Help_Reference.md
+
+[NODE: MATH]
+FACT: ノートの `$...$` / `$$...$$` 数式表示、PDF上への数式注釈の配置
+EVIDENCE:
+  - docs/ja/Help_Reference.md
+  - docs/ja/Note_Writing_Guide.md
+
+[NODE: SEARCH_AND_MEMO]
+FACT: ノート・PDF・注釈を範囲指定して検索 (検索グループの保存に対応)。ワークスペースごとに1枚のプレーンテキストメモ
+EVIDENCE:
+  - docs/ja/Help_Reference.md
+
+[NODE: EXPORT]
+FACT: 簡単PDF・簡単ノート出力と、PDF・PNG・txt・Markdown・HTML の出力ダイアログ。原本ではなく別ファイルへ出力
+EVIDENCE:
+  - docs/ja/Help_Reference.md
+
+[NODE: READONLY_VIEWER]
+FACT: 通常版・Lite版とも閲覧専用ソフト (readonly_viewer.exe) を同梱。PDF・テキストを複数タブで開き、同名の .clrop の注釈を重ねて表示 (編集は不可)
+EVIDENCE:
+  - README.md
+  - docs/ja/Help_Reference.md
 ```
 
 ---

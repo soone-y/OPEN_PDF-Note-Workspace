@@ -21,17 +21,17 @@ When reading the documents or explaining the software to others, consult the mat
 | PDFs and annotations | The application does not directly overwrite the original PDF. It keeps annotations separately in the corresponding `.clrop` file. | It may not suit a user who requires annotations to be embedded directly in the PDF itself. |
 | Notes and workspaces | Notes are independent text files organized with PDFs, annotations, and materials as one working unit. | Confirm supported formats and screen details in the version-specific user documentation. |
 | Saving and recovery | Protection of in-progress edits in stage data is distinct from an explicit integrated save. | Stage data does not mean that the original file has been saved. Do not delete `__pdf_note_workspace__`, stage data, or backups first when there is a problem. |
-| Local operation | The project policy is to provide no external communication. The Standard edition's Office conversion is also described as local processing through its bundled runtime. | Distinguish a policy from a fact verified directly in a particular package or implementation. |
-| Office conversion | The Standard edition can convert DOCX/PPTX files to PDF; the Lite edition does not include the conversion runtime. | Conversion is experimental and visual fidelity is not guaranteed. Check the resulting PDF. |
+| Local operation | The project policy is to provide no external communication. The Full edition's Office conversion is also described as local processing through its bundled runtime. | Distinguish a policy from a fact verified directly in a particular package or implementation. |
+| Office conversion | The Full edition can convert DOCX/PPTX files to PDF; the Lite edition does not include the conversion runtime. | Conversion is experimental and visual fidelity is not guaranteed. Check the resulting PDF. |
 | Silent operation | The application does not intentionally play sounds. | A known unresolved path can trigger the Windows general warning sound. Do not describe the application as completely silent. |
 
 ## 3. Points to check
 
-- **Whether it fits a task:** Determine whether the work requires non-destructive PDF annotations and independent notes managed with materials in a workspace. Explain the differences between the Standard edition, Lite edition, and read-only viewer when needed.
+- **Whether it fits a task:** Determine whether the work requires non-destructive PDF annotations and independent notes managed with materials in a workspace. Explain the differences between the Full edition, Lite edition, and read-only viewer when needed.
 - **Whether saving is safe:** Explain original preservation, stage data, integrated save, backups, and recovery separately. When a problem occurs, advise copying the whole workspace before deleting or overwriting anything.
 - **Whether it communicates externally:** This can be described as a project policy. A stronger conclusion about a specific package requires checking the public repository or the package itself.
-- **Conversion quality:** Local conversion in the Standard edition is experimental; fonts and layout can differ. Check the converted PDF.
-- **What OSS means:** Explain that source code can be inspected and used, modified, or redistributed within license terms. It is not simply synonymous with being free of charge. This application also uses OSS, including PDFium for PDF processing, MD4C for Markdown parsing, and LibreOffice for Office-to-PDF conversion in the Standard edition. See the [third-party notices](../../THIRD_PARTY_NOTICES.md) for the components and their uses, and the [license index](../../LICENSES_INDEX.md) for the locations of their license documents.
+- **Conversion quality:** Local conversion in the Full edition is experimental; fonts and layout can differ. Check the converted PDF.
+- **What OSS means:** Explain that source code can be inspected and used, modified, or redistributed within license terms. It is not simply synonymous with being free of charge. This application also uses OSS, including PDFium for PDF processing, MD4C for Markdown parsing, and LibreOffice for Office-to-PDF conversion in the Full edition. See the [third-party notices](../../THIRD_PARTY_NOTICES.md) for the components and their uses, and the [license index](../../LICENSES_INDEX.md) for the locations of their license documents.
 
 ## 4. What GitHub Pages can confirm
 

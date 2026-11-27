@@ -16,6 +16,15 @@ See [Saving and Recovery](Save_and_Recovery.md) for protected work and recovery.
 
 Check the intended use of the file type in [File Formats](File_Formats.md). Do not rename extensions or alter original and working files by hand.
 
+## Other common situations
+
+| Situation | First step | Background |
+| --- | --- | --- |
+| Dropping a DOCX/PPTX in Lite does not produce a PDF | Prepare a PDF and import it, or use Full | Lite has no conversion runtime, so it does not convert Office files to PDF. Lite shows `Lite` in its window title |
+| Full reports that the LibreOffice conversion runtime was not found | Extract the Full ZIP again into a new empty folder and start it without mixing files from another folder | A missing runtime does not switch the application to Lite. Restore the complete Full distribution folder |
+| A message appears when you open a PDF with **Open with**, or the file does not open | Check whether the file is inside the workspace. To view a single file outside the workspace, use the Read-only Viewer (`readonly_viewer.exe`) | The main application opens PDFs and images inside the workspace directly. For files outside it, it shows a safety notice instead |
+| The Windows general warning sound plays during an operation | Record the operation, the application version, and the Windows version. Do not accept the problem by turning off Windows sounds | This sound is not an intended notification; it is a known, unresolved problem. It does not mean a file is damaged, but please report it with reproduction details |
+
 ## A window does not appear, or another package is found
 
 Starting again from the same package location brings the existing main window forward. Packages at different locations can run independently, but concurrent access to the same protected PDF, note, or related document is restricted.
@@ -38,7 +47,7 @@ Folders such as `__unsaved__` and `__backup__` can contain unsaved and recovery 
 
 ## Inspect log and generated-file sizes
 
-Use Help > Checks > Asset presence check > Check sizes to inspect the selected workspace's management directory and its logs, temporary work, recovery and working data, save backups, operation recovery, and memo backups. The list shows sizes, observed file counts and changes; Details includes exact byte counts, the size-check time and completion state.
+Use Help > Checks > Asset presence check > Measure size to inspect the selected workspace's whole management directory (the **Resource folder (__pdf_note_workspace__)** row) and the **Logs (including ZIP copies and check logs)**, **Temporary files (__tmp__)**, **Unsaved-edit protection (__unsaved__)**, **Save backups (__backup__)**, **File-operation records (__operations__)**, and **Memo backups** rows. Folders without their own row, such as edit recovery (`__recovery__`), are included in the whole-management-directory row. The list shows sizes, observed file counts and changes; Details includes exact byte counts, the size-check time and completion state.
 
 Scanning runs in the background after an explicit action. It creates, changes and deletes no files. Original PDFs and other files outside the management directory are excluded; links are not followed. Sizes sum logical file sizes per name, rather than disk allocation. Parent rows contain child rows, so do not add the rows together. The log-directory row includes ZIP copies and inspection logs, separately from the five diagnostic logs' 10 MB budget.
 
