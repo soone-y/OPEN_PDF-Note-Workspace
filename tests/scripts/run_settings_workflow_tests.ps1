@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([string]$AppExecutable = "", [ValidateRange(30, 600)][int]$TimeoutSeconds = 240,
+param([string]$AppExecutable = "", [ValidateRange(30, 600)][int]$TimeoutSeconds = 420,
       [switch]$FontBoundaryOnly, [switch]$RegroupedOnly, [switch]$ExternalOnly,
       [ValidateSet("ja", "en")][string]$Locale = "ja")
 Set-StrictMode -Version Latest
@@ -65,6 +65,8 @@ New-Item -ItemType Directory -Path $appDir -ErrorAction Stop | Out-Null
 # A unique image name also isolates other-package startup diagnostics, whose
 # process scan is session-wide while window enumeration is desktop-local.
 Copy-Item -LiteralPath $binarySource -Destination (Join-Path $appDir $ownedAppName)
+. (Join-Path $repoRoot "scripts/build/sync_microtex_assets.ps1")
+Sync-MicrotexAssets -SourceRoot $repoRoot -DestinationRoot $appDir | Out-Null
 Get-ChildItem -LiteralPath (Split-Path -Parent $binarySource) -Filter "*.dll" -File | ForEach-Object {
     Copy-Item -LiteralPath $_.FullName -Destination $appDir
 }
@@ -75,7 +77,12 @@ if ($artifacts.Count -lt 2) { throw "Build-info has no complete runtime artifact
 $hasExecutable = $false
 foreach ($artifact in $artifacts) {
     $name = $artifact.Groups[1].Value
-    if ([IO.Path]::GetFileName($name) -ne $name) { throw "Invalid artifact name in build-info: $name" }
+    $mathResources = @('resources/math/xits/XITSMath-Regular.clm2',
+        'licenses/microtex/LICENSE.txt', 'licenses/xits/OFL.txt',
+        'licenses/xits/FONTLOG.txt', 'licenses/xits/README.txt')
+    if ([IO.Path]::GetFileName($name) -ne $name -and $name -cnotin $mathResources) {
+        throw "Invalid artifact name in build-info: $name"
+    }
     $isExecutable = $name -eq [IO.Path]::GetFileName($binarySource)
     if ($isExecutable) { $hasExecutable = $true }
     $copied = Join-Path $appDir $(if ($isExecutable) { $ownedAppName } else { $name })

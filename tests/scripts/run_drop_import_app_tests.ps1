@@ -47,6 +47,8 @@ foreach ($phase in @('drop', 'restart')) {
     if ($phase -eq 'restart') { $arguments += '--verify-restart' }
     if ($Layout -eq 'separate_directories') { $arguments += '--separate-directories' }
     if ($arguments.Count) { $startOptions.ArgumentList = $arguments }
+    . (Join-Path $repoRoot "scripts/build/sync_microtex_assets.ps1")
+    Sync-MicrotexAssets -SourceRoot $repoRoot -DestinationRoot $outputDir | Out-Null
     $process = Start-Process @startOptions
     $ownedHandle = $process.Handle
     # Include the full 100 MB copy comparison and recursive-import cases in one bounded phase.

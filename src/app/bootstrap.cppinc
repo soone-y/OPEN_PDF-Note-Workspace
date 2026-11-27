@@ -357,7 +357,7 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     int searchExitCode = 0;
     if (search::TryRunProcess(&searchExitCode)) return searchExitCode;
     int recoveryExitCode = 0;
-    if (recovery::TryRunStageRecoveryProcess(&recoveryExitCode)) return recoveryExitCode;
+    if (recovery::TryRunStandaloneRecovery(&recoveryExitCode)) return recoveryExitCode;
     SetUnhandledExceptionFilter(CrashLogFilter);
     g_mainThreadId = GetCurrentThreadId();
     {
@@ -380,6 +380,19 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     }
     const std::wstring mutexName = SingleInstanceMutexName();
     const std::wstring readyEventName = SingleInstanceReadyEventName();
+    // The standalone recovery tool owns the originals while it runs. Never
+    // start a second owner of the same files underneath it.
+    if (!backgroundAutomation) {
+        HANDLE recoveryTool = OpenMutexW(SYNCHRONIZE, FALSE,
+                                         recovery::StandaloneRecoveryMutexName().c_str());
+        if (recoveryTool) {
+            CloseHandle(recoveryTool);
+            ShowSilentMessageDialog(nullptr, localization::Text(L"recovery.tool.title"),
+                                    localization::Text(L"recovery.tool.blocks_main_app"),
+                                    SoftNoticeKind::Warning);
+            return 0;
+        }
+    }
     g_hSingleInstanceMutex = CreateMutexW(nullptr, TRUE, mutexName.c_str());
     if (g_hSingleInstanceMutex && GetLastError() == ERROR_ALREADY_EXISTS) {
         if (backgroundAutomation) {
@@ -648,6 +661,22 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
                             continue;
                         }
                     } else {
+                        // Esc keeps the PDF pane and the left lists where they are:
+                        // it only leaves transient selections there.
+                        HWND escFocus = GetFocus();
+                        if (escFocus && g_hPdfView &&
+                            (escFocus == g_hPdfView || IsChild(g_hPdfView, escFocus))) {
+                            if (isEscKey) {
+                                ClearPdfTextSelection();
+                                ClearPdfAnnotationSelection();
+                                InvalidateRect(g_hPdfView, nullptr, FALSE);
+                            }
+                            continue;
+                        }
+                        if (escFocus && (escFocus == g_hLectureList || escFocus == g_hSessionList ||
+                                         escFocus == g_hPdfList || escFocus == g_hNoteList)) {
+                            continue;
+                        }
                         if (g_noteVimModeEnabled && g_noteNormalMode) {
                             // Esc and Ctrl+[ cancel pending commands/Visual
                             // without moving the note command owner to PDF.

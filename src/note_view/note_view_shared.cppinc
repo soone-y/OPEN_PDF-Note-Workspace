@@ -1,3 +1,5 @@
+#include "note/note_math_render_cache.h"
+#include "math/math_source.h"
 // Shared note-view state, parsing, rendering, and common helpers.
 // Included by note_view.cpp to keep a single translation unit while narrowing edit scope.
 
@@ -83,8 +85,7 @@ size_t& Access_renderIndexedTextLength();
 size_t& Access_lastParsedMarkupLength();
 size_t& Access_lastParsedMarkupWindowTextLength();
 int& Access_lastParsedMarkupBaseFontHeightPx();
-std::unordered_map<std::wstring, std::shared_ptr<mathrender::Node>>& Access_noteMathNodeCache();
-std::unordered_map<std::wstring, mathrender::Layout>& Access_noteMathLayoutCache();
+note::NoteMathRenderCache& Access_noteMathCache();
 note::NoteLayoutMetricsSnapshot& Access_noteMeasuredLayoutSnapshot();
 note::NoteLayoutMetricsSnapshot& Access_noteAppliedLayoutSnapshot();
 int& Access_noteRenderedContentRightPx();
@@ -110,8 +111,7 @@ TableRenderLayoutCache& Access_tableRenderLayoutCache();
 #define g_lastParsedMarkupLength Access_lastParsedMarkupLength()
 #define g_lastParsedMarkupWindowTextLength Access_lastParsedMarkupWindowTextLength()
 #define g_lastParsedMarkupBaseFontHeightPx Access_lastParsedMarkupBaseFontHeightPx()
-#define g_noteMathNodeCache Access_noteMathNodeCache()
-#define g_noteMathLayoutCache Access_noteMathLayoutCache()
+#define g_noteMathCache Access_noteMathCache()
 #define g_noteMeasuredLayoutSnapshot Access_noteMeasuredLayoutSnapshot()
 #define g_noteAppliedLayoutSnapshot Access_noteAppliedLayoutSnapshot()
 #define g_noteRenderedContentRightPx Access_noteRenderedContentRightPx()
@@ -656,7 +656,6 @@ static void PaintNativeNoteClient(HWND hWnd, HDC hdc, HRGN clipRegion = nullptr)
 struct LineCache;
 struct Segment;
 static void ClearSearchHitHighlight(bool collapseSelectionIfStillOnHit);
-MAYBE_UNUSED static std::wstring RenderPlainMath(const std::wstring& tex);
 static void UpdateNotePreviewFromEdit(HWND hEdit);
 static void ResetNoteUndoBuffer(HWND hEdit);
 static void ResetParsedNoteDocumentState();
@@ -668,8 +667,6 @@ static bool NoteContentRouteSupportsLinkTargets(NoteContentRoute route);
 static bool CurrentNoteSupportsRenderOverlay();
 static bool CurrentNoteUsesTeXMathOnlyRender();
 static bool CanRenderTeXMathSpan(const note::MathSpan& mathSpan);
-static std::wstring NormalizeMarkupMathText(const std::wstring& s);
-static std::wstring StripLineJoins(const std::wstring& s);
 static std::vector<std::wstring> SplitLines(const std::wstring& s);
 static bool StartsWithAsciiNoCase(const std::wstring& s, const wchar_t* prefix);
 static bool EndsWithAsciiNoCase(const std::wstring& s, const wchar_t* suffix);
@@ -695,8 +692,6 @@ static const note::Diagnostic* FindFirstNoteDocumentDiagnosticForSpan(note::Span
 static std::wstring BuildAssistSnippet(std::wstring_view text, size_t limit = 160);
 
 struct MathDisplay;
-MAYBE_UNUSED static void DrawMathDisplay(const MathDisplay& m, HDC hdc, int x, int y, int fontPx, int availW,
-                                         int bottomY, mathrender::RenderStyle style, bool enhanceDepth = true);
 static int ResolveHeadingLevel(const LineCache& cache, const Segment& seg);
 static int ResolveLineIndent(const LineCache& cache);
 static void GetLineRenderMetrics(int line,
@@ -1695,6 +1690,7 @@ struct BottomAssistLineLayout {
     int clroAsciiOnlyIdx = -1;
     int quoteLazyContinuationIdx = -1;
     int listImplicitContinuationIdx = -1;
+    int listBodyAlignmentIdx = -1;
     int vimIdx = -1;
     int vimCaretLineRawTextIdx = -1;
     int vimClickInsertIdx = -1;
@@ -1741,6 +1737,10 @@ struct NoteInputStatusLabels {
         : IsNoteNormalVisualActive() ? L"note.assist.input.visual"
         : L"note.assist.input.normal";
     if (isFocusIn(g_hNoteCmdlineEdit)) modeId = L"note.assist.input.search";
+    else if (isFocusIn(g_hPdfView)) modeId = g_pdf.editingText ? L"note.assist.input.textbox" : L"note.assist.input.operation";
+    else if (isFocusIn(g_hLectureList) || isFocusIn(g_hSessionList) || isFocusIn(g_hPdfList) || isFocusIn(g_hNoteList)) {
+        modeId = L"note.assist.input.operation";
+    }
     return {localization::Text(operationId), localization::Text(focusId), localization::Text(modeId)};
 }
 
@@ -1779,9 +1779,6 @@ static std::wstring BuildBottomAssistText(BottomAssistLineLayout* outLayout) {
         return std::to_wstring(top) + L":" + std::to_wstring(100 - top);
     };
     const std::wstring mathMarginLabel = ratioLabel(g_config.noteMathMarginTopPercent);
-    const std::wstring supSubLabel = (g_config.noteMathSupSubGapSupPercent <= 0)
-        ? (englishUi ? L"Auto" : L"自動")
-        : ratioLabel(g_config.noteMathSupSubGapSupPercent);
     const int inlineMathVerticalAlignment =
         std::clamp(g_config.noteInlineMathVerticalAlignment, 0, 2);
     const wchar_t* inlineMathVerticalAlignmentLabelId =
@@ -1946,6 +1943,7 @@ static std::wstring BuildBottomAssistText(BottomAssistLineLayout* outLayout) {
         appendValue(L"settings.note.clro_ascii_only", onOff(g_config.clroAsciiOnly), &layout.clroAsciiOnlyIdx);
         appendValue(L"settings.note.clro_list_implicit_continuation", onOff(g_config.clroListImplicitContinuation),
                     &layout.listImplicitContinuationIdx);
+        appendValue(L"settings.note.clro_list_body_alignment", onOff(g_config.clroListBodyAlignment), &layout.listBodyAlignmentIdx);
         appendValue(L"settings.note.quote_lazy_continuation", onOff(g_config.noteQuoteLazyContinuation),
                     &layout.quoteLazyContinuationIdx);
     }
@@ -1967,7 +1965,6 @@ static std::wstring BuildBottomAssistText(BottomAssistLineLayout* outLayout) {
     appendValue(L"note.assist.grid", gridLabel);
     appendValue(L"note.assist.grid_pitch", gridPitchLabel);
     appendValue(L"note.assist.math_margin", mathMarginLabel);
-    appendValue(L"note.assist.sup_sub", supSubLabel);
     appendValue(L"settings.general.inline_math_vertical_alignment",
                 localization::Text(inlineMathVerticalAlignmentLabelId),
                 &layout.inlineMathVerticalAlignmentIdx);
@@ -2240,16 +2237,19 @@ static void SyncNoteWrapMenuState(HWND owner) {
     DrawMenuBar(owner);
 }
 
-static void ToggleClroSyntaxSetting(bool& setting, const wchar_t* failureMessageId) {
+static void ToggleClroSyntaxSetting(bool& setting, const wchar_t* failureMessageId, bool* exclusive = nullptr) {
     if (!note::IsClroMarkdownFile(CurrentNoteFileNameForParse())) return;
     if (IsNoteImeCanonicalChangeDeferred(g_hNoteEdit) || IsNoteImeComposing()) {
         ShowSoftNotice(g_hMainWnd, localization::Text(L"note.assist.finish_ime_first"), SoftNoticeKind::Info);
         return;
     }
     const bool previous = setting;
+    const bool otherPrevious = exclusive && *exclusive;
     setting = !previous;
+    if (setting && exclusive) *exclusive = false;
     if (!TryPersistConfig()) {
         setting = previous;
+        if (exclusive) *exclusive = otherPrevious;
         ShowSoftNotice(g_hMainWnd, localization::Text(failureMessageId), SoftNoticeKind::Warning);
         return;
     }
@@ -3007,7 +3007,6 @@ struct SegmentMeasureCache {
     bool valid = false;
     int baseFontHeight = 0;
     bool renderActive = false;
-    int mathSupSubGapSupPercent = 0;
     int spaceWidth = 0;
     int baseAveCharWidth = 0;
     int baseMaxCharWidth = 0;
@@ -3501,8 +3500,7 @@ static bool ShouldRenderMathSegment(const Segment& seg) {
 
 static std::wstring GetSegmentMathBody(const Segment& seg) {
     std::wstring body = !seg.mathText.empty() ? seg.mathText : StripMathDelims(seg.text);
-    body = StripLineJoins(body);
-    body = NormalizeMarkupMathText(body);
+    body = mathrender::NormalizeMarkupSource(body);
     return body;
 }
 
@@ -3827,8 +3825,7 @@ struct LocalNoteViewContext {
     size_t lastParsedMarkupLength = 0;
     size_t lastParsedMarkupWindowTextLength = 0;
     int lastParsedMarkupBaseFontHeightPx = 0;
-    std::unordered_map<std::wstring, std::shared_ptr<mathrender::Node>> mathNodeCache;
-    std::unordered_map<std::wstring, mathrender::Layout> mathLayoutCache;
+    note::NoteMathRenderCache mathCache;
     note::NoteLayoutMetricsSnapshot measuredLayoutSnapshot;
     note::NoteLayoutMetricsSnapshot appliedLayoutSnapshot;
 
@@ -3882,8 +3879,7 @@ struct LocalNoteViewContext {
         lastParsedMarkupLength = 0;
         lastParsedMarkupWindowTextLength = 0;
         lastParsedMarkupBaseFontHeightPx = 0;
-        mathNodeCache.clear();
-        mathLayoutCache.clear();
+        mathCache.Clear();
         measuredLayoutSnapshot.Reset();
         appliedLayoutSnapshot.Reset();
         renderedContentRightPx = 0;
@@ -4092,8 +4088,7 @@ inline size_t& Access_renderIndexedTextLength() {
 inline size_t& Access_lastParsedMarkupLength() { return GetViewContext(nullptr).lastParsedMarkupLength; }
 inline size_t& Access_lastParsedMarkupWindowTextLength() { return GetViewContext(nullptr).lastParsedMarkupWindowTextLength; }
 inline int& Access_lastParsedMarkupBaseFontHeightPx() { return GetViewContext(nullptr).lastParsedMarkupBaseFontHeightPx; }
-inline std::unordered_map<std::wstring, std::shared_ptr<mathrender::Node>>& Access_noteMathNodeCache() { return GetViewContext(nullptr).mathNodeCache; }
-inline std::unordered_map<std::wstring, mathrender::Layout>& Access_noteMathLayoutCache() { return GetViewContext(nullptr).mathLayoutCache; }
+inline note::NoteMathRenderCache& Access_noteMathCache() { return GetViewContext(nullptr).mathCache; }
 inline note::NoteLayoutMetricsSnapshot& Access_noteMeasuredLayoutSnapshot() { return GetViewContext(nullptr).measuredLayoutSnapshot; }
 inline note::NoteLayoutMetricsSnapshot& Access_noteAppliedLayoutSnapshot() { return GetViewContext(nullptr).appliedLayoutSnapshot; }
 inline int& Access_noteRenderedContentRightPx() { return GetViewContext(nullptr).renderedContentRightPx; }
@@ -5219,8 +5214,7 @@ static void ClearLegacyRenderCache() {
     g_lastParsedMarkupLength = 0;
     g_lastParsedMarkupWindowTextLength = 0;
     g_lastParsedMarkupBaseFontHeightPx = 0;
-    g_noteMathNodeCache.clear();
-    g_noteMathLayoutCache.clear();
+    g_noteMathCache.Clear();
     g_noteMeasuredLayoutSnapshot.Reset();
     g_noteAppliedLayoutSnapshot.Reset();
     g_noteRenderedContentRightPx = 0;
@@ -5234,66 +5228,14 @@ static void ClearLineCache() {
     ResetParsedNoteDocumentState();
 }
 
-static const mathrender::Node* GetCachedMathNode(const std::wstring& body) {
-    if (body.empty()) return nullptr;
-    auto it = g_noteMathNodeCache.find(body);
-    if (it != g_noteMathNodeCache.end()) return it->second.get();
-    if (g_noteMathNodeCache.size() > 512) {
-        g_noteMathNodeCache.clear();
-        g_noteMathLayoutCache.clear();
-    }
-    auto node = mathrender::Parse(body);
-    if (!node) return nullptr;
-    std::shared_ptr<mathrender::Node> shared(node.release());
-    auto [insIt, ok] = g_noteMathNodeCache.emplace(body, std::move(shared));
-    return insIt->second.get();
+static std::shared_ptr<const mathrender::Formula> GetCachedMathFormula(const std::wstring& body) {
+    return g_noteMathCache.Find(body);
 }
 
-static std::wstring BuildMathLayoutCacheKey(HDC hdc,
-                                            const std::wstring& body,
-                                            int fontPx,
-                                            mathrender::RenderStyle style) {
-    LOGFONTW lf{};
-    HGDIOBJ currentFont = hdc ? GetCurrentObject(hdc, OBJ_FONT) : nullptr;
-    if (currentFont) {
-        GetObjectW(currentFont, sizeof(lf), &lf);
-    }
-
-    std::wstring key;
-    key.reserve(body.size() + 96);
-    key.append(body);
-    key.push_back(L'\x1f');
-    key.append(std::to_wstring(std::max(1, fontPx)));
-    key.push_back(L'\x1f');
-    key.append(style == mathrender::RenderStyle::Display ? L"D" : L"I");
-    key.push_back(L'\x1f');
-    key.append(std::to_wstring(mathrender::GetSupSubGapSupPercent()));
-    key.push_back(L'\x1f');
-    key.append(lf.lfFaceName);
-    key.push_back(L'\x1f');
-    key.append(std::to_wstring(lf.lfWeight));
-    key.push_back(L'\x1f');
-    key.append(std::to_wstring(static_cast<int>(lf.lfItalic)));
-    key.push_back(L'\x1f');
-    key.append(std::to_wstring(static_cast<int>(lf.lfCharSet)));
-    return key;
-}
-
-static mathrender::Layout MeasureCachedMathLayout(const mathrender::Node& node,
-                                                  HDC hdc,
-                                                  const std::wstring& body,
-                                                  int fontPx,
-                                                  mathrender::RenderStyle style) {
-    fontPx = std::max(1, fontPx);
-    std::wstring key = BuildMathLayoutCacheKey(hdc, body, fontPx, style);
-    auto it = g_noteMathLayoutCache.find(key);
-    if (it != g_noteMathLayoutCache.end()) return it->second;
-    if (g_noteMathLayoutCache.size() > 2048) {
-        g_noteMathLayoutCache.clear();
-    }
-    mathrender::Layout layout = mathrender::Measure(node, hdc, fontPx, style);
-    g_noteMathLayoutCache.emplace(std::move(key), layout);
-    return layout;
+static mathrender::Layout MeasureCachedMathLayout(const mathrender::Formula& formula,
+                                                  HDC dc, const std::wstring&,
+                                                  int fontPx, mathrender::RenderStyle style) {
+    return mathrender::Measure(formula, dc, std::max(1, fontPx), style);
 }
 
 void SetNoteTyping(bool typing) {
@@ -9532,7 +9474,7 @@ static void AppendTeXSourceRawSegment(const std::wstring& text,
 static bool CanRenderTeXMathSpan(const note::MathSpan& mathSpan) {
     return IsNoteMathRenderActive() && !mathSpan.normalized_tex.empty() &&
            mathSpan.diagnostic_ids.empty() &&
-           GetCachedMathNode(mathSpan.normalized_tex) != nullptr;
+           GetCachedMathFormula(mathSpan.normalized_tex) != nullptr;
 }
 
 static bool HasOnlyTeXLineWhitespaceAfter(const std::wstring& text, size_t pos) {
@@ -10753,6 +10695,7 @@ void ApplyCurrentNoteViewConfiguration() {
             parsingChanged = kernel->SetClroAsciiOnly(g_config.clroAsciiOnly);
             parsingChanged = kernel->SetQuoteLazyContinuation(g_config.noteQuoteLazyContinuation) || parsingChanged;
             parsingChanged = kernel->SetClroListImplicitContinuation(g_config.clroListImplicitContinuation) || parsingChanged;
+            parsingChanged = kernel->SetClroListBodyAlignment(g_config.clroListBodyAlignment && !g_config.clroListImplicitContinuation) || parsingChanged;
         }
         if (parsingChanged) {
             workspace.InvalidateIndexes(entry.second.identity.note_id);
@@ -10768,8 +10711,7 @@ void ApplyCurrentNoteViewConfiguration() {
                 context.finalRenderLastCaret.reset();
                 context.finalVerticalNavigation.reset();
                 context.lastParsedMarkupBaseFontHeightPx = 0;
-                context.mathNodeCache.clear();
-                context.mathLayoutCache.clear();
+                context.mathCache.Clear();
                 context.measuredLayoutSnapshot.Reset();
                 context.appliedLayoutSnapshot.Reset();
             }
@@ -11152,7 +11094,7 @@ void UpdateNoteLineSpacing(std::optional<note::NoteDirtyGraph> pendingGraph) {
 
                             if (ShouldRenderMathSegment(seg)) {
                                 std::wstring mathBody = GetSegmentMathBody(seg);
-                                if (const mathrender::Node* node = GetCachedMathNode(mathBody)) {
+                                if (const auto node = GetCachedMathFormula(mathBody)) {
                                     auto layout = MeasureCachedMathLayout(*node,
                                                                           hdc,
                                                                           mathBody,

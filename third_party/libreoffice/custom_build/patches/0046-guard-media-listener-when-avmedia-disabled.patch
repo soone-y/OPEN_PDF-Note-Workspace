@@ -11,8 +11,8 @@
      OUString m_LastFailedPkgURL;
      // owned by the link manager while registered, null otherwise
      SdrMediaLink* m_pMediaLink = nullptr;
-@@ -474,7 +474,9 @@ void SdrMediaObj::setMediaProperties( const ::avmedia::MediaItem& rState )
-     if (m_xImpl->m_MediaProperties.getURL() != rState.getURL())
+@@ -491,7 +491,9 @@ void SdrMediaObj::mediaPropertiesChanged( const ::avmedia::MediaItem& rNewProper
+         ( rNewProperties.getURL() != getURL() ))
      {
          m_xImpl->m_xCachedSnapshot.clear();
 +#if HAVE_FEATURE_AVMEDIA
@@ -20,4 +20,4 @@
 +#endif
          // the URL is changing, so any link registered for the old one is stale
          ImpDeregisterLink();
-     }
+         m_xImpl->m_MediaProperties.setFallbackURL( rNewProperties.getFallbackURL() );

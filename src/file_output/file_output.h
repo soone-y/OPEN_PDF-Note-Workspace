@@ -145,7 +145,7 @@ struct StagedNoteSnapshotRef {
 // Save current note file regardless of dirty state (integrates current editor state to the note file).
 bool SaveNoteFile(HWND owner);
 
-// Stage current note and/or annotations into __pdf_note_workspace__/__tmp__ if dirty.
+// Stage current note and/or annotations into __pdf_note_workspace__/__unsaved__ if dirty.
 // This does NOT overwrite the original note/.clrop; integration is done via IntegrateStaged*.
 [[nodiscard]] bool SaveNoteIfDirty(HWND owner);
 bool EnsureCurrentNotePathForStage(HWND owner);
@@ -199,7 +199,7 @@ bool PromoteStagedDiff(const std::filesystem::path& stagePath);
 bool IntegrateStagedDiff(HWND owner, const std::filesystem::path& stagePath, bool forceSkipBackup = false);
 bool DiscardStagedDiff(const std::filesystem::path& stagePath);
 
-// Paths under __pdf_note_workspace__/__tmp__ used for staging.
+// Paths under __pdf_note_workspace__/__unsaved__ used for staging.
 std::filesystem::path StagedClropPathForPdf(const std::wstring& pdfPath);
 std::optional<StagedNoteSnapshotRef> FindLatestStagedNoteSnapshotFor(
     const std::wstring& notePath);
@@ -222,10 +222,14 @@ void DiscardOtherStagedClropFilesForPdf(const std::wstring& pdfPath, const std::
 void DiscardRedundantStagedNoteFilesMatchingOriginal(const std::wstring& notePath);
 void DiscardRedundantStagedClropFilesMatchingOriginal(const std::wstring& pdfPath);
 
-// Restore a file from a backup meta file created under __pdf_note_workspace__/__escape__/backup.
+// Restore a file from a backup meta file created under __pdf_note_workspace__/__backup__.
 // Returns the destination path via outDest if provided.
 bool RestoreFromBackupMeta(HWND owner, const std::filesystem::path& backupMetaPath, std::filesystem::path* outDest);
 bool DeleteBackupMeta(const std::filesystem::path& backupMetaPath, std::wstring* outErr);
+// The destination a restore would write, resolved the same way the restore
+// itself resolves it (including a workspace folder renamed since the backup
+// was made). Empty when the metadata cannot be read. Display only.
+std::filesystem::path BackupMetaDestination(const std::filesystem::path& backupMetaPath);
 
 // PDF export helpers.
 // A reservation binds its options and annotations to one original file version.

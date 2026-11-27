@@ -373,6 +373,11 @@ bool HandleWorkspaceMemoMessage(const MSG& message) {
 }
 
 bool SaveWorkspaceMemoForExit(bool interactive) { return Save(interactive); }
+bool CaptureWorkspaceMemoEditorText(std::wstring* out) {
+    if (!out || !editor || !IsWindow(editor)) return false;
+    try { *out = ReadEditor(); } catch (...) { return false; }
+    return true;
+}
 bool PrepareWorkspaceMemoRootChange() { return Save(true); }
 void ResetWorkspaceMemoForRootChange() {
     if (window) DestroyWindow(window); // caller already saved before committing root

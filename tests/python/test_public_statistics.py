@@ -219,6 +219,23 @@ class PreparedStatisticsTests(StatisticsFixture):
             preparation.seal(root, self.snapshot, "ja", "1.2.3", components)
         return root, identity
 
+    def test_source_preflight_rejects_before_build_and_writes_nothing(self):
+        repository = self.root / "repo"
+        repository.mkdir()
+        before = sorted(self.root.rglob("*"))
+        failure = ValueError("allowlisted directories contain files that are not tracked by Git")
+        with mock.patch.object(preparation, "release_snapshot_plan", side_effect=failure) as plan, \
+                mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            self.assertEqual(preparation.main(["preflight", "--repository", str(repository)]), 1)
+        plan.assert_called_once_with(repository.resolve())
+        self.assertIn("not tracked by Git", stderr.getvalue())
+        self.assertEqual(sorted(self.root.rglob("*")), before)
+        with mock.patch.object(preparation, "release_snapshot_plan") as plan, mock.patch("sys.stdout", new_callable=io.StringIO):
+            self.assertEqual(preparation.main(["preflight", "--repository", str(repository)]), 0)
+        self.assertEqual(sorted(self.root.rglob("*")), before)
+        with self.assertRaises(SystemExit), mock.patch("sys.stderr", new_callable=io.StringIO):
+            preparation.main(["begin", "--repository", str(repository)])
+
     def test_prepared_packages_are_not_candidates_and_adopt_without_data_loss(self):
         root, identity = self.prepared()
         before = file_records(root)

@@ -25,8 +25,20 @@ bool NoteTextCore::SetQuoteLazyContinuation(bool value) noexcept {
 
 bool NoteTextCore::SetClroListImplicitContinuation(bool value) noexcept {
     value = value && IsClroMarkdownFile(metadata_.file_name);
-    if (metadata_.clro_list_implicit_continuation == value) return false;
+    if (metadata_.clro_list_implicit_continuation == value &&
+        !(value && metadata_.clro_list_body_alignment)) return false;
+    if (value) metadata_.clro_list_body_alignment = false;
     metadata_.clro_list_implicit_continuation = value;
+    materialized_model_current_ = false;
+    return true;
+}
+
+bool NoteTextCore::SetClroListBodyAlignment(bool value) noexcept {
+    value = value && IsClroMarkdownFile(metadata_.file_name);
+    if (metadata_.clro_list_body_alignment == value &&
+        !(value && metadata_.clro_list_implicit_continuation)) return false;
+    metadata_.clro_list_body_alignment = value;
+    if (value) metadata_.clro_list_implicit_continuation = false;
     materialized_model_current_ = false;
     return true;
 }

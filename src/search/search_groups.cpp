@@ -1,4 +1,5 @@
 #include "search/search_groups.h"
+#include "core/workspace_layout.h"
 #include "search/search_wire.h"
 #include "core/atomic_write.h"
 #include "diagnostics/write_checks.h"
@@ -84,16 +85,20 @@ bool Groups::Save(const std::vector<Group>& groups) {
         if (!lock.acquired()) return false;
         std::string current; bool exists = false;
         if (!Read(path_, current, exists) || exists != existed_ || current != baseline_) return false;
-        const auto managed = workspace_ / L"__pdf_note_workspace__";
-        const auto temporary = managed / L"__tmp__";
-        const auto backup = managed / L"__escape__";
-        if (!write_checks::IsSafeLocalPath(temporary) || !write_checks::IsSafeLocalPath(backup)) return false;
+        const auto temporary = workspace_layout::Tmp(workspace_);
+        const auto backup = workspace_layout::Backup(workspace_);
+        const auto quarantine = workspace_layout::Failed(workspace_);
+        if (!write_checks::IsSafeLocalPath(temporary) || !write_checks::IsSafeLocalPath(backup) ||
+            !write_checks::IsSafeLocalPath(quarantine)) return false;
         if (exists && current != bytes) {
+            std::error_code dirError;
+            std::filesystem::create_directories(backup, dirError);
+            if (dirError) return false;
             const auto old = backup / (L"search_groups_" + std::to_wstring(GetCurrentProcessId()) + L"_" +
                                       std::to_wstring(GetTickCount64()) + L".bin");
-            if (PathExistsWin32(old) || !atomic_write::AtomicWriteUtf8(old, current, temporary, backup, &error)) return false;
+            if (PathExistsWin32(old) || !atomic_write::AtomicWriteUtf8(old, current, temporary, quarantine, &error)) return false;
         }
-        if (!atomic_write::AtomicWriteUtf8(path_, bytes, temporary, backup, &error)) return false;
+        if (!atomic_write::AtomicWriteUtf8(path_, bytes, temporary, quarantine, &error)) return false;
         std::string verify; bool installed = false;
         if (!Read(path_, verify, installed) || !installed || verify != bytes) return false;
         groups_ = groups; baseline_ = bytes; existed_ = true; return true;

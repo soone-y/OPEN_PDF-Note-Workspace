@@ -50,14 +50,23 @@ param(
     [switch]$Release,
     [switch]$VerboseOutput,
     [int]$FailureTailLines = 80,
-    [string]$LogDir = ""
+    [string]$LogDir = "",
+    # CI only: heavy Python tool tests proven unaffected, and where per-test results go.
+    [string]$PythonToolTestSkipFile = "",
+    [string]$PythonToolTestResultsDir = ""
 )
 
 # The literal Invoke-Step names are the runner's catalog; Office has three
 # mutually exclusive names determined by its comparison options.
 $stepSource = [System.IO.File]::ReadAllText($PSCommandPath)
-$knownSteps = @([regex]::Matches($stepSource, '(?m)^\s*Invoke-Step -Name "([^"]+)" -Action') | ForEach-Object { $_.Groups[1].Value })
+$knownSteps = @([regex]::Matches($stepSource, '(?m)^\s*Invoke-Step -Name "([^"]+)" -Action') | ForEach-Object { $_.Groups[1].Value } | Where-Object { $_ -notmatch '\$' })
 $knownSteps += @("Upstream Office Conversion Only", "Upstream Office PDF Regression Comparison", "Office Reduction Full Corpus Acceptance")
+# Python Tool Tests runs one step per group; tests/config/python_tool_test_groups.json
+# is the catalog. "core" holds every class the manifest does not assign.
+$pythonToolGroupManifest = Join-Path $PSScriptRoot "..\config\python_tool_test_groups.json"
+$pythonToolGroups = @("core") + @((Get-Content -Raw -Encoding UTF8 -LiteralPath $pythonToolGroupManifest |
+    ConvertFrom-Json).groups.PSObject.Properties.Name)
+$knownSteps += @($pythonToolGroups | ForEach-Object { "Python Tool Tests ($_)" })
 if ($ListSteps) {
     $knownSteps | ForEach-Object { Write-Output $_ }
     return
@@ -125,9 +134,8 @@ $officeConversionFixtureScript = Join-Path $PSScriptRoot "run_office_conversion_
 $officeUpstreamConversionScript = Join-Path $PSScriptRoot "run_office_upstream_conversion_tests.ps1"
 $uiAutomationScript = Join-Path $PSScriptRoot "run_ui_automation_fault_tests.ps1"
 $memoryDiagnosticsScript = Join-Path $PSScriptRoot "run_memory_diagnostics.ps1"
-$pythonToolTestScript = Join-Path $repoRoot "tests\python\test_python_tools.py"
+$pythonToolGroupRunner = Join-Path $repoRoot "tests\python\run_python_tool_groups.py"
 $codeStructureTestScript = Join-Path $PSScriptRoot "run_code_structure_tests.ps1"
-$dependencySecurityTestScript = Join-Path $repoRoot "tests\python\test_dependency_security_gate.py"
 $cloudflareSiteValidationScript = Join-Path $repoRoot "site\cloudflare\scripts\validate_introduction_site.py"
 $githubSiteBuildScript = Join-Path $repoRoot "site\github\scripts\build_public_site.py"
 $githubSiteValidationScript = Join-Path $repoRoot "site\github\scripts\validate_public_site.py"
@@ -414,7 +422,11 @@ function Assert-BuildInfoManifest {
     foreach ($record in $artifactRecords) {
         $artifactName = $record.Groups[1].Value
         $expectedHash = $record.Groups[2].Value.ToLowerInvariant()
-        if ([IO.Path]::GetFileName($artifactName) -ne $artifactName -or $artifactName -eq "." -or $artifactName -eq "..") {
+        $mathResources = @('resources/math/xits/XITSMath-Regular.clm2',
+            'licenses/microtex/LICENSE.txt', 'licenses/xits/OFL.txt',
+            'licenses/xits/FONTLOG.txt', 'licenses/xits/README.txt')
+        if (([IO.Path]::GetFileName($artifactName) -ne $artifactName -and $artifactName -cnotin $mathResources) -or
+            $artifactName -eq "." -or $artifactName -eq "..") {
             throw "Build info manifest contains an unsafe artifact name '$artifactName': $Path"
         }
         $artifactPath = Join-Path $manifestDir $artifactName
@@ -610,6 +622,9 @@ function Invoke-SafetyScans {
         'https?://purl\.org/',
         '\\scripts\\release\\pack_release\.ps1:\d+:.*https://soone-y\.github\.io/OPEN_PDF-Note-Workspace/STATISTICS\.html',
         '\\third_party\\zlib\\include\\zlib\.h:\d+:.*https://datatracker\.ietf\.org/doc/html/rfc1950\b',
+        # MicroTeX upstream documentation comments only (/** */ or //). Code-line URLs
+        # still fail, and the other safety scans keep covering MicroTeX sources.
+        '^\.[\\/]third_party[\\/]microtex[\\/][^:]+:\d+:\s*(?:\*|//).*https://',
         # MD4C test input only: callbacks consume parser data and never open links.
         # Match the complete fixture line; other URLs/APIs in this file still fail.
         '^\.[\\/]tests[\\/]unit[\\/]md4c_allocation_failure_tests\.c:\d+:\s*"https://example\.invalid/ test@example\.invalid\\n"\),\s*$',
@@ -623,6 +638,10 @@ function Invoke-SafetyScans {
         # Keep the complete call lines fixed; additional calls still fail.
         '^\.[\\/]src[\\/]recovery[\\/]stage_recovery_window\.cpp:\d+:\s*if \(!GetOpenFileNameW\(&dialog\)\)\s*$',
         '^\.[\\/]src[\\/]recovery[\\/]stage_recovery_window\.cpp:\d+:\s*if \(GetSaveFileNameW\(&dialog\)\)\s*$',
+        # Standalone recovery tool: folder picker only when the user starts
+        # `--recovery` without a workspace (the app's handoff passes one).
+        '^\.[\\/]src[\\/]recovery[\\/]standalone_recovery\.cpp:\d+:\s*IFileOpenDialog \*dialog = nullptr;\s*$',
+        '^\.[\\/]src[\\/]recovery[\\/]standalone_recovery\.cpp:\d+:\s*if \(FAILED\(CoCreateInstance\(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,\s*$',
         '^\.[\\/]tools[\\/]recovery_demo[\\/]demo_ui\.cpp:\d+:\s*if \(!GetOpenFileNameW\(&dialog\)\) \{ if \(CommDlgExtendedError\(\)\) Status\(L"open_failed"\); return; \}\s*$',
         '^\.[\\/]tools[\\/]recovery_demo[\\/]demo_ui\.cpp:\d+:\s*if \(!GetSaveFileNameW\(&dialog\)\) \{ if \(CommDlgExtendedError\(\)\) Status\(L"rescue_failed"\); return; \}\s*$',
         '\\src\\readonly_viewer\\main\.cpp:\d+:.*\b(?:IFileOpenDialog|CLSID_FileOpenDialog)\b',
@@ -870,6 +889,39 @@ try {
         }
     }
 
+    # Static gates take seconds and read only tracked sources and policy
+    # records. Run them right after the build so a release blocker or source
+    # regression surfaces before the long GUI and integration suites.
+    if (-not $SkipTextIntegrityGate) {
+        Invoke-Step -Name "Text Integrity Gate" -Action {
+            Invoke-PythonScript -ScriptPath $textIntegrityGateScript
+        }
+    }
+
+    if (-not $SkipDependencySecurityGate) {
+        Invoke-Step -Name "Dependency Security Gate" -Action {
+            Invoke-PythonScript -ScriptPath $dependencySecurityGateScript
+        }
+    }
+
+    if (-not $SkipCodebaseValidation) {
+        Invoke-Step -Name "Codebase Validation" -Action {
+            Invoke-PythonScript -ScriptPath $codebaseValidationScript
+        }
+    }
+
+    if (-not $SkipScriptAndTextGate) {
+        Invoke-Step -Name "Repository Script and Text Gate" -Action {
+            Invoke-PythonScript -ScriptPath $scriptAndTextGateScript
+        }
+    }
+
+    if (-not $SkipSafetyScan) {
+        Invoke-Step -Name "Safety Scans" -Action {
+            Invoke-SafetyScans
+        }
+    }
+
     Invoke-Step -Name "Publish Version History Tests" -Action {
         Invoke-ChildPowerShellScript -ScriptPath $publishVersionHistoryTestScript
     }
@@ -959,21 +1011,9 @@ try {
         }
     }
 
-    if (-not $SkipTextIntegrityGate) {
-        Invoke-Step -Name "Text Integrity Gate" -Action {
-            Invoke-PythonScript -ScriptPath $textIntegrityGateScript
-        }
-    }
-
     if (-not $SkipRuntimeDependencyTests) {
         Invoke-Step -Name "Runtime Dependency Tests" -Action {
             Invoke-ChildPowerShellScript -ScriptPath $runtimeDependencyScript
-        }
-    }
-
-    if (-not $SkipDependencySecurityGate) {
-        Invoke-Step -Name "Dependency Security Gate" -Action {
-            Invoke-PythonScript -ScriptPath $dependencySecurityGateScript
         }
     }
 
@@ -1076,9 +1116,23 @@ try {
     }
 
     if (-not $SkipPythonToolTests) {
-        Invoke-Step -Name "Python Tool Tests" -Action {
-            Invoke-PythonUnittestFile -TestFile $pythonToolTestScript
-            Invoke-PythonUnittestFile -TestFile $dependencySecurityTestScript
+        foreach ($pythonToolGroup in $pythonToolGroups) {
+            # Planned actions run after this loop; read the group from the running step name.
+            Invoke-Step -Name "Python Tool Tests ($pythonToolGroup)" -Action {
+                if ($script:CurrentStepName -notmatch '^Python Tool Tests \(([a-z0-9_]+)\)$') {
+                    throw "Cannot determine the Python tool test group: $script:CurrentStepName"
+                }
+                $group = $Matches[1]
+                Assert-ScriptExists -Path $pythonToolGroupRunner
+                if ([string]::IsNullOrWhiteSpace($pythonExe)) { throw "python.exe not found in PATH." }
+                $groupArguments = @($pythonToolGroupRunner, "--group", $group)
+                if ($PythonToolTestSkipFile) { $groupArguments += @("--skip-file", $PythonToolTestSkipFile) }
+                if ($PythonToolTestResultsDir) {
+                    $groupArguments += @("--results", (Join-Path $PythonToolTestResultsDir "$group.json"))
+                }
+                Invoke-LoggedCommand -FilePath $pythonExe -Arguments $groupArguments `
+                    -FailureMessage "python tool test group failed"
+            }
         }
     }
 
@@ -1100,24 +1154,6 @@ try {
             Invoke-PythonScript -ScriptPath $githubSiteValidationScript -Arguments @(
                 "--site", "site/github/output/public"
             )
-        }
-    }
-
-    if (-not $SkipCodebaseValidation) {
-        Invoke-Step -Name "Codebase Validation" -Action {
-            Invoke-PythonScript -ScriptPath $codebaseValidationScript
-        }
-    }
-
-    if (-not $SkipScriptAndTextGate) {
-        Invoke-Step -Name "Repository Script and Text Gate" -Action {
-            Invoke-PythonScript -ScriptPath $scriptAndTextGateScript
-        }
-    }
-
-    if (-not $SkipSafetyScan) {
-        Invoke-Step -Name "Safety Scans" -Action {
-            Invoke-SafetyScans
         }
     }
 

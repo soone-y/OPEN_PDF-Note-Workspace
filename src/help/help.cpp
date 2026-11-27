@@ -344,11 +344,11 @@ static std::wstring DefaultHelpTextJa() {
         L"- 必要なら保存メニューの「保存状態を確認」で内容を確認するか、先に Ctrl+S で保存してください。\n"
         L"\n"
         L"■ 保存先の目安\n"
-        L"- 自動作業保護: __pdf_note_workspace__/__tmp__/__stage__/\n"
-        L"- バックアップ本体: __pdf_note_workspace__/__escape__/backup/.../*.bak\n"
-        L"- バックアップ情報: __pdf_note_workspace__/__escape__/backup/.../*.bak.meta.txt\n"
-        L"- ノート保存失敗時の退避: __pdf_note_workspace__/__escape__/note_recovery/\n"
-        L"- 原子的保存に失敗した一時ファイルの退避先: __pdf_note_workspace__/__escape__/\n"
+        L"- 自動作業保護: __pdf_note_workspace__/__unsaved__/\n"
+        L"- バックアップ本体: __pdf_note_workspace__/__backup__/.../*.bak\n"
+        L"- バックアップ情報: __pdf_note_workspace__/__backup__/.../*.bak.meta.txt\n"
+        L"- 編集内容の復旧: __pdf_note_workspace__/__recovery__/\n"
+        L"- 書き込めなかった内容・壊れて読めないファイルの退避: __pdf_note_workspace__/__failed__/\n"
         L"\n"
         L"■ マークアップ\n"
         L"- font タグを使うと、指定範囲だけフォントを切り替えられます。\n"
@@ -370,7 +370,7 @@ static std::wstring DefaultHelpTextJa() {
         L"- ノート入力中、PDFテキスト編集中、IME変換中は、文字入力を優先します。\n"
         L"\n"
         L"■ 補足\n"
-        L"- 一時フォルダ (__pdf_note_workspace__/__tmp__) は、自動保存や中間処理に使います。\n"
+        L"- 一時フォルダ (__pdf_note_workspace__/__tmp__) は、書き込み途中の一時ファイルと Office 変換に使います。各フォルダーを削除してよいかは __pdf_note_workspace__/DELETE_OR_KEEP.txt に書いています。\n"
         L"- 単位の目安: pt = mm × 72 / 25.4\n";
 }
 
@@ -398,7 +398,7 @@ static std::wstring DefaultHelpTextEn() {
         L"- Save Work: safely apply protected work to the original files.\n"
         L"- Note protection updates on line move, focus leave, save, or 6-20s idle.\n"
         L"- Annotation protection updates on the configured background interval.\n"
-        L"- Switching documents or root folders only updates protected work; it does not write original files.\n"
+        L"- Switching documents or workspaces only updates protected work; it does not write original files.\n"
         L"- Undo/redo history is not retained after saving to the original files. Use Restore for PDF-position or last-open-time recovery; backups can be restored or individually deleted from the Restore menu.\n"
         L"\n"
         L"■ Note Formats\n"
@@ -440,11 +440,11 @@ static std::wstring DefaultHelpTextEn() {
         L"- Review save status from Save, or save with Ctrl+S if that is your intent.\n"
         L"\n"
         L"■ Typical Locations\n"
-        L"- Automatic work protection: __pdf_note_workspace__/__tmp__/__stage__/\n"
-        L"- Backup data: __pdf_note_workspace__/__escape__/backup/.../*.bak\n"
-        L"- Backup metadata: __pdf_note_workspace__/__escape__/backup/.../*.bak.meta.txt\n"
-        L"- Recovery copies for note save failures: __pdf_note_workspace__/__escape__/note_recovery/\n"
-        L"- Quarantined temp files from failed atomic writes: __pdf_note_workspace__/__escape__/\n"
+        L"- Automatic work protection: __pdf_note_workspace__/__unsaved__/\n"
+        L"- Backup data: __pdf_note_workspace__/__backup__/.../*.bak\n"
+        L"- Backup metadata: __pdf_note_workspace__/__backup__/.../*.bak.meta.txt\n"
+        L"- Edit recovery: __pdf_note_workspace__/__recovery__/\n"
+        L"- Content that could not be written and unreadable files: __pdf_note_workspace__/__failed__/\n"
         L"\n"
         L"■ Markup\n"
         L"- Use the font tag to switch fonts only for a selected range.\n"
@@ -466,7 +466,7 @@ static std::wstring DefaultHelpTextEn() {
         L"- Text input takes priority while editing notes, PDF text boxes, or IME composition.\n"
         L"\n"
         L"■ Notes\n"
-        L"- The temporary folder (__pdf_note_workspace__/__tmp__) is used for auto-save and intermediate work.\n"
+        L"- The temporary folder (__pdf_note_workspace__/__tmp__) holds files being written and Office conversion work. __pdf_note_workspace__/DELETE_OR_KEEP.txt says which folders may be deleted.\n"
         L"- Unit reference: pt = mm x 72 / 25.4\n";
 }
 
@@ -658,30 +658,30 @@ static std::wstring HelpSectionBody(int section, bool english) {
                L"\r\n\r\n左のカテゴリから詳しい説明を選べます。検索欄では現在のカテゴリ内を検索します。";
     case kHelpSectionSoftware:
         return english
-            ? L"■ Main application\r\n- Choose a root folder, edit notes and PDF annotations, save, recover, and export.\r\n- It works locally and does not use online conversion or update checks.\r\n\r\n■ Read-only Viewer\r\n- Opens bundled Markdown documents and files for reference without using the file association.\r\n- Use Help > Detailed guide when you need the longer bundled documents.\r\n"
-            : L"■ メインソフト\r\n- ルートフォルダを指定し、ノート・PDF注釈を編集、保存、復元、出力します。\r\n- オンライン変換・更新確認・外部通信は使いません。\r\n\r\n■ 読み取り専用Viewer\r\n- 同梱Markdownなどを、関連付けに頼らず参照するための別ソフトです。\r\n- 長い案内は「詳細な案内」から開きます。\r\n";
+            ? L"■ Main application\r\n- Choose a workspace, edit notes and PDF annotations, save, recover, and export.\r\n- It works locally and does not use online conversion or update checks.\r\n\r\n■ Read-only Viewer\r\n- Opens bundled Markdown documents and files for reference without using the file association.\r\n- Use Help > Detailed guide when you need the longer bundled documents.\r\n"
+            : L"■ メインソフト\r\n- ワークスペースを指定し、ノート・PDF注釈を編集、保存、復元、出力します。\r\n- オンライン変換・更新確認・外部通信は使いません。\r\n\r\n■ 読み取り専用Viewer\r\n- 同梱Markdownなどを、関連付けに頼らず参照するための別ソフトです。\r\n- 長い案内は「詳細な案内」から開きます。\r\n";
     case kHelpSectionFiles:
         return english
-            ? L"■ Root folder and files\r\n- File menu: choose/reload the root folder; create lectures, sessions, and .clro notes; import files or folders.\r\n" + localization::Text(L"help.workspace.drop_import") + L"\r\n- Operations: rename or move the current PDF/note only after selecting it.\r\n- Organize session files groups supported files in a session; review the result before saving.\r\n\r\n■ Formats\r\n- PDF and .clrop annotations are a pair. .clro/.md are notes; .txt/.csv are plain text.\r\n- UNC paths and reparse-point folders are not used as root folders, so local data stays predictable.\r\n"
-            : L"■ ルートフォルダとファイル\r\n- ファイルメニューから、ルートフォルダを指定／再読み込みする、講義・回次・.clroノートを作る、ファイルやフォルダを取り込みます。\r\n" + localization::Text(L"help.workspace.drop_import") + L"\r\n- 操作メニューの名前変更・移動は、選択中のPDFまたはノートだけを対象にします。\r\n- 回次のファイル整理は対応形式をまとめます。保存前に結果を確認してください。\r\n\r\n■ 形式\r\n- PDFと.clropは組です。.clro/.mdはノート、.txt/.csvは書式なしテキストです。\r\n- UNCや再解析ポイントのフォルダは、保存先を取り違えないためルートフォルダに使いません。\r\n";
+            ? L"■ Workspace and files\r\n- File menu: choose/reload the workspace; create lectures, sessions, and .clro notes; import files or folders.\r\n" + localization::Text(L"help.workspace.drop_import") + L"\r\n- Operations: rename or move the current PDF/note only after selecting it.\r\n- Organize session files groups supported files in a session; review the result before saving.\r\n\r\n■ Formats\r\n- PDF and .clrop annotations are a pair. .clro/.md are notes; .txt/.csv are plain text.\r\n- UNC paths and reparse-point folders are not used as workspaces, so local data stays predictable.\r\n"
+            : L"■ ワークスペースとファイル\r\n- ファイルメニューから、ワークスペースを指定／再読み込みする、授業・回次・.clroノートを作る、ファイルやフォルダを取り込みます。\r\n" + localization::Text(L"help.workspace.drop_import") + L"\r\n- 操作メニューの名前変更・移動は、選択中のPDFまたはノートだけを対象にします。\r\n- 回次のファイル整理は対応形式をまとめます。保存前に結果を確認してください。\r\n\r\n■ 形式\r\n- PDFと.clropは組です。.clro/.mdはノート、.txt/.csvは書式なしテキストです。\r\n- UNCや再解析ポイントのフォルダは、保存先を取り違えないためワークスペースに使いません。\r\n";
     case kHelpSectionMenus:
         return english
-            ? L"■ Menu map\r\n- File: create/import items, choose or reload the root folder, organize files, and open folders in Explorer.\r\n- Edit: undo/redo, rename, or move the current PDF or note.\r\n- View: closing, page navigation, zoom, scrolling, readability, note wrapping, and the left column.\r\n- Save: save the current work to the original or review protected work. Restore contains protected position/history recovery.\r\n- Output: quick PDF and TXT-note output, or the output dialog for PDF, PNG, TXT, Markdown, and HTML.\r\n- Tools: " + localization::Text(L"workspace_memo.title") + L", the read-only viewer, local conversion, and blank-PDF creation.\r\n- Search opens its dialog directly. Settings includes the unified dialog, palette, and presets. Help provides reference and diagnostics.\r\n"
-            : L"■ メニューの地図\r\n- ファイル: 作成・取込み、ルートフォルダの指定／再読込み、整理、エクスプローラーで開く操作です。\r\n- 編集: 現在のPDFまたはノートの取り消し／やりなおし、名前変更、移動です。\r\n- 表示: 閉じる、ページ移動、ズーム、スクロール、可視性、ノート折り返し、左カラムです。\r\n- 保存: 作業保存で原本へ安全に保存し、必要な場合に保存状態を確認します。復元には位置・履歴の復元をまとめます。\r\n- 出力: 簡単PDFと簡単ノート（txt）、またはPDF・PNG・txt・Markdown・HTMLを扱う出力ダイアログです。\r\n- ツール: " + localization::Text(L"workspace_memo.title") + L"、閲覧専用ソフト、ローカル変換、白紙PDF作成です。\r\n- 検索はダイアログを直接開きます。設定は統合ダイアログ、パレット、プリセットをまとめます。ヘルプは参照と診断です。\r\n";
+            ? L"■ Menu map\r\n- File: create/import items, choose or reload the workspace, organize files, and open folders in Explorer.\r\n- Edit: undo/redo, rename, or move the current PDF or note.\r\n- View: closing, page navigation, zoom, scrolling, readability, note wrapping, and the left column.\r\n- Save: save the current work to the original or review protected work. Restore contains protected position/history recovery.\r\n- Output: quick PDF and TXT-note output, or the output dialog for PDF, PNG, TXT, Markdown, and HTML.\r\n- Tools: " + localization::Text(L"workspace_memo.title") + L", the read-only viewer, local conversion, and blank-PDF creation.\r\n- Search opens its dialog directly. Settings includes the unified dialog, palette, and presets. Help provides reference and diagnostics.\r\n"
+            : L"■ メニューの地図\r\n- ファイル: 作成・取込み、ワークスペースの指定／再読込み、整理、エクスプローラーで開く操作です。\r\n- 編集: 現在のPDFまたはノートの取り消し／やりなおし、名前変更、移動です。\r\n- 表示: 閉じる、ページ移動、ズーム、スクロール、可視性、ノート折り返し、左カラムです。\r\n- 保存: 作業保存で原本へ安全に保存し、必要な場合に保存状態を確認します。復元には位置・履歴の復元をまとめます。\r\n- 出力: 簡単PDFと簡単ノート（txt）、またはPDF・PNG・txt・Markdown・HTMLを扱う出力ダイアログです。\r\n- ツール: " + localization::Text(L"workspace_memo.title") + L"、閲覧専用ソフト、ローカル変換、白紙PDF作成です。\r\n- 検索はダイアログを直接開きます。設定は統合ダイアログ、パレット、プリセットをまとめます。ヘルプは参照と診断です。\r\n";
     case kHelpSectionExtensions:
         return NormalizeNewlines(CustomExtensionHelpText());
     case kHelpSectionSaving:
         return english
-            ? L"■ Safe saving\r\n- Editing does not directly overwrite the original PDF or note.\r\n- Automatic work protection keeps intermediate edits for recovery.\r\n- Ctrl+S, Save > Save Work, normal exit, and pre-output processing create a backup and safely save to the original.\r\n- Document/session switching keeps protected work and does not write originals.\r\n\r\n■ Restore\r\n- Restore > PDF Position and Restore > Last Open Time can delete or restore the corresponding protected state.\r\n- Restore > File Last-Open History can delete or restore each session's last-open PDF and note record. Restore > Backups lists saved backups for restoration or individual deletion.\r\n- Review Save Status before restoring when protected work remains.\r\n\r\n■ Typical locations\r\n- Internal work protection: __pdf_note_workspace__/__tmp__/__stage__/\r\n- Backups: __pdf_note_workspace__/__escape__/backup/\r\n- Note recovery: __pdf_note_workspace__/__escape__/note_recovery/\r\n"
-            : L"■ 安全な保存\r\n- 編集中に元の PDF やノートを直接上書きしません。\r\n- 自動作業保護により、編集途中も復旧できるよう保持します。\r\n- Ctrl+S、「保存 > 作業保存」、通常終了、出力の直前には、バックアップを作成してから安全に原本へ保存します。\r\n- ファイル・回次・授業の切替では、保護中の作業を残し、原本は書き換えません。\r\n\r\n■ 復元\r\n- 「復元 > PDF位置」「復元 > 最終オープン時刻」では、対応する保護状態を削除または復元できます。\r\n- 「復元 > ファイル最終オープン履歴」では、回次ごとの最後に開いたPDF／ノートの記録を削除または復元できます。「復元 > バックアップ」では、保存済みバックアップを一覧から復元または個別に削除できます。\r\n- 保護中の作業があるときは、復元前に「保存状態を確認」を開いてください。\r\n\r\n■ 主な保存先\r\n- 内部作業保護: __pdf_note_workspace__/__tmp__/__stage__/\r\n- バックアップ: __pdf_note_workspace__/__escape__/backup/\r\n- ノート復旧: __pdf_note_workspace__/__escape__/note_recovery/\r\n";
+            ? L"■ Safe saving\r\n- Editing does not directly overwrite the original PDF or note.\r\n- Automatic work protection keeps intermediate edits for recovery.\r\n- Ctrl+S, Save > Save Work, normal exit, and pre-output processing create a backup and safely save to the original.\r\n- Document/session switching keeps protected work and does not write originals.\r\n\r\n■ Restore\r\n- Restore > PDF Position and Restore > Last Open Time can delete or restore the corresponding protected state.\r\n- Restore > File Last-Open History can delete or restore each session's last-open PDF and note record. Restore > Backups lists saved backups for restoration or individual deletion.\r\n- Review Save Status before restoring when protected work remains.\r\n\r\n■ Typical locations\r\n- Internal work protection: __pdf_note_workspace__/__unsaved__/\r\n- Backups: __pdf_note_workspace__/__backup__/\r\n- Edit recovery: __pdf_note_workspace__/__recovery__/\r\n"
+            : L"■ 安全な保存\r\n- 編集中に元の PDF やノートを直接上書きしません。\r\n- 自動作業保護により、編集途中も復旧できるよう保持します。\r\n- Ctrl+S、「保存 > 作業保存」、通常終了、出力の直前には、バックアップを作成してから安全に原本へ保存します。\r\n- ファイル・回次・授業の切替では、保護中の作業を残し、原本は書き換えません。\r\n\r\n■ 復元\r\n- 「復元 > PDF位置」「復元 > 最終オープン時刻」では、対応する保護状態を削除または復元できます。\r\n- 「復元 > ファイル最終オープン履歴」では、回次ごとの最後に開いたPDF／ノートの記録を削除または復元できます。「復元 > バックアップ」では、保存済みバックアップを一覧から復元または個別に削除できます。\r\n- 保護中の作業があるときは、復元前に「保存状態を確認」を開いてください。\r\n\r\n■ 主な保存先\r\n- 内部作業保護: __pdf_note_workspace__/__unsaved__/\r\n- バックアップ: __pdf_note_workspace__/__backup__/\r\n- 編集内容の復旧: __pdf_note_workspace__/__recovery__/\r\n";
     case kHelpSectionOutput:
         return english
             ? L"■ Quick output\r\n- Quick PDF exports the current PDF with annotations. Configure its scale and annotation options in Output Dialog > Save as Quick PDF.\r\n- Quick Note exports the current note as TXT; TXT is the default quick-note format. Configure its text options in Output Dialog > Save as Quick Note. View quick output settings opens a compact summary that can be closed immediately.\r\n\r\n■ Output dialog\r\n- Choose PDF output, PNG, TXT, Markdown, or HTML. The PDF page field initially selects all pages; edit it to choose a subset or change the order. Set a destination folder and output file name, then choose Export current or Add to queue. The queue stays available until the app exits, even if you close the dialog or open another file.\r\n- Select a reservation to change its destination or file name, then choose Update destination. Export selected and Export all queued create separate files. Successful jobs leave the queue; failed or canceled jobs remain. Move up/down changes the top-to-bottom order. Add reservations from each PDF you want to combine, then choose Merge queued PDFs when the queue contains at least two PDF outputs and every reservation is a PDF output. The merged file uses each reservation's pages, crop, scale, and annotations. Cancellation or failure retains the queue. Hover over the output folder field to see its complete path. TXT markup removal defaults to OFF. Output safely integrates current edits first; the open original and duplicate queued destinations are rejected.\r\n- The results dialog can reveal output in Explorer. PDFs can open in the read-only viewer; other formats open in their associated application.\r\n\r\n■ Safety\r\n- Output creates a separate result. Existing output files require explicit overwrite confirmation; protected PDFs can restrict copy and export.\r\n"
             : L"■ 簡単出力\r\n- 簡単PDFは、現在のPDFを注釈入りの別ファイルへ出力します。出力ダイアログで倍率・注釈を設定し「簡単PDFに設定」を選ぶと、その設定を使います。\r\n- 簡単ノートは、現在のノートをtxtで出力します。簡単出力の規定形式はtxtです。出力ダイアログでテキストの設定を保存できます。「簡単出力設定を見る」では、現在の設定をすぐ閉じられる小さなウィンドウで確認できます。\r\n\r\n■ 出力ダイアログ\r\n- PDF出力、PNG、txt、Markdown、HTMLを選べます。PDFのページ欄は全ページが初期値で、一部のページや順序の指定も同じ欄で行えます。保存先フォルダと出力ファイル名を指定し、「現在の内容を出力」または「予約に追加」を選びます。ダイアログを閉じたり別のファイルを開いたりしても、アプリ終了まで予約は残ります。\r\n- 予約を選び、保存先・ファイル名を変更して「保存先を更新」で確定します。「選択を出力」と「予約を一括出力」は予約ごとに別ファイルを作ります。成功した予約が外れ、失敗・上書き取消では予約が残ります。「上へ」「下へ」で順序を変更できます。複数のPDFを結合するには、各PDFを開いて必要なページを予約に追加します。PDFだけの予約が2件以上あると、「PDFを結合出力」で各予約のページ・抜き出し・倍率・注釈を反映して、上から1つのPDFにまとめられます。取消・失敗では予約を保持します。保存先フォルダ欄はホバーで全文を確認できます。txtのマークアップ除去は初期OFFです。出力前には現在の変更を安全に統合し、原本と同じ出力先や予約間の重複を防ぎます。\r\n- 出力後の結果一覧から、エクスプローラーで表示できます。PDFは閲覧専用ソフトで開き、その他の形式は対応アプリで開けます。\r\n\r\n■ 安全性\r\n- 出力は別の結果ファイルを作ります。既存の出力先だけは上書きを確認します。保護付きPDFではコピー・出力が制限されます。\r\n";
     case kHelpSectionView:
         return english
-            ? L"■ View menu\r\n- Reset/set zoom and use first/previous/next/last/jump-to page for PDF navigation.\r\n- Left column changes workspace navigation visibility. Bottom-right pane function switches between note, headings, math, and status assist immediately for the current run. Status assist has a subtle dedicated header and scrolls vertically when needed. Its Change settings group contains only controls available from this pane, including the page-number and zoom displays drawn over the PDF. These displays can be turned on or off independently. Monitor contains information only. Enabling keyboard controls moves focus directly to the note's normal mode. It does not save the pane choice; reloading the root folder or starting again restores the General settings default.\r\n- Readable low-contrast text improves difficult PDF text; single-page mode and scroll direction change reading behavior.\r\n- Note wrap is unavailable while rendered note mode requires its own layout.\r\n"
-            : L"■ 表示メニュー\r\n- 拡大率を初期化／指定し、先頭・前・次・末尾・ページ指定でPDFを移動します。\r\n- 左カラムはワークスペース一覧の表示、右下領域の機能はノート・見出し・数式・状態アシストへこの起動中だけ即時に切り替えます。状態アシストは色で強調せず、控えめな専用見出しでノート欄と区別します。内容が収まらない場合は縦スクロールできます。「変更できる項目」にはPDF上のページ番号表示・PDF上の倍率表示を含む、この欄から操作できる設定だけを置きます。ページ番号と倍率の表示は個別にON/OFFできます。「監視する項目」には確認用の情報だけを置きます。キーボード操作をONにすると、入力先は直ちにノートの通常モードへ移ります。領域の選択は保存されず、ルートフォルダを再読み込みしたとき・次回起動時は設定ダイアログの標準状態に戻ります。\r\n- 低コントラスト文字を可読化、単一ページ、スクロール方向は閲覧方法を変えます。\r\n- ノート折返しは、レンダリング表示のレイアウトが必要な場合には使えません。\r\n";
+            ? L"■ View menu\r\n- Reset/set zoom and use first/previous/next/last/jump-to page for PDF navigation.\r\n- Left column changes workspace navigation visibility. Bottom-right pane function switches between note, headings, math, and status assist immediately for the current run. Status assist has a subtle dedicated header and scrolls vertically when needed. Its Change settings group contains only controls available from this pane, including the page-number and zoom displays drawn over the PDF. These displays can be turned on or off independently. Monitor contains information only. Enabling keyboard controls moves focus directly to the note's normal mode. It does not save the pane choice; reloading the workspace or starting again restores the General settings default.\r\n- Readable low-contrast text improves difficult PDF text; single-page mode and scroll direction change reading behavior.\r\n- Note wrap is unavailable while rendered note mode requires its own layout.\r\n"
+            : L"■ 表示メニュー\r\n- 拡大率を初期化／指定し、先頭・前・次・末尾・ページ指定でPDFを移動します。\r\n- 左カラムはワークスペース一覧の表示、右下領域の機能はノート・見出し・数式・状態アシストへこの起動中だけ即時に切り替えます。状態アシストは色で強調せず、控えめな専用見出しでノート欄と区別します。内容が収まらない場合は縦スクロールできます。「変更できる項目」にはPDF上のページ番号表示・PDF上の倍率表示を含む、この欄から操作できる設定だけを置きます。ページ番号と倍率の表示は個別にON/OFFできます。「監視する項目」には確認用の情報だけを置きます。キーボード操作をONにすると、入力先は直ちにノートの通常モードへ移ります。領域の選択は保存されず、ワークスペースを再読み込みしたとき・次回起動時は設定ダイアログの標準状態に戻ります。\r\n- 低コントラスト文字を可読化、単一ページ、スクロール方向は閲覧方法を変えます。\r\n- ノート折返しは、レンダリング表示のレイアウトが必要な場合には使えません。\r\n";
     case kHelpSectionNotes:
         return english
             ? L"■ Note syntax\r\n- .clro, .md, and .markdown use the Markdown/MD4C route.\r\n- Supported custom markup can be combined with Markdown when needed.\r\n- Math notation is experimental; verify the display before relying on it.\r\n\r\n■ Plain text\r\n- .txt does not parse Markdown or custom markup. It has no rendered display or note-link features.\r\n"

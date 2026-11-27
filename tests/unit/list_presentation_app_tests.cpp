@@ -1,6 +1,7 @@
 // Link the application and inspect its real owner-drawn list controls.
 #include "core/app_core.h"
 #include "core/localization.h"
+#include "core/identity_path_scope.h"
 #include "ui/listbox_presentation.h"
 #include "ui/listbox_scroll.h"
 #include "ui/dialogs/annot_math_panel.h"
@@ -8,8 +9,11 @@
 #include "ui/layout.h"
 #include "workspace/list_label_batch.h"
 #include "workspace/workspace_tree.h"
+#include "workspace/workspace_actions.h"
+#include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <cwctype>
 #include <fstream>
 #include <iostream>
 #include <commctrl.h>
@@ -449,6 +453,219 @@ static void CheckNestedSessions(const std::filesystem::path& lecture) {
     std::cout << "Nested sessions PASS: full-path selection, direct files, type folders and internal folder exclusion.\n";
 }
 
+static std::filesystem::path PinTestPathKey(const std::filesystem::path& path) {
+    const auto local = identity_path_scope::LocalPath(path.wstring());
+    assert(local);
+    return *local;
+}
+
+static void CheckFilePins(const std::filesystem::path& lecture, const std::filesystem::path& session) {
+    const auto pdfPath = (session / L"pdf0.pdf").wstring();
+    const auto notePath = (session / L"note0.txt").wstring();
+    const auto imagePath = session / L"固定 画像.png";
+    const auto officePath = session / L"固定 資料.docx";
+    Write(imagePath, "image");
+    Write(officePath, "office");
+    assert(!IsPinnedTemporaryFilePath(pdfPath, false));
+    assert(!PinTemporaryFilePath((session / L"missing.pdf").wstring(), false));
+    assert(!PinTemporaryFilePath(session.wstring(), false));
+    assert(!PinTemporaryFilePath(notePath, false));
+    assert(PinTemporaryFilePath(pdfPath, false));
+    assert(PinTemporaryFilePath(pdfPath, false)); // Idempotent.
+    assert(!IsTemporaryFilePathInCurrentList(pdfPath, false));
+    const auto pinWorkspace = g_workspaceRoot;
+    g_workspaceRoot = (root / L"different_workspace").wstring();
+    assert(!IsPinnedTemporaryFilePath(pdfPath, false));
+    g_workspaceRoot = pinWorkspace;
+    assert(IsPinnedTemporaryFilePath(pdfPath, false));
+
+    // A lecture with sessions clears both file lists before a session is chosen.
+    // A PDF pin alone must survive this route, without requiring a pinned note.
+    const auto otherLecture = root / L"workspace/pin_other";
+    const auto otherSession = otherLecture / L"session1";
+    Write(otherSession / L"other.txt", "other");
+    LoadLectures();
+    int otherIndex = -1;
+    for (size_t i = 0; i < g_lectures.size(); ++i)
+        if (PinTestPathKey(g_lectures[i]) == PinTestPathKey(otherLecture)) otherIndex = static_cast<int>(i);
+    assert(otherIndex >= 0);
+    SendMessageW(g_hLectureList, LB_SETCURSEL, otherIndex, 0);
+    SendMessageW(g_hMainWnd, WM_COMMAND, MAKEWPARAM(0, LBN_SELCHANGE), reinterpret_cast<LPARAM>(g_hLectureList));
+    assert(PinTestPathKey(g_currentLecturePath) == PinTestPathKey(otherLecture));
+    assert(g_currentSessionPath.empty() && !g_sessions.empty());
+    assert(g_pdfFiles.size() == 1 && g_noteFiles.empty());
+    assert(PinTestPathKey(g_pdfFiles.front().path) == PinTestPathKey(pdfPath));
+    assert(ui::ListBoxText(g_hPdfList, 0) == localization::Text(L"main.ui.5581ff31a58e") + L"pdf0.pdf");
+
+    assert(PinTemporaryFilePath(notePath, true));
+    assert(PinTemporaryFilePath(imagePath.wstring(), false));
+    assert(PinTemporaryFilePath(officePath.wstring(), false));
+    std::wstring pdf, note;
+    LoadFiles({L"session1", otherSession.wstring()}, pdf, note);
+    assert(g_pdfFiles.size() == 3 && g_noteFiles.size() == 2);
+    assert(pdf.empty() && PinTestPathKey(note) == PinTestPathKey(otherSession / L"other.txt"));
+    const auto previousAutoOpen = g_config.sessionAutoOpenMode;
+    g_config.sessionAutoOpenMode = L"view";
+    AutoOpenSingleSessionFiles(g_hMainWnd);
+    assert(PinTestPathKey(g_currentNotePath) == PinTestPathKey(otherSession / L"other.txt"));
+    g_config.sessionAutoOpenMode = previousAutoOpen;
+    assert(UnpinTemporaryFilePath(imagePath.wstring(), false));
+    assert(std::none_of(g_pdfFiles.begin(), g_pdfFiles.end(), [&](const auto& entry) {
+        return PinTestPathKey(entry.path) == PinTestPathKey(imagePath);
+    }));
+    assert(PinTemporaryFilePath(imagePath.wstring(), false));
+    LoadFiles({L"session0", session.wstring()}, pdf, note);
+    const auto countPath = [](const auto& files, const auto& path) {
+        return std::count_if(files.begin(), files.end(), [&](const auto& file) {
+            return PinTestPathKey(file.path) == PinTestPathKey(path);
+        });
+    };
+    assert(countPath(g_pdfFiles, pdfPath) == 1 && countPath(g_noteFiles, notePath) == 1);
+    assert(UnpinTemporaryFilePath(pdfPath, false));
+    assert(countPath(g_pdfFiles, pdfPath) == 1); // A local file remains listed.
+    assert(!UnpinTemporaryFilePath(pdfPath, false));
+    // Removing a search entry also clears its pin, so a later reload cannot resurrect it.
+    auto noteKey = PinTestPathKey(notePath).wstring();
+    std::transform(noteKey.begin(), noteKey.end(), noteKey.begin(), ::towlower);
+    s_searchTempNoteKeys.insert(noteKey);
+    assert(RemoveTemporaryFilePathFromCurrentList(notePath, true));
+    assert(!IsPinnedTemporaryFilePath(notePath, true));
+    assert(!IsTemporaryFilePathInCurrentList(notePath, true));
+    assert(UnpinTemporaryFilePath(imagePath.wstring(), false));
+    assert(UnpinTemporaryFilePath(officePath.wstring(), false));
+    LoadFiles({L"session1", otherSession.wstring()}, pdf, note);
+    assert(g_pdfFiles.empty() && g_noteFiles.size() == 1);
+    assert(std::filesystem::file_size(pdfPath) == 4 && std::filesystem::file_size(notePath) == 4);
+    g_currentLecturePath = lecture.wstring();
+    LoadSessions(g_currentLecturePath);
+    LoadFiles({L"session0", session.wstring()}, pdf, note);
+    SyncLeftPaneSelection();
+    std::cout << "File pins PASS: PDF-only lecture switch, session reload, all list types, duplicates, unpin, temporary removal and unchanged sources.\n";
+}
+
+static void CheckSessionPins(const std::filesystem::path& lecture, const std::filesystem::path& session) {
+    const auto nested = lecture / L"spring/week1";
+    const auto otherLecture = root / L"workspace/pin_other";
+    const auto selectLecture = [&](const std::filesystem::path& path) {
+        for (size_t i = 0; i < g_lectures.size(); ++i) {
+            if (PinTestPathKey(g_lectures[i]) != PinTestPathKey(path)) continue;
+            SendMessageW(g_hLectureList, LB_SETCURSEL, i, 0);
+            SendMessageW(g_hMainWnd, WM_COMMAND, MAKEWPARAM(0, LBN_SELCHANGE), reinterpret_cast<LPARAM>(g_hLectureList));
+            assert(PinTestPathKey(g_currentLecturePath) == PinTestPathKey(path));
+            return;
+        }
+        assert(false);
+    };
+    const auto selectSession = [&](const std::filesystem::path& path) {
+        for (size_t i = 0; i < g_sessions.size(); ++i) {
+            if (PinTestPathKey(g_sessions[i].path) != PinTestPathKey(path)) continue;
+            SendMessageW(g_hSessionList, LB_SETCURSEL, i, 0);
+            SendMessageW(g_hMainWnd, WM_COMMAND, MAKEWPARAM(0, LBN_SELCHANGE), reinterpret_cast<LPARAM>(g_hSessionList));
+            return;
+        }
+        assert(false);
+    };
+    assert(PinSessionPath(session.wstring()));
+    assert(PinSessionPath(nested.wstring()));
+    assert(PinSessionPath(lecture.wstring())); // Direct files.
+    auto upperSession = session.wstring();
+    std::transform(upperSession.begin(), upperSession.end(), upperSession.begin(), ::towupper);
+    assert(PinSessionPath(upperSession));
+    assert(!PinSessionPath(otherLecture.wstring()));
+    assert(!PinSessionPath((lecture / L"missing").wstring()));
+    assert(RefreshWorkspaceList(g_hSessionList));
+    assert(std::count_if(g_sessions.begin(), g_sessions.end(), [&](const auto& item) {
+        return PinTestPathKey(item.path) == PinTestPathKey(session);
+    }) == 1);
+    selectLecture(otherLecture);
+    const auto labels = SessionDisplayLabelsForEntries(g_sessions, g_currentLecturePath);
+    for (size_t i = 0; i < g_sessions.size(); ++i) {
+        assert(labels[i] == SessionDisplayLabelForEntry(g_sessions[i], g_sessions, g_currentLecturePath));
+        if (PinTestPathKey(g_sessions[i].path) == PinTestPathKey(nested))
+            assert(labels[i] == localization::Text(L"main.ui.5581ff31a58e") + L"lecture / spring\\week1");
+    }
+    const auto withPins = NewSessionNameSuggestions();
+    const auto savedSessions = g_sessions;
+    g_sessions.erase(std::remove_if(g_sessions.begin(), g_sessions.end(), [](const auto& item) {
+        return !PinnedSessionLecturePath(item.path).empty();
+    }), g_sessions.end());
+    assert(withPins == NewSessionNameSuggestions());
+    g_sessions = savedSessions;
+    selectSession(nested);
+    assert(PinTestPathKey(g_currentLecturePath) == PinTestPathKey(lecture));
+    assert(PinTestPathKey(g_currentSessionPath) == PinTestPathKey(nested));
+    selectLecture(otherLecture);
+    selectSession(lecture);
+    assert(PinTestPathKey(g_currentLecturePath) == PinTestPathKey(lecture));
+    assert(PinTestPathKey(g_currentSessionPath) == PinTestPathKey(lecture));
+
+    const auto emptyLecture = root / L"workspace/lecture1";
+    selectLecture(emptyLecture);
+    assert(PinTestPathKey(g_currentSessionPath) == PinTestPathKey(emptyLecture));
+    assert(g_pdfFiles.empty() && g_noteFiles.empty() && g_currentNotePath.empty());
+    selectSession(nested);
+    assert(PinTestPathKey(g_currentLecturePath) == PinTestPathKey(lecture));
+    assert(PinTestPathKey(g_currentSessionPath) == PinTestPathKey(nested));
+
+    // A stale pin must fail before switching lectures or closing documents.
+    selectLecture(otherLecture);
+    const auto previousSession = g_currentSessionPath;
+    const auto previousNote = g_currentNotePath;
+    const auto unavailable = lecture / L"spring/unavailable";
+    std::filesystem::rename(nested, unavailable);
+    selectSession(nested);
+    assert(PinTestPathKey(g_currentLecturePath) == PinTestPathKey(otherLecture));
+    assert(g_currentSessionPath == previousSession && g_currentNotePath == previousNote);
+    std::filesystem::rename(unavailable, nested);
+
+    // Pins never grant access to a different workspace or an unregistered owner.
+    const auto savedWorkspace = g_workspaceRoot;
+    g_workspaceRoot = (root / L"another_workspace").wstring();
+    assert(PinnedSessionLecturePath(session.wstring()).empty());
+    g_sessions.clear();
+    AppendPinnedSessionsToCurrentList();
+    assert(g_sessions.empty());
+    g_workspaceRoot = savedWorkspace;
+    const auto savedLectures = g_lectures;
+    g_lectures.clear();
+    AppendPinnedSessionsToCurrentList();
+    assert(g_sessions.empty());
+    g_lectures = savedLectures;
+    assert(RefreshWorkspaceList(g_hSessionList));
+
+    // Successful directory changes update both folder and file pins; removal
+    // clears them instead of redirecting bookmarks into the deleted-items area.
+    const auto pinnedNote = nested / L"note/spring.txt";
+    assert(PinTemporaryFilePath(pinnedNote.wstring(), true));
+    const auto renamedNote = nested / L"note/renamed.txt";
+    std::filesystem::rename(pinnedNote, renamedNote);
+    UpdatePinsAfterDirectoryChange(pinnedNote, renamedNote);
+    assert(!IsPinnedTemporaryFilePath(pinnedNote.wstring(), true));
+    assert(IsPinnedTemporaryFilePath(renamedNote.wstring(), true));
+    std::filesystem::rename(renamedNote, pinnedNote);
+    UpdatePinsAfterDirectoryChange(renamedNote, pinnedNote);
+    const auto renamed = lecture / L"spring/renamed";
+    std::filesystem::rename(nested, renamed);
+    UpdatePinsAfterDirectoryChange(nested, renamed);
+    assert(PinnedSessionLecturePath(nested.wstring()).empty());
+    assert(PinTestPathKey(PinnedSessionLecturePath(renamed.wstring())) == PinTestPathKey(lecture));
+    assert(IsPinnedTemporaryFilePath((renamed / L"note/spring.txt").wstring(), true));
+    std::filesystem::rename(renamed, nested);
+    UpdatePinsAfterDirectoryChange(renamed, nested);
+    UpdatePinsAfterDirectoryChange(nested, {});
+    assert(PinnedSessionLecturePath(nested.wstring()).empty());
+    assert(!IsPinnedTemporaryFilePath(pinnedNote.wstring(), true));
+    assert(UnpinSessionPath(session.wstring()));
+    assert(UnpinSessionPath(lecture.wstring()));
+    assert(!UnpinSessionPath(lecture.wstring()));
+    assert(RefreshWorkspaceList(g_hSessionList));
+    assert(g_sessions.size() == 1); // Only pin_other/session1 remains.
+    selectLecture(lecture);
+    selectSession(session);
+    assert(std::filesystem::file_size(pinnedNote) == 6);
+    std::cout << "Session pins PASS: origin navigation, direct/nested sessions, deduplication, numbering, missing paths, workspace/registration scope, rename and removal.\n";
+}
+
 static void CALLBACK GuardModal(HWND, UINT, UINT_PTR, DWORD) {
     HWND window = nullptr;
     while ((window = FindWindowExW(nullptr, window, L"SilentDialogClass", nullptr))) {
@@ -540,6 +757,8 @@ static void CALLBACK CheckApp(HWND, UINT, UINT_PTR, DWORD) {
     CheckLabels(lecture, session);
     CheckContextReload(lecture, session);
     CheckNestedSessions(lecture);
+    CheckFilePins(lecture, session);
+    CheckSessionPins(lecture, session);
     std::error_code ec;
     assert(std::filesystem::file_size(session / L"note0.txt", ec) == 4 && !ec);
     KillTimer(nullptr, guard);

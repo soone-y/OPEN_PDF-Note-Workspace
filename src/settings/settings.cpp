@@ -1,5 +1,6 @@
 // file: settings/settings.cpp
 #include "settings/settings.h"
+#include "core/workspace_layout.h"
 #include "settings/settings_navigation.h"
 #include "settings/settings_scroll_prepaint.h"
 #include "settings/palette_stock_store.h"

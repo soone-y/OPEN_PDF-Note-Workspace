@@ -64,20 +64,20 @@ int main() {
     assert(At(result, Area::All).state == State::Unavailable && At(result, Area::All).error == ERROR_DIRECTORY);
     Seed(managed / L"__log__/crash.log", 11);
     Seed(managed / L"__tmp__/lo/a.bin", 20);
-    Seed(managed / L"__escape__/stage.bin", 30);
-    Seed(managed / L"__escape__/backup/a.pdf", 40);
-    Seed(managed / L"__escape__/operation_transactions/a.bin", 50);
+    Seed(managed / L"__unsaved__/stage.bin", 30);
+    Seed(managed / L"__backup__/a.pdf", 40);
+    Seed(managed / L"__operations__/a.bin", 50);
     Seed(managed / L"__memo__/backups/a.txt", 60);
     Seed(managed / L"other/settings.json", 70);
     // A locked document body remains countable: only directory metadata is read.
-    const HANDLE locked = CreateFileW((managed / L"__escape__/backup/a.pdf").c_str(), GENERIC_READ,
+    const HANDLE locked = CreateFileW((managed / L"__backup__/a.pdf").c_str(), GENERIC_READ,
         0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     assert(locked != INVALID_HANDLE_VALUE);
     assert(SetFileAttributesW((managed / L"__log__/crash.log").c_str(), FILE_ATTRIBUTE_READONLY));
     result = artifact_usage::Scan(root, cancel);
     assert(At(result, Area::All).state == State::Complete && At(result, Area::All).bytes == 281 && At(result, Area::All).files == 7);
     assert(At(result, Area::Logs).bytes == 11 && At(result, Area::Temporary).bytes == 20);
-    assert(At(result, Area::Recovery).bytes == 120 && At(result, Area::Recovery).files == 3);
+    assert(At(result, Area::Unsaved).bytes == 30 && At(result, Area::Unsaved).files == 1);
     assert(At(result, Area::SaveBackups).bytes == 40 && At(result, Area::Operations).bytes == 50 && At(result, Area::MemoBackups).bytes == 60);
     CloseHandle(locked);
     std::string content;
@@ -98,7 +98,7 @@ int main() {
         DenyRead denied(managed / L"__tmp__"); result = artifact_usage::Scan(root, cancel);
         assert(At(result, Area::All).state == State::Partial && At(result, Area::All).bytes == 272);
         assert(At(result, Area::Temporary).state == State::Partial && At(result, Area::Temporary).error == ERROR_ACCESS_DENIED);
-        assert(At(result, Area::Logs).state == State::Complete && At(result, Area::Recovery).state == State::Complete);
+        assert(At(result, Area::Logs).state == State::Complete && At(result, Area::Unsaved).state == State::Complete);
     }
     const auto outside = fixture / L"outside"; Seed(outside / L"untouched.pdf", 7000);
     Junction(managed / L"__log__/redirect", outside, fixture);

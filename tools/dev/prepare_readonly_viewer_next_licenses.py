@@ -13,6 +13,17 @@ PDFIUM_NOTICES = (
     'libpng.txt', 'llvm-libc.txt', 'pdfium.txt', 'simdutf.txt', 'zlib.txt',
 )
 
+# The standard viewer shares out/bin with the application and renders formulas
+# with the same MicroTeX code and XITS font. sync_microtex_assets.ps1 owns these
+# notices; the standard bundle requires the complete, byte-identical set without
+# copying or deleting it as part of the viewer's own 26-file notice bundle.
+APP_MATH_NOTICES = {
+    'licenses/microtex/LICENSE.txt': 'third_party/microtex/LICENSE',
+    'licenses/xits/OFL.txt': 'third_party/microtex/res/xits/OFL.txt',
+    'licenses/xits/FONTLOG.txt': 'third_party/microtex/res/xits/FONTLOG.txt',
+    'licenses/xits/README.txt': 'third_party/microtex/res/xits/README.txt',
+}
+
 
 def source_files(root: Path, locale: str, variant: str = 'prototype') -> dict[str, Path]:
     guide = 'readonly_viewer_next' if variant == 'prototype' else 'readonly_viewer'
@@ -46,6 +57,18 @@ def prepare(root: Path, output: Path, locale: str, check: bool, variant: str = '
         if not data: raise ValueError(f'Empty required license input: {sources[name]}')
         if not (output / name).resolve().is_relative_to(output):
             raise ValueError(f'Notice destination escapes prototype output: {name}')
+    companions = set()
+    if variant == 'standard':
+        for name, source in APP_MATH_NOTICES.items():
+            target = output / name
+            if not target.resolve().is_relative_to(output):
+                raise ValueError(f'Application notice escapes viewer output: {name}')
+            if not target.is_file():
+                raise ValueError(f'Application math notice missing: {name}')
+            expected_data = (root / source).read_bytes()
+            if not expected_data or target.read_bytes() != expected_data:
+                raise ValueError(f'Application math notice missing or hash mismatch: {name}')
+        companions = set(APP_MATH_NOTICES)
     manifest = {'locale': locale, 'scope': f'local-readonly-viewer-{variant}', 'files': {
         name: {'source': sources[name].relative_to(root).as_posix(), 'sha256': hashlib.sha256(data).hexdigest()}
         for name, data in content.items()}}
@@ -62,7 +85,7 @@ def prepare(root: Path, output: Path, locale: str, check: bool, variant: str = '
         target = output / name
         if not target.is_file() or target.read_bytes() != data:
             raise ValueError(f'License missing or hash mismatch: {name}')
-    expected = {name for name in content if name.startswith('licenses/')} | {'licenses/manifest.json'}
+    expected = {name for name in content if name.startswith('licenses/')} | {'licenses/manifest.json'} | companions
     actual = {p.relative_to(output).as_posix() for p in (output / 'licenses').rglob('*') if p.is_file()}
     if actual != expected: raise ValueError('Unexpected/stale files in prototype license bundle')
     return len(content)

@@ -1,5 +1,6 @@
 #include "diagnostics/artifact_usage.h"
 #include "core/path_safety.h"
+#include "core/workspace_layout.h"
 #include <cstddef>
 #include <cwchar>
 #include <limits>
@@ -18,8 +19,8 @@ public:
     HANDLE handle;
 };
 constexpr std::array<const wchar_t*, kAreaCount> kRelativeRootNames = {
-    L"", L"__log__", L"__tmp__", L"__escape__",
-    L"__escape__/backup", L"__escape__/operation_transactions", L"__memo__/backups"};
+    L"", workspace_layout::kLogName, workspace_layout::kTmpName, workspace_layout::kUnsavedName,
+    workspace_layout::kBackupName, workspace_layout::kOperationsName, L"__memo__/backups"};
 bool Prefix(const std::filesystem::path& parent, const std::filesystem::path& child) {
     auto p = parent.begin(), c = child.begin();
     for (; p != parent.end(); ++p, ++c) if (c == child.end() || _wcsicmp(p->c_str(), c->c_str())) return false;
@@ -163,7 +164,7 @@ Result Scan(const std::filesystem::path& workspace, const std::atomic_bool& canc
             }
             if (error) scanner.All(State::Unavailable, error);
             else if (scanner.Continue(0)) {
-                path = workspace / L"__pdf_note_workspace__";
+                path = workspace_layout::Root(workspace);
                 auto resource = scanner.Directory(path, true, error);
                 if (!resource) scanner.All(error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND
                     ? State::Missing : State::Unavailable, error);

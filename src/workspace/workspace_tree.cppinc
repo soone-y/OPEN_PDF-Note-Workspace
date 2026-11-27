@@ -306,6 +306,7 @@ void LoadSessions(const std::wstring& lecturePath) {
         g_sessions.push_back(std::move(direct));
     }
 
+    AppendPinnedSessionsToCurrentList();
     const auto labels = SessionDisplayLabelsForEntries(g_sessions, lecturePath);
     for (const auto& name : labels) {
         SendMessageW(g_hSessionList, LB_ADDSTRING, 0,
@@ -385,11 +386,6 @@ void LoadFiles(const SessionEntry& session, std::wstring& preferredPdf, std::wst
         g_pdfFiles.push_back(officeFile);
     }
 
-    // Pinned paths are deliberately independent from the selected session.
-    // Add them after scanning the session so a path which belongs to the
-    // session itself is not duplicated.
-    AppendPinnedTemporaryFilesToCurrentLists();
-
     // If no explicit preference, align PDF/Note to whichever was updated most recently.
     // - Newest note vs newest PDF decides the "anchor".
     // - The other side tries to follow by filename stem heuristic; if no match, fall back to newest.
@@ -420,6 +416,10 @@ void LoadFiles(const SessionEntry& session, std::wstring& preferredPdf, std::wst
 
     // PDF and note are managed independently. Keep any caller/default preference on each side
     // without trying to infer or auto-link the counterpart.
+
+    // Pins remain available but do not become another session's default file.
+    // Add them after choosing local preferences and avoid duplicate paths.
+    AppendPinnedTemporaryFilesToCurrentLists();
 
     std::sort(g_pdfFiles.begin(), g_pdfFiles.end(),
         [](const FileEntry& a, const FileEntry& b) {
@@ -539,7 +539,7 @@ void ReloadSessionsAndSelect(const std::wstring& lecturePath,
     LoadSessions(lectureText);
     if (desiredPath.empty()) return;
     const auto desired = identity_path_scope::LocalPath(desiredPath);
-    if (!desired) return;
+    if (!desired || (*desired != *localLecture && !identity_path_scope::Below(*desired, *localLecture))) return;
     int idx = -1;
     for (size_t i = 0; i < g_sessions.size(); ++i) {
         if (identity_path_scope::LocalPath(g_sessions[i].path) == desired) {

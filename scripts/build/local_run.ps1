@@ -1,4 +1,4 @@
-. (Join-Path $PSScriptRoot 'sample_workspace.ps1')
+﻿. (Join-Path $PSScriptRoot 'sample_workspace.ps1')
 
 function Get-LocalRunItem {
     param([string]$Path, [bool]$Directory)
@@ -144,7 +144,7 @@ function Invoke-LocalRunLayout {
                 }
             })
             if ($updates.Count -and (Test-LocalRunActive $target.Run)) {
-                Write-Warning "Local application is running; runtime update deferred until the next build: $($target.Run)"
+                Write-Warning "ローカルのアプリが起動中のため、実行環境の更新を次回ビルドまで延期しました (Local application is running; runtime update deferred until the next build): $($target.Run)"
                 continue
             }
             Initialize-LocalSampleWorkspace -RepositoryRoot $RepositoryRoot -RunPath $target.Run -Locale $Locale -Lite:$target.IsLite

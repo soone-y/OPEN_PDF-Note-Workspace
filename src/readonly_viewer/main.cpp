@@ -46,6 +46,8 @@
 #include "ui/shortcut_input_guard.h"
 #include "readonly_viewer/shortcut_reference.h"
 #include "text_preview_panel.h"
+#include "image_preview.h"
+#include "reader_math.h"
 #include "fpdfview.h"
 
 // The production entry owns the implementation; the comparison entry only
@@ -209,6 +211,7 @@ enum class ViewMode {
     Diagram,
     Pdf,
     Binary, // Appended so existing view-position indexes keep their meanings.
+    Image,
 };
 
 std::vector<std::wstring> g_filePaths;
@@ -233,6 +236,7 @@ struct OpenTab {
     std::vector<unsigned char> bytes;
     bool isBinary = false;
     bool isPdf = false;
+    bool isImage = false;
     bool loadError = false;
     bool isPartialText = false;
     ByteRange textRange{};
@@ -241,8 +245,10 @@ struct OpenTab {
     ViewMode viewMode = ViewMode::Raw;
     std::vector<int> jpLines;
     int totalLines = 1;
-    ReaderViewPosition readingPositions[6];
+    ReaderViewPosition readingPositions[7];
     reader_next::PdfViewState pdfPosition;
+    readonly_viewer::ImageViewState imagePosition;
+    std::shared_ptr<readonly_viewer::ReaderMathSet> math;
     textviewer::mermaid::DiagramViewState diagramPosition;
     std::vector<textviewer::mermaid::DiagramViewState> inlineDiagramPositions;
     std::shared_ptr<RenderedDocument> reading;
@@ -251,7 +257,7 @@ struct OpenTab {
 };
 bool IsClropPath(const std::wstring& path);
 bool CanChooseByteRange(const OpenTab& tab) {
-    return !tab.isPdf && !tab.loadError && tab.sourceSize > 0 && !IsClropPath(tab.path);
+    return !tab.isPdf && !tab.isImage && !tab.loadError && tab.sourceSize > 0 && !IsClropPath(tab.path);
 }
 std::vector<OpenTab> g_tabs;
 std::vector<OpenTab> g_closedTabs;
@@ -264,6 +270,8 @@ std::wstring g_sessionFolder;
 bool g_sessionFolderPersistent = false;
 textviewer::mermaid::MermaidSubsetPreview g_mermaidPreview;
 textviewer::mermaid::MermaidSubsetPreview g_detachedMermaidPreview;
+readonly_viewer::ImagePreview g_imagePreview;
+std::wstring g_imagePreviewPath;
 
 struct InlineDiagramPreview {
     size_t text_offset = 0;
@@ -649,6 +657,7 @@ struct LoadFileResult {
     uintmax_t source_size = 0;
     bool isBinary = false;
     bool isPdf = false;
+    bool isImage = false;
     bool requires_range_selection = false;
     bool cancelled = false;
     bool hasError = false;
@@ -740,6 +749,19 @@ std::wstring DecodeTextBytes(const std::vector<unsigned char>& bytes) {
         res.isBinary = true;
         res.isPdf = true;
         res.hasError = false;
+        return res;
+    }
+    if (readonly_viewer::IsImagePath(path)) {
+        // Pixels are decoded by the image panel from one complete read; no text range applies.
+        LoadFileResult res;
+        res.isBinary = true;
+        res.isImage = true;
+        std::error_code sizeError;
+        res.source_size = std::filesystem::file_size(path, sizeError);
+        if (sizeError) {
+            res.text = localization::Text(L"readonly.error.file_access_failed");
+            res.hasError = true;
+        }
         return res;
     }
 
@@ -1135,6 +1157,17 @@ bool ConfirmReloadChangedFile(HWND owner) {
     return state.reload;
 }
 
+constexpr wchar_t kImagePickerPatterns[] =
+    L"*.png;*.jpg;*.jpeg;*.jpe;*.jfif;*.bmp;*.dib;*.gif;*.tif;*.tiff;*.ico;*.webp;*.jxr;*.wdp;*.hdp;*.heic;*.heif;*.avif";
+
+bool IsTeXPath(const std::wstring& path) {
+    std::wstring extension = std::filesystem::path(path).extension().wstring();
+    std::transform(extension.begin(), extension.end(), extension.begin(), [](wchar_t c) {
+        return static_cast<wchar_t>(towlower(c));
+    });
+    return extension == L".tex";
+}
+
 bool IsMarkdownPath(const std::wstring& path) {
     std::wstring extension = std::filesystem::path(path).extension().wstring();
     std::transform(extension.begin(), extension.end(), extension.begin(), [](wchar_t c) {
@@ -1469,25 +1502,56 @@ DWORD CALLBACK ReadReaderRtf(DWORD_PTR cookie, LPBYTE buffer, LONG count, LONG* 
     memcpy(buffer, stream.bytes->data() + stream.offset, size);
     stream.offset += size; *copied = static_cast<LONG>(size); return 0;
 }
-[[nodiscard]] bool ApplyReadingDocument(const RenderedDocument& document) {
+[[nodiscard]] bool ApplyReadingDocument(const RenderedDocument& document, readonly_viewer::ReaderMathSet* math) {
     RECT rect{}; SendMessageW(g_hwndEditControl, EM_GETRECT, 0, reinterpret_cast<LPARAM>(&rect));
     HDC dc = GetDC(g_hwndEditControl);
     const int dpi = dc ? GetDeviceCaps(dc, LOGPIXELSX) : 96;
     if (dc) ReleaseDC(g_hwndEditControl, dc);
-    const std::string rtf = BuildReaderRtf(document, MulDiv(std::max(160L, rect.right - rect.left - 8), 1440, dpi));
+    const ReaderMathPicture picture = [math, dpi](const ReaderMath& item) {
+        return math ? readonly_viewer::BuildReaderMathPicture(*math, item, dpi) : std::string();
+    };
+    const std::string rtf = BuildReaderRtf(document, MulDiv(std::max(160L, rect.right - rect.left - 8), 1440, dpi), picture);
     ReaderRtfStream data{&rtf}; EDITSTREAM stream{};
     stream.dwCookie = reinterpret_cast<DWORD_PTR>(&data); stream.pfnCallback = ReadReaderRtf;
     ReaderRedrawScope editRedraw(g_hwndEditControl);
     SendMessageW(g_hwndEditControl, EM_SETBKGNDCOLOR, 0, reader_next::kPaper);
+    // msftedit drops embedded pictures while read-only. The generated RTF is
+    // streamed synchronously, so no input can arrive before read-only returns.
+    const bool pictures = !document.maths.empty();
+    if (pictures) SendMessageW(g_hwndEditControl, EM_SETREADONLY, FALSE, 0);
     SendMessageW(g_hwndEditControl, EM_STREAMIN, SF_RTF, reinterpret_cast<LPARAM>(&stream));
+    if (pictures && math) {
+        for (const ReaderMath& item : document.maths) {
+            const int descent = item.display ? 0 : readonly_viewer::ReaderMathDescentTwips(*math, item, dpi);
+            if (descent <= 0) continue;
+            CHARRANGE range{static_cast<LONG>(item.offset), static_cast<LONG>(item.offset + 1)};
+            SendMessageW(g_hwndEditControl, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&range));
+            CHARFORMAT2W format{};
+            format.cbSize = sizeof(format);
+            format.dwMask = CFM_OFFSET;
+            format.yOffset = -descent;
+            SendMessageW(g_hwndEditControl, EM_SETCHARFORMAT, SCF_SELECTION, reinterpret_cast<LPARAM>(&format));
+        }
+    }
+    if (pictures) SendMessageW(g_hwndEditControl, EM_SETREADONLY, TRUE, 0);
     SendMessageW(g_hwndEditControl, EM_SETSEL, 0, 0);
     SendMessageW(g_hwndEditControl, EM_SCROLLCARET, 0, 0);
     return stream.dwError == 0 && data.offset == rtf.size();
 }
 
 void PrepareReading(OpenTab& tab) {
-    if (tab.reading || tab.isBinary || tab.isPdf || IsClropPath(tab.path)) return;
-    tab.reading = std::make_shared<RenderedDocument>(RenderMarkdown(tab.rawText, g_isRichEdit ? &tab.diagrams : nullptr));
+    if (tab.reading || tab.isBinary || tab.isPdf || tab.isImage || IsClropPath(tab.path)) return;
+    // Formulas need embedded pictures, so they are prepared only for RichEdit.
+    const std::wstring fileName = std::filesystem::path(tab.path).filename().wstring();
+    if (g_isRichEdit && IsTeXPath(tab.path)) {
+        tab.math = readonly_viewer::CollectReaderMath(fileName, tab.rawText, readonly_viewer::ReaderMathSource::TeX);
+        tab.reading = std::make_shared<RenderedDocument>(RenderTeXSource(tab.rawText, tab.math->spans));
+    } else {
+        if (g_isRichEdit && IsMarkdownPath(tab.path))
+            tab.math = readonly_viewer::CollectReaderMath(fileName, tab.rawText, readonly_viewer::ReaderMathSource::Note);
+        tab.reading = std::make_shared<RenderedDocument>(RenderMarkdown(tab.rawText, g_isRichEdit ? &tab.diagrams : nullptr,
+            tab.math ? &tab.math->spans : nullptr));
+    }
     if (!tab.diagrams.empty()) {
         textviewer::mermaid::DiagramModel model;
         if (TryBuildRenderableMermaid(tab.diagrams, &model)) tab.combinedDiagram = std::move(model);
@@ -1626,19 +1690,20 @@ void UpdateModeButtons(ViewMode mode) {
     const bool hasTab = g_currentTab >= 0 && g_currentTab < static_cast<int>(g_tabs.size());
     const bool pdf = hasTab && g_tabs[g_currentTab].isPdf;
     const bool binary = hasTab && g_tabs[g_currentTab].isBinary;
+    const bool image = hasTab && g_tabs[g_currentTab].isImage;
     const int ids[] = {kDecoratedButtonId, kRawButtonId, kHexButtonId, kBinaryButtonId, kDiagramButtonId};
     const ViewMode modes[] = {ViewMode::Decorated, ViewMode::Raw, ViewMode::Hex, ViewMode::Binary, ViewMode::Diagram};
     const bool diagram = hasTab && g_tabs[g_currentTab].combinedDiagram.has_value();
     for (int i = 0; i < 5; ++i) {
         HWND button = GetDlgItem(g_hwndMain, ids[i]);
         const bool byte_mode = modes[i] == ViewMode::Hex || modes[i] == ViewMode::Binary;
-        EnableWindow(button, hasTab && !pdf && (byte_mode || (!binary && (modes[i] != ViewMode::Diagram || diagram))));
+        EnableWindow(button, hasTab && !pdf && !image && (byte_mode || (!binary && (modes[i] != ViewMode::Diagram || diagram))));
         reader_next::SetActive(button, hasTab && mode == modes[i]);
     }
     SetWindowTextW(GetDlgItem(g_hwndMain, kPdfRangeButtonId),
         localization::Text(pdf ? L"reader_next.range" : L"readonly.range.button").c_str());
     for (UINT id : {reader_next::kSearchId, reader_next::kFindPreviousId, reader_next::kFindNextId})
-        EnableWindow(GetDlgItem(g_hwndMain, id), hasTab && mode != ViewMode::Diagram);
+        EnableWindow(GetDlgItem(g_hwndMain, id), hasTab && mode != ViewMode::Diagram && mode != ViewMode::Image);
     for (UINT id : {reader_next::kZoomInId, reader_next::kZoomOutId, reader_next::kZoomResetId})
         EnableWindow(GetDlgItem(g_hwndMain, id), hasTab);
     InvalidateRect(g_hwndMain, nullptr, FALSE);
@@ -1658,9 +1723,10 @@ int g_displayedReadingWidth = 0;
 bool g_reflowQueued = false;
 bool g_publishingReaderView = false;
 void InvalidateReaderPreparation(OpenTab& tab) {
-    tab.reading.reset(); tab.diagrams.clear(); tab.combinedDiagram.reset();
+    tab.reading.reset(); tab.diagrams.clear(); tab.combinedDiagram.reset(); tab.math.reset();
     for (auto& position : tab.readingPositions) position = {};
-    tab.pdfPosition = {}; tab.diagramPosition = {}; tab.inlineDiagramPositions.clear();
+    tab.pdfPosition = {}; tab.diagramPosition = {}; tab.inlineDiagramPositions.clear(); tab.imagePosition = {};
+    if (g_imagePreviewPath == tab.path) { g_imagePreview.Clear(); g_imagePreviewPath.clear(); }
     if (g_displayedPath == tab.path) { g_displayedPath.clear(); g_displayedReading = nullptr; }
 }
 void RememberReaderView() {
@@ -1670,6 +1736,10 @@ void RememberReaderView() {
         }
         if (g_displayedMode == ViewMode::Diagram) {
             tab.diagramPosition = g_mermaidPreview.GetViewState(); break;
+        }
+        if (g_displayedMode == ViewMode::Image) {
+            if (g_imagePreviewPath == tab.path) tab.imagePosition = g_imagePreview.GetViewState();
+            break;
         }
         if (!g_isRichEdit || !IsWindowVisible(g_hwndEditControl)) break;
         auto& position = tab.readingPositions[static_cast<int>(g_displayedMode)];
@@ -1737,6 +1807,7 @@ void ShowCurrentTab(bool rememberView = true) {
     if (g_currentTab < 0 || g_currentTab >= static_cast<int>(g_tabs.size())) {
         ClearInlineDiagramPreviews();
         g_mermaidPreview.SetVisible(false);
+        g_imagePreview.SetVisible(false);
         if (g_hwndPdfPanel) ShowWindow(g_hwndPdfPanel, SW_HIDE);
         ApplyEditorText(L"", {}, false);
         if (g_hwndEditControl) ShowWindow(g_hwndEditControl, SW_HIDE);
@@ -1753,6 +1824,7 @@ void ShowCurrentTab(bool rememberView = true) {
     ReaderRedrawScope editRedraw(g_hwndEditControl);
     OpenTab& tab = g_tabs[g_currentTab];
     bool newlyOpenedPdf = false;
+    if (tab.isImage && !tab.loadError) tab.viewMode = ViewMode::Image;
     PrepareReading(tab);
     SendMessageW(g_hwndEditControl, EM_SETTARGETDEVICE, 0, tab.viewMode == ViewMode::Decorated ? 0 : 1);
     const bool has_renderable_mermaid = tab.combinedDiagram.has_value();
@@ -1764,13 +1836,15 @@ void ShowCurrentTab(bool rememberView = true) {
         (tab.reading->tables.empty() || readingWidth == g_displayedReadingWidth);
     const bool showDiagram = (tab.viewMode == ViewMode::Diagram && has_renderable_mermaid);
     const bool showPdf = (tab.viewMode == ViewMode::Pdf);
-    
+    const bool showImage = (tab.viewMode == ViewMode::Image);
+
     g_mermaidPreview.SetVisible(showDiagram);
+    g_imagePreview.SetVisible(showImage);
     if (g_hwndPdfPanel) {
         ShowWindow(g_hwndPdfPanel, showPdf ? SW_SHOW : SW_HIDE);
     }
     
-    if (showDiagram || showPdf) {
+    if (showDiagram || showPdf || showImage) {
         if (g_hwndEditControl) ShowWindow(g_hwndEditControl, SW_HIDE);
         if (g_hwndHighlightBar) ShowWindow(g_hwndHighlightBar, SW_HIDE);
     } else {
@@ -1786,7 +1860,7 @@ void ShowCurrentTab(bool rememberView = true) {
                 ApplyEditorText(rendered.text, rendered.styles, false);
             } else if (tab.reading && !reuse) {
                 if (!g_isRichEdit) ApplyEditorText(tab.reading->text, {}, false);
-                else if (!ApplyReadingDocument(*tab.reading))
+                else if (!ApplyReadingDocument(*tab.reading, tab.math.get()))
                     SetViewerStatus(g_hwndMain, localization::Text(L"reader_next.render_failed"));
                 BuildInlineDiagramPreviews(tab);
             }
@@ -1814,6 +1888,18 @@ void ShowCurrentTab(bool rememberView = true) {
                 const RenderedDocument rendered = RenderMarkdown(tab.rawText);
                 ApplyEditorText(rendered.text, rendered.styles, false);
             }
+            break;
+        case ViewMode::Image:
+            if (g_imagePreviewPath != tab.path) {
+                std::wstring error;
+                auto image = readonly_viewer::DecodeImageFile(tab.path, &error);
+                const std::wstring message = image ? std::wstring() :
+                    localization::Text(error.empty() ? L"readonly.image.error.decode" : error.c_str());
+                if (!image) SetViewerStatus(g_hwndMain, message);
+                g_imagePreview.SetImage(std::move(image), message);
+                g_imagePreviewPath = tab.path;
+            }
+            g_imagePreview.RestoreViewState(tab.imagePosition);
             break;
         case ViewMode::Pdf:
             if (g_hwndPdfPanel) {
@@ -1848,8 +1934,8 @@ void ShowCurrentTab(bool rememberView = true) {
     }
     // Enable native layout before restoring coordinates; none of the inner
     // text/outline helpers may expose the temporary selection at the top.
-    editRedraw.Resume(!showPdf && !showDiagram);
-    if (g_isRichEdit && !showPdf && !showDiagram) {
+    editRedraw.Resume(!showPdf && !showDiagram && !showImage);
+    if (g_isRichEdit && !showPdf && !showDiagram && !showImage) {
         const auto& position = tab.readingPositions[static_cast<int>(tab.viewMode)];
         // Preserve the text at the viewport edge when wrapping changes, rather
         // than applying the old pixel offset to different lines. No disk state.
@@ -1980,7 +2066,8 @@ void ChangePartialTextRange(HWND owner, int index) {
     tab.sourceSnapshot = CaptureFileSnapshot(path);
     tab.title = std::filesystem::path(path).filename().wstring() + localization::Text(L"readonly.tab.partial_suffix");
     tab.viewMode = previous_mode == ViewMode::Binary ? ViewMode::Binary :
-        (tab.isBinary || previous_mode == ViewMode::Hex ? ViewMode::Hex : (IsMarkdownPath(tab.path) ? ViewMode::Decorated : ViewMode::Raw));
+        (tab.isBinary || previous_mode == ViewMode::Hex ? ViewMode::Hex :
+            (IsMarkdownPath(tab.path) || IsTeXPath(tab.path) ? ViewMode::Decorated : ViewMode::Raw));
     ParseJapaneseLines(tab);
     RebuildTabControl();
     SelectTab(index);
@@ -2383,7 +2470,7 @@ std::vector<std::wstring> PromptForLocalPaths(HWND owner, bool pickFolder) {
 
     DWORD options = 0;
     if (SUCCEEDED(dialog->GetOptions(&options))) {
-        options |= FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST;
+        options |= FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_DONTADDTORECENT;
         options |= pickFolder ? FOS_PICKFOLDERS : (FOS_FILEMUSTEXIST | FOS_ALLOWMULTISELECT);
         dialog->SetOptions(options);
     }
@@ -2392,11 +2479,15 @@ std::vector<std::wstring> PromptForLocalPaths(HWND owner, bool pickFolder) {
         const std::wstring filterDocuments = localization::Text(L"readonly.picker.filter_documents");
         const std::wstring filterPdf = localization::Text(L"readonly.picker.filter_pdf");
         const std::wstring filterText = localization::Text(L"readonly.picker.filter_text");
+        const std::wstring filterImages = localization::Text(L"readonly.picker.filter_images");
+        const std::wstring documentPatterns =
+            std::wstring(L"*.pdf;*.txt;*.md;*.markdown;*.json;*.clro;*.tex;*.sha256;") + kImagePickerPatterns;
         const std::wstring filterAll = localization::Text(L"readonly.picker.filter_all");
         COMDLG_FILTERSPEC filters[] = {
-            {filterDocuments.c_str(), L"*.pdf;*.txt;*.md;*.markdown;*.json;*.clro;*.sha256"},
+            {filterDocuments.c_str(), documentPatterns.c_str()},
             {filterPdf.c_str(), L"*.pdf"},
-            {filterText.c_str(), L"*.txt;*.md;*.markdown;*.json;*.clro;*.sha256"},
+            {filterText.c_str(), L"*.txt;*.md;*.markdown;*.json;*.clro;*.tex;*.sha256"},
+            {filterImages.c_str(), kImagePickerPatterns},
             {filterAll.c_str(), L"*.*"},
         };
         dialog->SetFileTypes(static_cast<UINT>(sizeof(filters) / sizeof(filters[0])), filters);
@@ -2507,6 +2598,7 @@ bool ReloadOpenTab(HWND owner, int index) {
     InvalidateReaderPreparation(refreshed);
     refreshed.isBinary = loaded.isBinary;
     refreshed.isPdf = loaded.isPdf;
+    refreshed.isImage = loaded.isImage;
     refreshed.loadError = false;
     refreshed.isPartialText = selectedRange.has_value();
     refreshed.textRange = selectedRange.value_or(ByteRange{});
@@ -2595,13 +2687,15 @@ bool OpenPathInTab(HWND owner, const std::wstring& path) {
     tab.bytes = std::move(loaded.bytes);
     tab.isBinary = loaded.isBinary;
     tab.isPdf = loaded.isPdf;
+    tab.isImage = loaded.isImage;
     tab.loadError = loaded.hasError;
     tab.isPartialText = selected_range.has_value() && !tab.loadError;
     tab.textRange = selected_range.value_or(ByteRange{});
     tab.sourceSize = loaded.source_size;
     tab.sourceSnapshot = CaptureFileSnapshot(path);
     tab.viewMode = tab.loadError ? ViewMode::Raw :
-        (tab.isPdf ? ViewMode::Pdf : (tab.isBinary ? ViewMode::Hex : (IsMarkdownPath(path) || IsClropPath(path) ? ViewMode::Decorated : ViewMode::Raw)));
+        (tab.isPdf ? ViewMode::Pdf : (tab.isImage ? ViewMode::Image : (tab.isBinary ? ViewMode::Hex :
+            (IsMarkdownPath(path) || IsClropPath(path) || IsTeXPath(path) ? ViewMode::Decorated : ViewMode::Raw))));
     ParseJapaneseLines(tab);
     g_tabs.push_back(std::move(tab));
 
@@ -2855,6 +2949,8 @@ void AppendFileTreeFolder(const std::filesystem::path& folder, HTREEITEM parent,
         const auto type = extension == L".pdf" ? localization::Text(L"menu.common.pdf") :
             extension == L".clrop" ? localization::Text(L"readonly.tree.annotation_type") :
             (extension == L".clro" || extension == L".md" || extension == L".txt") ? localization::Text(L"readonly.tree.note_type") :
+            extension == L".tex" ? std::wstring(L"TeX") :
+            readonly_viewer::IsImagePath(file.wstring()) ? localization::Text(L"readonly.tree.image_type") :
             localization::Text(L"readonly.tree.file_type");
         auto label = localization::Format(L"readonly.tree.file_label", {{L"NAME", file.filename().wstring()}, {L"TYPE", type}});
         tvis.item.pszText = label.data();
@@ -2988,7 +3084,7 @@ void LayoutToolbarControls(HWND hWnd, int splitX, int rightPaneWidth, int height
     for (int id : {kDecoratedButtonId, kRawButtonId, kHexButtonId, kBinaryButtonId, kDiagramButtonId}) {
         HWND button = GetDlgItem(hWnd, id);
         const bool byteMode = id == kHexButtonId || id == kBinaryButtonId;
-        const bool visible = !focus && !pdf && (!binary || byteMode) &&
+        const bool visible = !focus && !pdf && !(hasTab && g_tabs[g_currentTab].isImage) && (!binary || byteMode) &&
             modeX + px(70) + px(8) <= x + width - px(192);
         if (!visible && GetFocus() == button) SetFocus(hWnd);
         ShowWindow(button, visible ? SW_SHOW : SW_HIDE);
@@ -3035,12 +3131,19 @@ void LayoutToolbarControls(HWND hWnd, int splitX, int rightPaneWidth, int height
     }
     if (g_hwndPdfPanel) MoveWindow(g_hwndPdfPanel, x, top, width, contentHeight, TRUE);
     g_mermaidPreview.SetBounds(x, top, width, contentHeight);
+    g_imagePreview.SetBounds(x, top, width, contentHeight);
     UpdateInlineDiagramBounds();
     if (g_currentTab >= 0 && g_currentTab < static_cast<int>(g_tabs.size())) {
         const OpenTab& tab = g_tabs[g_currentTab];
         const wchar_t* format = tab.viewMode == ViewMode::Binary ? L"reader_next.binary" :
             (tab.viewMode == ViewMode::Hex ? L"reader_next.hex" : nullptr);
-        std::wstring detail = tab.title + L"   ·   " + (format ? localization::Text(format) : (tab.isPdf ? L"PDF" : L"TEXT"));
+        std::wstring detail = tab.title + L"   ·   " + (format ? localization::Text(format) :
+            (tab.isPdf ? L"PDF" : (tab.isImage ? localization::Text(L"readonly.tree.image_type") :
+            (IsTeXPath(tab.path) ? std::wstring(L"TeX") : L"TEXT"))));
+        if (const auto* image = g_imagePreviewPath == tab.path ? g_imagePreview.Image() : nullptr) {
+            detail += L"   ·   " + localization::Format(L"readonly.image.size", {
+                {L"WIDTH", std::to_wstring(image->sourceWidth)}, {L"HEIGHT", std::to_wstring(image->sourceHeight)}});
+        }
         if (tab.isPartialText) detail += L"   ·   " + localization::Format(L"readonly.range.current", {
             {L"START", std::to_wstring(tab.textRange.start)}, {L"END", std::to_wstring(tab.textRange.end)}});
         SetWindowTextW(GetDlgItem(hWnd, 818), detail.c_str());
@@ -3084,7 +3187,8 @@ void RefreshSearchOverview() {
     KillTimer(g_hwndMain, reader_next::kSearchOverviewTimer);
     wchar_t query[257]{};
     if (g_isRichEdit && g_currentTab >= 0 && g_currentTab < static_cast<int>(g_tabs.size()) &&
-        g_tabs[g_currentTab].viewMode != ViewMode::Pdf && g_tabs[g_currentTab].viewMode != ViewMode::Diagram)
+        g_tabs[g_currentTab].viewMode != ViewMode::Pdf && g_tabs[g_currentTab].viewMode != ViewMode::Diagram &&
+        g_tabs[g_currentTab].viewMode != ViewMode::Image)
         GetWindowTextW(GetDlgItem(g_hwndMain, reader_next::kSearchId), query, 257);
     RECT band{}; GetClientRect(g_hwndHighlightBar, &band);
     const bool ready = g_searchOverview.Reset(g_hwndEditControl, query, band.bottom - band.top);
@@ -3118,6 +3222,7 @@ void FindReaderText(bool previous) {
     const std::wstring query(buffer);
     if (query.empty()) { SetViewerStatus(g_hwndMain, localization::Text(L"reader_next.find_empty")); return; }
     const auto mode = g_tabs[g_currentTab].viewMode;
+    if (mode == ViewMode::Image) return; // Pixels have no searchable text.
     if (mode == ViewMode::Pdf) {
         if (g_pdfFindActive) return;
         if (g_findQuery != query) g_pdfFind = reader_next::StartPdfSearch(previous);
@@ -3168,6 +3273,13 @@ void ZoomReader(UINT command) {
         if (command == reader_next::kZoomResetId) g_mermaidPreview.ResetView();
         else if (command == reader_next::kZoomInId) g_mermaidPreview.ZoomIn();
         else g_mermaidPreview.ZoomOut();
+        return;
+    }
+    if (g_tabs[g_currentTab].viewMode == ViewMode::Image) {
+        if (command == reader_next::kZoomResetId) g_imagePreview.FitToWindow();
+        else if (command == reader_next::kZoomInId) g_imagePreview.ZoomIn();
+        else g_imagePreview.ZoomOut();
+        SetViewerStatus(g_hwndMain, std::to_wstring(static_cast<int>(g_imagePreview.Zoom() * 100.0 + 0.5)) + L"%");
         return;
     }
     if (g_tabs[g_currentTab].viewMode == ViewMode::Pdf) {
@@ -3372,6 +3484,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 SetViewerStatus(hWnd, localization::Text(L"readonly.status.diagram_preview_failed"));
             }
             g_mermaidPreview.SetDetachedWindowTarget(hWnd);
+            if (!g_imagePreview.Create(hWnd, hInst, 822)) {
+                SetViewerStatus(hWnd, localization::Text(L"readonly.image.error.panel"));
+            }
             if (!CreateReaderControls(hWnd)) return -1;
             UpdateModeButtons(ViewMode::Raw);
             DragAcceptFiles(hWnd, TRUE);

@@ -7,6 +7,8 @@ This is the bilingual license document for the repository root. The English lice
 本リポジトリ `PDF Note Workspace` の本体コードおよび別ライセンス表記のない同梱素材は、zlib License で提供します。
 `third_party/` 配下の外部依存物、利用者の環境にあるフォント、ローカルのツールチェーンから取得するランタイム DLL は、このライセンスの対象外です。これらは `THIRD_PARTY_NOTICES.md` を参照してください。
 
+リポジトリ直下の `LICENSE` には、下記の英語原文だけを置いています。GitHubなどがライセンスを自動で判定するためのファイルで、内容は本書の英語原文と同じです。
+
 release パッケージを受け取った利用者は、まず `docs/LICENSE.md`, `docs/LICENSES_INDEX.md`, `docs/THIRD_PARTY_NOTICES.md`, `licenses/` を参照してください。本書中の `third_party/...` 表記は、リポジトリ上の元配置を示します。
 
 ## 1. 本プロジェクトのライセンス
@@ -94,12 +96,16 @@ Copyright (c) 2026 Soone-Y
   - `licenses/md4c/`
   - `licenses/zlib/`
   - `licenses/libreoffice/`
+  - `licenses/microtex/`
+  - `licenses/xits/`
 - リポジトリ上の元配置:
   - `third_party/pdfium/LICENSE`
   - `third_party/pdfium/licenses/`
   - `third_party/mingw_runtime_licenses/mingw-w64/`
   - `third_party/md4c/LICENSE.md`
   - `third_party/libreoffice/image/license.txt`, `third_party/libreoffice/image/LICENSE.html`, `third_party/libreoffice/image/NOTICE`
+  - `third_party/microtex/LICENSE`
+  - `third_party/microtex/res/xits/OFL.txt`, `third_party/microtex/res/xits/FONTLOG.txt`, `third_party/microtex/res/xits/README.txt`
 
 ## 4. 個人、教育機関、その他団体などにおける利用
 
@@ -110,6 +116,8 @@ Copyright (c) 2026 Soone-Y
 ## English
 
 ### Project license
+
+The repository-root `LICENSE` file contains only the English license text below, so that services such as GitHub can detect the license automatically. Its text is identical to the English text in this document.
 
 `PDF Note Workspace` code and bundled materials without a separate license notice are provided under the zlib License. The English zlib License text in section 1 is the legally controlling text.
 
@@ -125,8 +133,8 @@ Copyright (c) 2026 Soone-Y
 
 ### Third-party components
 
-- In a release package, consult `docs/THIRD_PARTY_NOTICES.md` and the license texts in `licenses/pdfium/`, `licenses/mingw-w64/`, `licenses/md4c/`, `licenses/zlib/`, and `licenses/libreoffice/`.
-- In this repository, their corresponding source locations include `third_party/pdfium/`, `third_party/mingw_runtime_licenses/mingw-w64/`, `third_party/md4c/LICENSE.md`, and the LibreOffice license files under `third_party/libreoffice/image/`.
+- In a release package, consult `docs/THIRD_PARTY_NOTICES.md` and the license texts in `licenses/pdfium/`, `licenses/mingw-w64/`, `licenses/md4c/`, `licenses/zlib/`, `licenses/libreoffice/`, `licenses/microtex/`, and `licenses/xits/`.
+- In this repository, their corresponding source locations include `third_party/pdfium/`, `third_party/mingw_runtime_licenses/mingw-w64/`, `third_party/md4c/LICENSE.md`, the LibreOffice license files under `third_party/libreoffice/image/`, `third_party/microtex/LICENSE`, and the XITS Math license files under `third_party/microtex/res/xits/`.
 
 ### Use by individuals, educational institutions, and other organizations
 

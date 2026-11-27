@@ -387,7 +387,7 @@ static LRESULT CALLBACK AnnotShortcutEditorProc(HWND hWnd, UINT msg, WPARAM wPar
         if (id == kShortcutEditorDigits) {
             if (ctx->currentIndex >= 0 && !StoreShortcutEditorRow(ctx, ctx->currentIndex)) return 0;
             for (const auto& binding : DefaultAnnotToolShortcuts()) {
-                if (!binding.ctrl || binding.alt || binding.shift || binding.vk < '1' || binding.vk > '9') continue;
+                if (!binding.ctrl || binding.alt || binding.shift || binding.vk < '0' || binding.vk > '9') continue;
                 const bool taken = std::any_of(ctx->bindings.begin(), ctx->bindings.end(), [&](const auto& other) {
                     return other.vk == binding.vk && other.ctrl && !other.alt && !other.shift;
                 });

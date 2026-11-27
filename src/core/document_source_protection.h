@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/path_safety.h"
+#include "core/source_access_observation.h"
 #include <winternl.h>
 #include <climits>
 #include <cstring>
@@ -11,6 +12,8 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <set>
 #include <vector>
 #include <thread>
 
@@ -48,7 +51,8 @@ inline std::wstring Key(const std::filesystem::path& path) {
 // Open existing local files only. FILE_COMPLETE_IF_OPLOCKED returns a usable handle
 // without waiting for the external oplock acknowledgement. We never read data
 // through this handle. Do not fall back to a potentially blocking CreateFile.
-[[nodiscard]] inline HANDLE OpenWithoutOplockWait(const std::wstring& path, DWORD* error) {
+[[nodiscard]] inline HANDLE OpenWithoutOplockWait(const std::wstring& path, DWORD* error,
+                                                bool asynchronous = false) {
     using Create = decltype(&NtCreateFile);
     using MapError = decltype(&RtlNtStatusToDosError);
     const HMODULE module = GetModuleHandleW(L"ntdll.dll");
@@ -77,7 +81,8 @@ inline std::wstring Key(const std::filesystem::path& path) {
     HANDLE handle = nullptr;
     const NTSTATUS status = create(&handle, FILE_GENERIC_READ, &attributes, &io, nullptr,
         FILE_ATTRIBUTE_NORMAL, SourceSharing(path), FILE_OPEN,
-        FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT | FILE_COMPLETE_IF_OPLOCKED,
+        FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_COMPLETE_IF_OPLOCKED |
+            (asynchronous ? 0 : FILE_SYNCHRONOUS_IO_NONALERT),
         nullptr, 0);
     if (status < 0) { *error = mapError(status); return INVALID_HANDLE_VALUE; }
     if (!handle || handle == INVALID_HANDLE_VALUE) { *error = ERROR_INVALID_HANDLE; return INVALID_HANDLE_VALUE; }
@@ -91,12 +96,20 @@ struct Source {
     Source& operator=(const Source&) = delete;
     std::wstring path;
     HANDLE handle = INVALID_HANDLE_VALUE;
-    ~Source() { if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle); }
+    bool observeAccess = false;
+    SourceAccessObservation observation;
+    ~Source() { Close(); }
+    void Close() noexcept {
+        observation.Stop();
+        if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle);
+        handle = INVALID_HANDLE_VALUE;
+    }
     [[nodiscard]] bool Open(const std::wstring& path, bool allowMissing, DWORD* error) {
 #if defined(PDF_NOTE_SOURCE_PROTECTION_TESTING)
         if (const auto hook = beforeOpenForTesting.load()) hook(path);
 #endif
-        handle = OpenWithoutOplockWait(path, error);
+        const bool observe = observeAccess && SourceSharing(path) == FILE_SHARE_READ;
+        handle = OpenWithoutOplockWait(path, error, observe);
         if (handle == INVALID_HANDLE_VALUE) {
             if (allowMissing && (*error == ERROR_FILE_NOT_FOUND || *error == ERROR_PATH_NOT_FOUND)) {
                 *error = ERROR_SUCCESS;
@@ -108,23 +121,76 @@ struct Source {
         if (!GetFileInformationByHandle(handle, &info) ||
             (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))) {
             *error = ERROR_INVALID_DATA;
-            CloseHandle(handle); handle = INVALID_HANDLE_VALUE;
+            Close();
             return false;
+        }
+        if (observe) {
+            observation.Bind(handle);
+            (void)observation.Poll(GetTickCount64());
         }
         return true;
     }
 };
 inline std::recursive_mutex mutex;
 inline std::map<std::wstring, std::shared_ptr<Source>> sources;
+inline std::set<std::wstring> documentOwners;
+// A checkpoint owns its original independently of the displayed document.
+// Keys identify checkpoint files; values identify logical original paths.
+inline std::map<std::wstring, std::wstring> stageOwners;
 inline std::condition_variable_any recoveryWake;
 inline std::atomic<bool> pendingProtection{false};
 inline std::atomic<bool> recoveryFailed{false};
 inline std::atomic<HWND> notificationWindow{nullptr};
 inline std::atomic<UINT> notificationMessage{0};
+struct ProtectionNotice { std::wstring fileName; bool hasStagedEdits = false; };
+inline std::optional<std::wstring> pendingNoticeSource;
+class ProtectionNoticeCooldown {
+public:
+    [[nodiscard]] bool Allow(const std::wstring& source, bool staged, ULONGLONG now) {
+        if (!lastSource_.empty() && now - lastTick_ < 30000 &&
+            !(lastSource_ == source && hadStage_ != staged)) return false;
+        lastSource_ = source;
+        hadStage_ = staged;
+        lastTick_ = now;
+        return true;
+    }
+private:
+    std::wstring lastSource_;
+    bool hadStage_ = false;
+    ULONGLONG lastTick_ = 0;
+};
+inline ProtectionNoticeCooldown noticeCooldown;
 
 inline void NotifyProtectionState() noexcept {
     const HWND window = notificationWindow.load();
     if (window) PostMessageW(window, notificationMessage.load(), 0, 0);
+}
+[[nodiscard]] inline bool HasStagedSourceLocked(const std::shared_ptr<Source>& source) {
+    for (const auto& stage : stageOwners) {
+        const auto owner = sources.find(stage.second);
+        if (owner != sources.end() && owner->second == source) return true;
+    }
+    return false;
+}
+inline void QueueProtectionNoticeLocked(const std::shared_ptr<Source>& source, ULONGLONG now) {
+    const bool staged = HasStagedSourceLocked(source);
+    // One notice per 30 seconds across the app. A changed save/close instruction
+    // for the same file may be shown immediately after Save Work.
+    if (!noticeCooldown.Allow(source->path, staged, now)) return;
+    pendingNoticeSource = source->path;
+    NotifyProtectionState();
+}
+[[nodiscard]] inline std::optional<ProtectionNotice> TakeProtectionNotice() {
+    const std::lock_guard<std::recursive_mutex> lock(mutex);
+    auto path = std::move(pendingNoticeSource);
+    pendingNoticeSource.reset();
+    if (!path) return std::nullopt;
+    for (const auto& entry : sources) {
+        if (entry.second->path == *path && entry.second->handle != INVALID_HANDLE_VALUE)
+            return ProtectionNotice{std::filesystem::path(*path).filename().wstring(),
+                                    HasStagedSourceLocked(entry.second)};
+    }
+    return std::nullopt;
 }
 // Called under the registry lock. Notifications carry no file data or pointers;
 // only the UI owner interprets them, and it reads the current state again.
@@ -137,10 +203,34 @@ inline void UpdateProtectionStateLocked() {
 }
 [[nodiscard]] inline bool HasPendingProtection() noexcept { return pendingProtection.load(); }
 [[nodiscard]] inline bool HasRecoveryFailure() noexcept { return recoveryFailed.load(); }
+// A checkpoint whose original no longer exists. Re-acquisition cannot succeed
+// until the file returns, so the UI explains it instead of "re-acquiring".
+struct MissingStagedOriginal { std::wstring original; std::wstring stage; };
+[[nodiscard]] inline std::vector<MissingStagedOriginal> MissingStagedOriginals() {
+    const std::lock_guard<std::recursive_mutex> lock(mutex);
+    std::vector<MissingStagedOriginal> missing;
+    for (const auto& stage : stageOwners) {
+        const auto found = sources.find(stage.second);
+        if (found == sources.end() || found->second->handle != INVALID_HANDLE_VALUE) continue;
+        const auto& path = found->second->path;
+        if (GetFileAttributesW(ToExtendedWin32PathIfAbsoluteLocal(path).c_str()) != INVALID_FILE_ATTRIBUTES)
+            continue;
+        const DWORD error = GetLastError();
+        if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) continue;
+        bool listed = false;
+        for (const auto& entry : missing) listed = listed || entry.original == path;
+        if (!listed) missing.push_back({path, stage.first});
+    }
+    return missing;
+}
 inline void SetNotificationWindow(HWND window, UINT message) noexcept {
     if (!window) notificationWindow.store(nullptr);
     notificationMessage.store(message);
     notificationWindow.store(window);
+    if (window) {
+        const std::lock_guard<std::recursive_mutex> lock(mutex);
+        if (pendingNoticeSource) NotifyProtectionState();
+    }
 }
 
 // Process-owned worker: it never writes, moves or creates a file. Retry only
@@ -161,7 +251,11 @@ private:
         try {
             std::unique_lock<std::recursive_mutex> lock(mutex);
             while (!stopping_) {
-                recoveryWake.wait(lock, [this] { return stopping_ || HasPendingProtection(); });
+                recoveryWake.wait(lock, [this] {
+                    if (stopping_ || HasPendingProtection()) return true;
+                    for (const auto& entry : sources) if (entry.second->observation.active()) return true;
+                    return false;
+                });
                 if (stopping_) break;
                 recoveryWake.wait_for(lock, std::chrono::milliseconds(100), [this] { return stopping_; });
                 if (stopping_) break;
@@ -169,6 +263,13 @@ private:
                     if (entry.second->handle == INVALID_HANDLE_VALUE) {
                         DWORD error = 0;
                         (void)entry.second->Open(entry.second->path, false, &error);
+                    }
+                    const auto now = GetTickCount64();
+                    if (entry.second->observation.Poll(now)) {
+                        // Advisory UI allocation failure must not stop the
+                        // worker that acknowledges requests and restores guards.
+                        try { QueueProtectionNoticeLocked(entry.second, now); }
+                        catch (...) { }
                     }
                 }
                 UpdateProtectionStateLocked();
@@ -188,9 +289,8 @@ private:
     return true;
 }
 
-// The document owner calls Acquire before loading and Release only on close,
-// failed open, or successful switch. A missing original may still have a stage
-// to recover; it is tracked but cannot be locked until the app publishes it.
+// The document owner calls Acquire before loading. Closing a display releases
+// only that ownership; checkpoints keep their original protected independently.
 [[nodiscard]] inline bool Acquire(const std::filesystem::path& path, DWORD* error) {
     const std::lock_guard<std::recursive_mutex> lock(mutex);
     const auto key = Key(path);
@@ -198,28 +298,92 @@ private:
     if (!EnsureRecoveryWorker(error)) return false;
     for (const auto& entry : sources) {
         if (entry.second->path == key) {
+            // A checkpoint-only registration can be pending because an external
+            // writer/delete handle was already present. It must not turn a new
+            // document open into an unprotected success. Missing originals keep
+            // the existing stage-recovery open behavior.
+            if (entry.second->handle == INVALID_HANDLE_VALUE &&
+                !documentOwners.count(entry.first) &&
+                !entry.second->Open(key, true, error)) return false;
             // An existing owner can follow its completed move while recovery
             // is pending. This does not admit an unrelated, unprotectable open.
             sources[key] = entry.second;
+            documentOwners.insert(key);
             UpdateProtectionStateLocked();
             return true;
         }
     }
     auto source = std::make_shared<Source>();
+    source->observeAccess = true;
     if (!source->Open(key, true, error)) return false;
     source->path = key;
     sources[key] = std::move(source);
+    documentOwners.insert(key);
     UpdateProtectionStateLocked();
     return true;
 }
+inline void RemoveSourceIfUnownedLocked(const std::wstring& key) {
+    if (documentOwners.count(key)) return;
+    for (const auto& stage : stageOwners) if (stage.second == key) return;
+    sources.erase(key);
+}
+
+// Register only an existing checkpoint's original. Missing/unavailable originals
+// remain pending for the existing read-only recovery worker: never recreate them
+// or write a checkpoint into the original. Return protection separately from
+// checkpoint persistence, which has already succeeded at the caller boundary.
+[[nodiscard]] inline bool RetainStage(const std::filesystem::path& stage,
+                                     const std::filesystem::path& original,
+                                     DWORD* error) {
+    const std::lock_guard<std::recursive_mutex> lock(mutex);
+    const auto stageKey = Key(stage), key = Key(original);
+    if (stageKey.empty() || key.empty()) { *error = ERROR_BAD_PATHNAME; return false; }
+    const bool workerReady = EnsureRecoveryWorker(error);
+    const auto previous = stageOwners.find(stageKey);
+    const std::wstring previousKey = previous == stageOwners.end() ? std::wstring{} : previous->second;
+    auto found = sources.find(key);
+    if (found == sources.end()) {
+        std::shared_ptr<Source> source;
+        for (const auto& entry : sources)
+            if (entry.second->path == key) { source = entry.second; break; }
+        if (!source) {
+            source = std::make_shared<Source>();
+            source->observeAccess = true;
+            source->path = key;
+            (void)source->Open(key, false, error);
+        }
+        found = sources.emplace(key, std::move(source)).first;
+    }
+    stageOwners[stageKey] = key;
+    if (!previousKey.empty() && previousKey != key) RemoveSourceIfUnownedLocked(previousKey);
+    UpdateProtectionStateLocked();
+    const bool protectedNow = found->second->handle != INVALID_HANDLE_VALUE;
+    if (workerReady) *error = protectedNow ? ERROR_SUCCESS : ERROR_IO_PENDING;
+    return workerReady && protectedNow;
+}
+inline void ReleaseStage(const std::filesystem::path& stage) {
+    const std::lock_guard<std::recursive_mutex> lock(mutex);
+    const auto found = stageOwners.find(Key(stage));
+    if (found == stageOwners.end()) return;
+    const auto key = found->second;
+    stageOwners.erase(found);
+    RemoveSourceIfUnownedLocked(key);
+    UpdateProtectionStateLocked();
+}
 inline void Release(const std::filesystem::path& path) {
     const std::lock_guard<std::recursive_mutex> lock(mutex);
-    sources.erase(Key(path));
+    const auto key = Key(path);
+    documentOwners.erase(key);
+    RemoveSourceIfUnownedLocked(key);
     UpdateProtectionStateLocked();
 }
 inline void ReleaseAll() {
     const std::lock_guard<std::recursive_mutex> lock(mutex);
     sources.clear();
+    documentOwners.clear();
+    stageOwners.clear();
+    pendingNoticeSource.reset();
+    noticeCooldown = {};
     UpdateProtectionStateLocked();
 }
 
@@ -246,8 +410,7 @@ public:
             }
         }
         for (auto& entry : entries_) {
-            if (entry.source->handle != INVALID_HANDLE_VALUE) CloseHandle(entry.source->handle);
-            entry.source->handle = INVALID_HANDLE_VALUE;
+            entry.source->Close();
         }
     }
     ~Mutation() { if (!finished_) { DWORD ignored = 0; (void)Finish(false, &ignored); } }
@@ -283,7 +446,14 @@ public:
         *error = ERROR_SUCCESS;
         for (const auto& entry : entries_) {
             for (auto it = sources.begin(); it != sources.end();) {
-                if (it->second == entry.source) it = sources.erase(it);
+                if (it->second == entry.source) {
+                    documentOwners.erase(it->first);
+                    for (auto stage = stageOwners.begin(); stage != stageOwners.end();) {
+                        if (stage->second == it->first) stage = stageOwners.erase(stage);
+                        else ++stage;
+                    }
+                    it = sources.erase(it);
+                }
                 else ++it;
             }
         }

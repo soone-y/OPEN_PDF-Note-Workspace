@@ -1175,65 +1175,11 @@ static std::wstring StripMarkupTags(const std::wstring& s) {
     return out;
 }
 
-static std::wstring StripLineJoins(const std::wstring& s) {
-    std::wstring out;
-    out.reserve(s.size());
-    size_t i = 0;
-    while (i < s.size()) {
-        if (s[i] == L'\r') { ++i; continue; }
-        if (s[i] == L'\n') { out.push_back(L' '); ++i; continue; }
-        if (s[i] == L'<' && i + 3 < s.size()) {
-            if (_wcsnicmp(s.c_str() + i, L"<br>", 4) == 0) {
-                out.push_back(L' ');
-                i += 4;
-                continue;
-            }
-            if (_wcsnicmp(s.c_str() + i, L"<br/>", 5) == 0) {
-                out.push_back(L' ');
-                i += 5;
-                continue;
-            }
-            if (_wcsnicmp(s.c_str() + i, L"<br />", 6) == 0) {
-                out.push_back(L' ');
-                i += 6;
-                continue;
-            }
-        }
-        out.push_back(s[i]);
-        ++i;
-    }
-    return out;
-}
-
-static std::wstring NormalizeMarkupMathText(const std::wstring& s) {
-    std::wstring out;
-    out.reserve(s.size());
-    for (size_t i = 0; i < s.size(); ++i) {
-        wchar_t ch = s[i];
-        if (ch >= 0xFF01 && ch <= 0xFF5E) {
-            ch = static_cast<wchar_t>(ch - 0xFEE0);
-        }
-        out.push_back(ch);
-    }
-    std::wstring res;
-    res.reserve(out.size());
-    for (size_t i = 0; i < out.size(); ++i) {
-        if (i + 1 < out.size() && out[i] == L'-' && out[i + 1] == L'>') {
-            res.push_back(L'\u2192');
-            ++i;
-            continue;
-        }
-        res.push_back(out[i]);
-    }
-    return res;
-}
-
 static std::wstring NormalizeMathAnnotText(const Annotation& ann) {
     std::wstring body = StripMathDelims(ann.text);
     if (ann.mathKind == MathKind::Markup) {
         body = StripMarkupTags(body);
-        body = StripLineJoins(body);
-        body = NormalizeMarkupMathText(body);
+        body = mathrender::NormalizeMarkupSource(body);
     }
     return body;
 }

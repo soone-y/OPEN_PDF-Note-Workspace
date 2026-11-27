@@ -919,7 +919,7 @@ std::optional<std::wstring> PromptNativeOpenPath(HWND owner) {
 
     DWORD options = 0;
     if (SUCCEEDED(dialog->GetOptions(&options))) {
-        options |= FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_FILEMUSTEXIST;
+        options |= FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_FILEMUSTEXIST | FOS_DONTADDTORECENT;
         dialog->SetOptions(options);
     }
     dialog->SetTitle(localization::Text(L"readonly.pdf.open_path.title").c_str());
@@ -2822,7 +2822,7 @@ std::optional<std::filesystem::path> PromptAnnotatedPdfSavePath(HWND owner) {
 
     DWORD options = 0;
     if (SUCCEEDED(dialog->GetOptions(&options))) {
-        dialog->SetOptions(options | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_OVERWRITEPROMPT);
+        dialog->SetOptions(options | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_OVERWRITEPROMPT | FOS_DONTADDTORECENT);
     }
     hr = dialog->Show(owner);
     if (FAILED(hr)) {

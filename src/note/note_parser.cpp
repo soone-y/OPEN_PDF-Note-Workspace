@@ -1,4 +1,5 @@
 #include "note/note_parser.h"
+#include "math/math_syntax_support.h"
 
 #include "note/note_md4c_adapter.h"
 #include "note/note_syntax_lexical.h"
@@ -355,47 +356,6 @@ bool ConsumeMathBraceGroup(std::wstring_view text, size_t* pos, std::wstring* ou
     return true;
 }
 
-bool IsSupportedMathEnvironment(std::wstring_view name) {
-    return name == L"matrix" ||
-           name == L"pmatrix" ||
-           name == L"bmatrix" ||
-           name == L"Bmatrix" ||
-           name == L"vmatrix" ||
-           name == L"Vmatrix" ||
-           name == L"cases" ||
-           name == L"aligned" ||
-           name == L"align";
-}
-
-bool IsSupportedMathCommand(std::wstring_view name) {
-    static constexpr std::wstring_view kCommands[] = {
-        L"frac", L"dfrac", L"tfrac", L"sqrt", L"binom",
-        L"begin", L"end",
-        L"bar", L"overline", L"hat", L"widehat", L"vec", L"dot", L"ddot",
-        L"operatorname", L"mathrm", L"mathbf", L"mathit", L"mathsf", L"mathtt",
-        L"mathbb", L"mathcal", L"text", L"textrm",
-        L"limits", L"nolimits", L"displaystyle", L"textstyle",
-        L"int", L"oint", L"sum", L"prod", L"lim", L"limsup", L"liminf",
-        L"infty", L"partial", L"forall", L"exists", L"nabla", L"angle", L"circ",
-        L"cdot", L"times", L"div", L"pm", L"to", L"rightarrow", L"leftarrow",
-        L"leftrightarrow", L"Rightarrow", L"Leftarrow", L"Leftrightarrow",
-        L"leq", L"le", L"geq", L"ge", L"neq", L"approx", L"equiv",
-        L"in", L"ni", L"notin", L"subset", L"subseteq", L"supset", L"supseteq",
-        L"cap", L"cup", L"setminus", L"ldots", L"cdots",
-        L"sin", L"cos", L"tan", L"log", L"ln", L"exp", L"sinh", L"cosh", L"tanh",
-        L"alpha", L"beta", L"gamma", L"delta", L"epsilon", L"zeta", L"eta",
-        L"theta", L"iota", L"kappa", L"lambda", L"mu", L"nu", L"xi", L"pi",
-        L"rho", L"sigma", L"tau", L"upsilon", L"phi", L"chi", L"psi", L"omega",
-        L"Gamma", L"Delta", L"Theta", L"Lambda", L"Xi", L"Pi", L"Sigma",
-        L"Upsilon", L"Phi", L"Psi", L"Omega",
-        L"langle", L"rangle", L"mid",
-    };
-    for (std::wstring_view command : kCommands) {
-        if (name == command) return true;
-    }
-    return false;
-}
-
 void AttachMathWarning(NoteDocument* doc, size_t mathIndex, std::wstring code, std::wstring message, Span span) {
     if (!doc || mathIndex >= doc->math_spans.size()) return;
     const size_t diagnosticIndex = AppendDiagnostic(doc,
@@ -434,7 +394,7 @@ void AddMathSupportDiagnostics(NoteDocument* doc, size_t mathIndex) {
         if (command == L"begin" || command == L"end") {
             size_t groupPos = nameEnd;
             std::wstring envName;
-            if (!ConsumeMathBraceGroup(tex, &groupPos, &envName) || !IsSupportedMathEnvironment(envName)) {
+            if (!ConsumeMathBraceGroup(tex, &groupPos, &envName) || !mathrender::syntax_support::IsSupportedEnvironment(envName)) {
                 AttachMathWarning(doc,
                                   mathIndex,
                                   L"NOTE-W-MATH-UNSUPPORTED",
@@ -446,7 +406,7 @@ void AddMathSupportDiagnostics(NoteDocument* doc, size_t mathIndex) {
             continue;
         }
 
-        if (!IsSupportedMathCommand(command)) {
+        if (!mathrender::syntax_support::IsSupportedCommand(command)) {
             AttachMathWarning(doc,
                               mathIndex,
                               L"NOTE-W-MATH-UNSUPPORTED",

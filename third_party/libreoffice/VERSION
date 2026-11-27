@@ -1,11 +1,12 @@
-LibreOffice 26.2.6.3
+LibreOffice 26.2.7.3
 Custom Windows x86_64 runtime
-Official core source archive SHA256 3A2570AA7087BF8E0CBDF49AC5BD0E452C2025274AF99E07882DAA104C5685BD
-Custom patch series 0001 through 0041 and 0043 through 0051 (0042 reserved; not applied)
-Runtime soffice.bin SHA256 5A42EA8DB4331E8373C7583DBCACF3B3552549EA39585B17128EA12A6070031D
-Runtime deployment.dll SHA256 35DAF83B10B5A7D34575BC964E33F364D0461BC4BDB307B6A75F14FBCC7A83F6
+Official core source archive SHA256 61E16D05D18A55C9DCBCA84836E1204D73A674FDDA2CC62E8CA06032A0C7C4E4
+Custom patch series 0001 through 0016, 0018 through 0041 and 0043 through 0051 (0017 withdrawn and 0042 reserved; not applied)
+Runtime soffice.bin SHA256 8D590140E4D8933C50A016A73BCF20B569B05EB4A08E87688EF34F6DDF92873A
+Runtime deployment.dll SHA256 E6252812F1D9E6CCE69CF2BBC76C2238B364A94649ADB1B5F0D187B606F11F14
 LO-024: --enable-readonly-installset suppresses the shared extension-cache write probe.
 Embedded MD4C 0.5.3 includes allocation-failure cleanup/propagation backport 0050.
+Embedded libxml2 2.15.4 has no HTTP client; nanohttp.c contains ABI stubs only and LIBXML2_WITH_HTTP is OFF.
 Built with communication, update, crash-reporting, AVMedia, OpenCL, PDFium, Poppler, and scripting features disabled.
 Long local Windows paths: patch 0051 fixes URL/native conversion, directory enumeration and owned temporary-file reservation.
-Runtime sal3.dll SHA256 7B6C23E5EECE33F2453E190EBA813383BEA832CD7C385AD816A8B47D6C4B4392
+Runtime sal3.dll SHA256 5E9BD326663FF595B3FBD5E4482D72C84B240B07A1419B8152D08C9D8FD40957

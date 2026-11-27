@@ -1,4 +1,5 @@
 #include "file_output/file_output.h"
+#include "core/workspace_layout.h"
 
 #include "bridge/view_bridge.h"
 #include "clrop/bridge.h"
@@ -13,6 +14,7 @@
 #include "core/preview_trace.h"
 #include "core/ui_notify.h"
 #include "core/text_encoding.h"
+#include "core/workspace_relocation.h"
 #include "clrop/json.h"
 #include "diagnostics/write_checks.h"
 #include "note/note_identity.h"
@@ -451,10 +453,10 @@ std::wstring SanitizeNoteFileNamePart(std::wstring name) {
 }
 
 bool NoteCandidateHasStageConflict(const std::filesystem::path &candidate) {
-  const auto stageDir = g_workspaceRoot.empty()
-                            ? std::filesystem::path{}
-                            : (WorkspaceCachePath(g_workspaceRoot, g_config) /
-                               L"__stage__" / L"note");
+  const auto stageRoot =
+      workspace_layout::Unsaved(std::filesystem::path(g_workspaceRoot));
+  const auto stageDir =
+      stageRoot.empty() ? std::filesystem::path{} : stageRoot / L"note";
   if (stageDir.empty())
     return false;
   const std::wstring prefix =
@@ -615,24 +617,17 @@ void AddIntegratedCurrentNoteToListIfNeeded(HWND owner,
   RefreshMainWindowUiState(owner ? owner : g_hMainWnd);
 }
 
-std::filesystem::path WorkspaceTmpRoot() {
-  if (g_workspaceRoot.empty())
-    return {};
-  return WorkspaceCachePath(g_workspaceRoot, g_config);
+// Where a failed atomic replacement leaves the content it could not publish.
+std::filesystem::path WorkspaceQuarantineRoot() {
+  return workspace_layout::Failed(std::filesystem::path(g_workspaceRoot));
 }
 
-std::filesystem::path WorkspaceEscapeRoot() {
-  if (g_workspaceRoot.empty())
-    return {};
-  return std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__" /
-         L"__escape__";
+std::filesystem::path WorkspaceRecoveryRoot() {
+  return workspace_layout::Recovery(std::filesystem::path(g_workspaceRoot));
 }
 
 std::filesystem::path StageRoot() {
-  auto root = WorkspaceTmpRoot();
-  if (root.empty())
-    return {};
-  return root / L"__stage__";
+  return workspace_layout::Unsaved(std::filesystem::path(g_workspaceRoot));
 }
 
 std::filesystem::path StageDir(file_output::StagedDiffKind kind) {
@@ -644,10 +639,10 @@ std::filesystem::path StageDir(file_output::StagedDiffKind kind) {
 }
 
 std::filesystem::path BackupDir(file_output::StagedDiffKind kind) {
-  auto root = WorkspaceEscapeRoot();
+  auto root = workspace_layout::Backup(std::filesystem::path(g_workspaceRoot));
   if (root.empty())
     return {};
-  return root / L"backup" /
+  return root /
          (kind == file_output::StagedDiffKind::Note ? L"note" : L"clrop");
 }
 
@@ -1179,7 +1174,7 @@ bool SaveNoteStageState(const std::filesystem::path &stagePath,
   std::wstring err;
   if (!write_checks::ObservedWriteBytes(std::filesystem::path{}, statePath, bytes.data(), bytes.size(),
                                       statePath.parent_path(),
-                                      WorkspaceEscapeRoot(), &err)) {
+                                      WorkspaceQuarantineRoot(), &err)) {
     if (outErr)
       *outErr = err;
     return false;
@@ -1209,7 +1204,7 @@ bool WriteNoteJournalSegment(const std::filesystem::path &stagePath,
   const auto path = BuildNoteJournalPath(stagePath, revision);
   std::wstring err;
   if (!write_checks::ObservedWriteBytes(std::filesystem::path{}, path, bytes.data(), bytes.size(),
-                                      path.parent_path(), WorkspaceEscapeRoot(),
+                                      path.parent_path(), WorkspaceQuarantineRoot(),
                                       &err)) {
     if (outErr)
       *outErr = err;
@@ -1279,6 +1274,38 @@ std::filesystem::path StageMetaPath(const std::filesystem::path &stagePath) {
   return std::filesystem::path(stagePath.wstring() + L".meta.txt");
 }
 
+// Backup and stage metadata are always "<own file>.meta.txt".
+static std::filesystem::path OwnFileOfMeta(const std::filesystem::path &metaPath) {
+  const std::wstring suffix = L".meta.txt";
+  const std::wstring raw = metaPath.wstring();
+  if (raw.size() <= suffix.size() ||
+      raw.compare(raw.size() - suffix.size(), suffix.size(), suffix) != 0)
+    return {};
+  return std::filesystem::path(raw.substr(0, raw.size() - suffix.size()));
+}
+
+// Legacy metadata holds absolute paths only. When the path it records for
+// its own file names that same file at another workspace location, the
+// workspace folder was renamed or moved after the record was written.
+static std::optional<workspace_relocation::Relocation>
+LegacyRecordRelocation(const std::filesystem::path &recordedOwnFile,
+                       const std::filesystem::path &actualOwnFile) {
+  if (recordedOwnFile.empty() || actualOwnFile.empty())
+    return std::nullopt;
+  auto relocation =
+      workspace_relocation::DetectFromSelfPath(recordedOwnFile, actualOwnFile);
+  if (!relocation || !relocation->moved)
+    return std::nullopt;
+  return relocation;
+}
+
+// Record path form (workspace_relocation.h). External folders are written as
+// plain absolute paths here; renaming the workspace folder does not move them.
+static std::string RecordPathUtf8(const std::filesystem::path &path) {
+  return WideToUTF8(workspace_relocation::ToRecordPath(
+      path, std::filesystem::path(g_workspaceRoot)));
+}
+
 struct StageMeta {
   file_output::StagedDiffKind kind = file_output::StagedDiffKind::Note;
   std::filesystem::path stagePath;
@@ -1295,6 +1322,21 @@ struct StageMeta {
   std::optional<uint64_t> persistenceRevision;
   std::optional<file_output::StagedNoteRestoreViewState> noteRestoreView;
 };
+
+void RetainStagedSource(const StageMeta &meta) {
+  // A note checkpoint for a note that did not exist yet has no original to
+  // protect; integration creates it. Every other checkpoint (PDF annotations
+  // and existing notes) keeps its original protected after the view closes.
+  if (meta.kind == file_output::StagedDiffKind::Note &&
+      meta.destinationExistedAtStage == false)
+    return;
+  DWORD error = ERROR_SUCCESS;
+  // Checkpoint persistence and physical source protection have separate results.
+  // A failed/missing source stays registered for read-only reacquisition, and
+  // the existing protection notification reports pending state to the UI.
+  (void)document_source_protection::RetainStage(meta.stagePath, meta.targetPath,
+                                               &error);
+}
 
 bool CaptureStageDestinationObservation(const std::filesystem::path &path,
                                         bool *outExisted,
@@ -1483,8 +1525,13 @@ bool WriteStageMetaFile(const StageMeta &meta, std::wstring *outErr = nullptr) {
   }
   std::ostringstream oss;
   oss << "kind=" << WideToUTF8(StageKindName(meta.kind)) << "\n";
+  // `target`/`dest`/`stage` stay absolute for older versions; the record-form
+  // keys keep the stage usable after the workspace folder is renamed or moved.
   oss << "target=" << WideToUTF8(meta.targetPath) << "\n";
   oss << "dest=" << WideToUTF8(meta.destPath.wstring()) << "\n";
+  oss << "target_record=" << RecordPathUtf8(std::filesystem::path(meta.targetPath)) << "\n";
+  if (!meta.destPath.empty())
+    oss << "dest_record=" << RecordPathUtf8(meta.destPath) << "\n";
   if (meta.destinationExistedAtStage.has_value() &&
       meta.destinationFingerprintAtStage.has_value()) {
     oss << "dest_existed=" << (*meta.destinationExistedAtStage ? 1 : 0) << "\n";
@@ -1520,13 +1567,14 @@ bool WriteStageMetaFile(const StageMeta &meta, std::wstring *outErr = nullptr) {
   oss << "stage=" << WideToUTF8(meta.stagePath.wstring()) << "\n";
   std::wstring err;
   const auto preferredTmp = meta.metaPath.parent_path();
-  const auto quarantine = WorkspaceEscapeRoot();
+  const auto quarantine = WorkspaceQuarantineRoot();
   if (!write_checks::ObservedWriteUtf8(std::filesystem::path{}, meta.metaPath, oss.str(), preferredTmp,
                                      quarantine, &err)) {
     if (outErr)
       *outErr = err;
     return false;
   }
+  RetainStagedSource(meta);
   return true;
 }
 
@@ -1601,6 +1649,8 @@ bool LoadStageMetaFile(const std::filesystem::path &metaPath,
   meta.stagePath = std::filesystem::path(metaPath.wstring().substr(
       0, metaPath.wstring().size() - std::wstring(L".meta.txt").size()));
 
+  std::wstring targetRecord;
+  std::wstring destRecord;
   std::istringstream iss(*bytes);
   std::string line;
   bool sawAnnotationPrecision = false;
@@ -1620,6 +1670,10 @@ bool LoadStageMetaFile(const std::filesystem::path &metaPath,
       meta.targetPath = UTF8ToWide(value);
     } else if (key == "dest") {
       meta.destPath = std::filesystem::path(UTF8ToWide(value));
+    } else if (key == "target_record") {
+      targetRecord = UTF8ToWide(value);
+    } else if (key == "dest_record") {
+      destRecord = UTF8ToWide(value);
     } else if (key == "dest_existed") {
       if (value == "0") {
         meta.destinationExistedAtStage = false;
@@ -1680,6 +1734,40 @@ bool LoadStageMetaFile(const std::filesystem::path &metaPath,
         meta.stagePath = parsed;
     }
   }
+  const std::filesystem::path ownStage = OwnFileOfMeta(metaPath);
+  // Record form: preferred whenever present and resolvable. The stage file is
+  // the meta file's own file, wherever the workspace folder is now. If the
+  // record keys cannot be resolved, the absolute keys below still apply, so
+  // unsaved edits never become invisible.
+  const std::filesystem::path workspaceRoot(g_workspaceRoot);
+  const auto recordTarget = targetRecord.empty()
+      ? std::nullopt
+      : workspace_relocation::FromRecordPath(targetRecord, workspaceRoot);
+  const auto recordDest = destRecord.empty()
+      ? std::nullopt
+      : workspace_relocation::FromRecordPath(destRecord, workspaceRoot);
+  if (recordTarget && (destRecord.empty() || recordDest) && !ownStage.empty()) {
+    meta.targetPath = recordTarget->wstring();
+    meta.destPath = recordDest ? *recordDest : std::filesystem::path{};
+    meta.stagePath = ownStage;
+  } else if (const auto relocation =
+                 LegacyRecordRelocation(meta.stagePath, ownStage)) {
+    // A legacy stage written before the workspace folder was renamed or
+    // moved: its recorded `stage=` names the old location. Read the stage
+    // from where it is now and map targets that were inside the previous
+    // workspace; never read or write the old location. Applying the stage
+    // stays a user action and keeps its destination fingerprint check.
+    meta.stagePath = ownStage;
+    if (auto target = workspace_relocation::Rebase(
+            std::filesystem::path(meta.targetPath), relocation->recordedRoot,
+            relocation->currentRoot)) {
+      meta.targetPath = target->wstring();
+    }
+    if (auto dest = workspace_relocation::Rebase(
+            meta.destPath, relocation->recordedRoot, relocation->currentRoot)) {
+      meta.destPath = *dest;
+    }
+  }
   if (meta.targetPath.empty())
     return false;
   if (meta.destPath.empty()) {
@@ -1722,8 +1810,12 @@ bool RemoveStageAndMeta(const std::filesystem::path &stagePath) {
     return true;
   std::error_code ec;
   std::filesystem::remove(stagePath, ec);
-  ec.clear();
+  if (ec)
+    return false;
   std::filesystem::remove(StageMetaPath(stagePath), ec);
+  if (ec)
+    return false;
+  document_source_protection::ReleaseStage(stagePath);
   return true;
 }
 
@@ -1759,6 +1851,8 @@ struct BackupMetaInfo {
   std::filesystem::path destPath;
   std::filesystem::path backupPath;
   std::filesystem::path metaPath;
+  // A legacy destination mapped from the previous workspace location.
+  bool destReinterpreted = false;
 };
 
 bool LoadBackupMetaFile(const std::filesystem::path &metaPath,
@@ -1771,6 +1865,8 @@ bool LoadBackupMetaFile(const std::filesystem::path &metaPath,
 
   BackupMetaInfo meta;
   meta.metaPath = metaPath;
+  std::wstring destRecord;
+  std::wstring backupName;
   std::istringstream iss(*bytes);
   std::string line;
   while (std::getline(iss, line)) {
@@ -1785,19 +1881,42 @@ bool LoadBackupMetaFile(const std::filesystem::path &metaPath,
       meta.destPath = std::filesystem::path(UTF8ToWide(value));
     } else if (key == "backup") {
       meta.backupPath = std::filesystem::path(UTF8ToWide(value));
+    } else if (key == "dest_record") {
+      destRecord = UTF8ToWide(value);
+    } else if (key == "backup_name") {
+      backupName = UTF8ToWide(value);
     } else if (key == "kind") {
       const std::wstring kind = UTF8ToWide(value);
       meta.kind = (kind == L"clrop") ? file_output::StagedDiffKind::Clrop
                                      : file_output::StagedDiffKind::Note;
     }
   }
-  if (meta.backupPath.empty()) {
-    const std::wstring suffix = L".meta.txt";
-    const std::wstring raw = metaPath.wstring();
-    if (raw.size() > suffix.size() &&
-        raw.rfind(suffix) == raw.size() - suffix.size()) {
-      meta.backupPath =
-          std::filesystem::path(raw.substr(0, raw.size() - suffix.size()));
+  const std::filesystem::path ownBackup = OwnFileOfMeta(metaPath);
+  // Record form: written next to the absolute keys that older versions read,
+  // and preferred whenever present and resolvable; otherwise the absolute
+  // keys below still apply.
+  const auto recordBackup = backupName.empty()
+      ? std::nullopt
+      : workspace_relocation::FromOwnFileName(backupName, metaPath.parent_path());
+  const auto recordDest = destRecord.empty()
+      ? std::nullopt
+      : workspace_relocation::FromRecordPath(destRecord, std::filesystem::path(g_workspaceRoot));
+  if (recordBackup && recordDest &&
+      workspace_relocation::SameLocation(*recordBackup, ownBackup)) {
+    meta.backupPath = *recordBackup;
+    meta.destPath = *recordDest;
+  } else if (meta.backupPath.empty()) {
+    meta.backupPath = ownBackup;
+  } else if (const auto relocation =
+                 LegacyRecordRelocation(meta.backupPath, ownBackup)) {
+    // A legacy record written before the workspace folder was renamed or
+    // moved: read the backup from where it is now, map a destination that
+    // was inside the previous workspace, and never touch the old location.
+    meta.backupPath = ownBackup;
+    if (auto dest = workspace_relocation::Rebase(
+            meta.destPath, relocation->recordedRoot, relocation->currentRoot)) {
+      meta.destPath = *dest;
+      meta.destReinterpreted = true;
     }
   }
   if (meta.destPath.empty() || meta.backupPath.empty())
@@ -1938,11 +2057,15 @@ void TrimBackupGenerationsForDestination(
   std::filesystem::path meta = StageMetaPath(bak);
   std::ostringstream oss;
   oss << "kind=" << WideToUTF8(StageKindName(kind)) << "\n";
+  // `dest`/`backup` stay absolute for older versions; the record-form keys
+  // keep the backup usable after the workspace folder is renamed or moved.
   oss << "dest=" << WideToUTF8(destPath.wstring()) << "\n";
   oss << "backup=" << WideToUTF8(bak.wstring()) << "\n";
+  oss << "dest_record=" << RecordPathUtf8(destPath) << "\n";
+  oss << "backup_name=" << WideToUTF8(bak.filename().wstring()) << "\n";
   std::wstring err;
   if (!write_checks::ObservedWriteUtf8(std::filesystem::path{}, meta, oss.str(), meta.parent_path(),
-                                     WorkspaceEscapeRoot(), &err)) {
+                                     WorkspaceQuarantineRoot(), &err)) {
     if (outErr)
       *outErr = err;
     return false;
@@ -1968,7 +2091,7 @@ bool AtomicWriteVerified(const std::filesystem::path &destPath,
   std::wstring err;
   if (!write_checks::ObservedWriteBytes(std::filesystem::path{}, destPath, bytes.data(), bytes.size(),
                                       destPath.parent_path(),
-                                      WorkspaceEscapeRoot(), &err)) {
+                                      WorkspaceQuarantineRoot(), &err)) {
     if (outErr)
       *outErr = err;
     return false;
@@ -2061,6 +2184,9 @@ std::vector<StageMeta> LoadAllStageMeta(file_output::StagedDiffKind kind) {
     if (!std::filesystem::exists(meta.stagePath, existsEc) || existsEc)
       continue;
     meta.kind = kind;
+    // Also adopt checkpoints from earlier processes before displaying or saving
+    // them. Their originals need protection even if no document view is opened.
+    RetainStagedSource(meta);
     out.push_back(std::move(meta));
   }
   return out;
@@ -2654,7 +2780,7 @@ bool WriteNoteEditJournalSegment(const std::filesystem::path &stagePath,
   const auto path = BuildNoteEditJournalPath(stagePath, revision);
   std::wstring err;
   if (!write_checks::ObservedWriteBytes(std::filesystem::path{}, path, bytes.data(), bytes.size(),
-                                      path.parent_path(), WorkspaceEscapeRoot(),
+                                      path.parent_path(), WorkspaceQuarantineRoot(),
                                       &err)) {
     if (outErr)
       *outErr = err;
@@ -2779,6 +2905,36 @@ uint64_t NextRevisionFor(file_output::StagedDiffKind kind,
   return best + 1;
 }
 
+// Leaves the manual recovery procedure next to the checkpoints so a user who
+// finds this folder in Explorer can rescue work without the app. Best effort:
+// a failure never blocks the checkpoint it accompanies.
+void EnsureStageRecoveryReadme() {
+  static bool written = false;
+  if (written)
+    return;
+  const auto root = StageRoot();
+  if (root.empty())
+    return;
+  std::wstring text = localization::Text(L"recovery.manual_readme");
+  std::wstring crlf;
+  crlf.reserve(text.size() + text.size() / 16);
+  for (const wchar_t ch : text) {
+    if (ch == L'\n') crlf += L'\r';
+    crlf += ch;
+  }
+  const std::string bytes = "\xEF\xBB\xBF" + WideToUTF8(crlf);
+  const auto path = root / L"README_RECOVERY.txt";
+  std::string existing;
+  if (ReadFileBytesWin32(path, existing) && existing == bytes) {
+    written = true;
+    return;
+  }
+  std::wstring err;
+  written = write_checks::ObservedWriteBytes(std::filesystem::path{}, path,
+                                             bytes.data(), bytes.size(), root,
+                                             WorkspaceQuarantineRoot(), &err);
+}
+
 std::optional<StageMeta> StageNoteSnapshotWithBytes(
     const std::wstring &notePath, std::string_view bytes,
     const note::SnapshotIdentity *sourceIdentity = nullptr,
@@ -2794,6 +2950,7 @@ std::optional<StageMeta> StageNoteSnapshotWithBytes(
       *outErr = localization::Text(L"file_output.stage.note_stage_folder_create_failed");
     return std::nullopt;
   }
+  EnsureStageRecoveryReadme();
 
   StageMeta meta;
   meta.kind = file_output::StagedDiffKind::Note;
@@ -2875,7 +3032,7 @@ std::optional<StageMeta> StageNoteSnapshotWithBytes(
   std::wstring err;
   if (!write_checks::ObservedWriteBytes(std::filesystem::path{},
           meta.stagePath, bytes.data(), bytes.size(),
-          meta.stagePath.parent_path(), WorkspaceEscapeRoot(), &err)) {
+          meta.stagePath.parent_path(), WorkspaceQuarantineRoot(), &err)) {
     if (outErr)
       *outErr = err;
     return std::nullopt;
@@ -3013,6 +3170,7 @@ StageAnnotationCheckpointWithData(const std::wstring &pdfPath,
       *outErr = localization::Text(L"file_output.stage.annotation_stage_folder_create_failed");
     return std::nullopt;
   }
+  EnsureStageRecoveryReadme();
   StageMeta meta;
   meta.kind = file_output::StagedDiffKind::Clrop;
   meta.annotationNumericPrecision = AnnotNumericPrecision::RoundTrip17;
@@ -3072,7 +3230,7 @@ bool WriteAnnotJournalSegment(const std::wstring &pdfPath,
   const auto path = BuildAnnotJournalPath(pdfPath, baseRevision, revision);
   std::wstring err;
   if (!write_checks::ObservedWriteUtf8(std::filesystem::path{}, path, json, path.parent_path(),
-                                     WorkspaceEscapeRoot(), &err)) {
+                                     WorkspaceQuarantineRoot(), &err)) {
     if (outErr)
       *outErr = err;
     return false;
@@ -4806,7 +4964,8 @@ bool HasPendingOrStagedDiffsUnderPath(const std::filesystem::path &root) {
 
 bool DiscardAllStagedDiffs(HWND owner) {
   for (const auto &entry : ListStagedDiffEntries()) {
-    RemoveStageAndMeta(entry.stagePath);
+    if (!RemoveStageAndMeta(entry.stagePath))
+      return false;
     if (entry.kind == StagedDiffKind::Note) {
       DiscardNoteStageArtifactsForStage(entry.stagePath);
     }
@@ -5101,10 +5260,13 @@ bool DiscardStagedDiff(const std::filesystem::path &stagePath) {
     return false;
   StageMeta meta;
   if (!LoadStageMetaFile(StageMetaPath(stagePath), &meta)) {
+    if (!RemoveStageAndMeta(stagePath))
+      return false;
     DiscardNoteStageArtifactsForStage(stagePath);
-    return RemoveStageAndMeta(stagePath);
+    return true;
   }
-  RemoveStageAndMeta(stagePath);
+  if (!RemoveStageAndMeta(stagePath))
+    return false;
   if (meta.kind == StagedDiffKind::Clrop) {
     DiscardAnnotJournalSegmentsForBase(meta.targetPath,
                                        meta.revision.value_or(0));
@@ -5317,6 +5479,23 @@ bool RestoreFromBackupMeta(HWND owner,
         localization::Text(L"file_output.stage.792b99e266d0"));
     return false;
   }
+  if (meta.destReinterpreted) {
+    // The destination was mapped from where the workspace folder was when
+    // this backup was made. Show the mapped path before writing to it.
+    SilentDialogOptions confirm;
+    confirm.title = localization::Text(L"file_output.stage.5c4b18ff1f3d");
+    confirm.message = localization::Text(L"file_output.stage.backup_relocated_confirm");
+    confirm.kind = SoftNoticeKind::Warning;
+    confirm.buttons = SilentDialogButtons::OkCancel;
+    confirm.okLabel = localization::Text(L"file_output.stage.backup_relocated_restore");
+    confirm.cancelLabel = localization::Text(L"file_output.stage.backup_relocated_cancel");
+    confirm.defaultResult = SilentDialogResult::Cancel;
+    confirm.escapeResult = SilentDialogResult::Cancel;
+    confirm.paths.push_back({localization::Text(L"file_output.stage.backup_relocated_destination"),
+                             meta.destPath.wstring()});
+    if (ShowSilentDialog(owner, confirm) != SilentDialogResult::Ok)
+      return false;
+  }
   auto backupBytes = ReadFileBytes(meta.backupPath);
   if (!backupBytes.has_value()) {
     ShowStageMessageDialog(
@@ -5348,6 +5527,13 @@ bool DeleteBackupMeta(const std::filesystem::path &backupMetaPath,
                       std::wstring *outErr) {
   SaveOperationGuard guard;
   return DeleteBackupMetaFiles(backupMetaPath, outErr);
+}
+
+std::filesystem::path BackupMetaDestination(const std::filesystem::path &backupMetaPath) {
+  BackupMetaInfo meta;
+  if (!LoadBackupMetaFile(backupMetaPath, &meta))
+    return {};
+  return meta.destPath;
 }
 
 #include "file_output_stage_recovery.cppinc"

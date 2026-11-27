@@ -10,7 +10,7 @@ Select material and files on the left, then read a PDF and write a note alongsid
 
 ## Start working
 
-1. Extract the ZIP to a writable folder, keep EXE, DLLs and settings together, and launch `pdf_note_workspace.exe`. Do not launch from inside the ZIP. [Getting Started](Getting_Started.md) covers setup, updates and Full/Lite choices.
+1. Extract the ZIP to a writable folder, keep EXE, DLLs and settings together, and launch `pdf_note_workspace.exe`. Do not launch from inside the ZIP. [Setup, Updates, and Uninstall](Getting_Started.md) covers setup, updates, uninstalling and Full/Lite choices.
 2. Try `sample_workspace/` first if desired. For your own materials, use File to select a writable workspace: this holds documents and saved/recovery data.
 3. Use **File > Create > Lecture**, select it, then create a Session. Select existing entries if already present. Generic terminology may show upper/lower items instead.
 4. Select the session, then use Ctrl+O to import a PDF or drop it onto either the PDF or note pane. It copies into the session, leaving the original in place. Conflicting names/duplicates are reported before starting; 100 MB or more requires confirmation.

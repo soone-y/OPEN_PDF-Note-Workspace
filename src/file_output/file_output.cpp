@@ -7,6 +7,7 @@
 #include "ui/vertical_text_gdi.h"
 #include "core/annotation_rotation.h"
 #include "math/math_render.h"
+#include "math/math_source.h"
 #include "clrop/bridge.h"
 #include "clrop/hash.h"
 #include "clrop/json.h"
@@ -337,7 +338,7 @@ static std::optional<std::wstring> PickSavePathWithSystemDialog(HWND owner,
     dialog->SetFileName(defaultName.c_str());
     FILEOPENDIALOGOPTIONS options{};
     if (SUCCEEDED(dialog->GetOptions(&options))) {
-        options |= FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_NOREADONLYRETURN;
+        options |= FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_NOREADONLYRETURN | FOS_DONTADDTORECENT;
         options &= ~FOS_OVERWRITEPROMPT;
         dialog->SetOptions(options);
     }
@@ -637,6 +638,7 @@ static std::optional<ResolvedNoteExportSource> ResolveNoteExportSource(
         kernel->text_core().clro_ascii_only() == meta.clro_ascii_only &&
         kernel->text_core().quote_lazy_continuation() == meta.quote_lazy_continuation &&
         kernel->text_core().clro_list_implicit_continuation() == meta.clro_list_implicit_continuation &&
+        kernel->text_core().clro_list_body_alignment() == meta.clro_list_body_alignment &&
         kernel->text_core().MatchesRaw(source.raw) &&
         (source.snapshot.identity.content_revision == 0 ||
          source.snapshot.identity.content_revision ==
@@ -1619,65 +1621,11 @@ static std::wstring StripMarkupTags(const std::wstring& s) {
     return out;
 }
 
-static std::wstring StripLineJoins(const std::wstring& s) {
-    std::wstring out;
-    out.reserve(s.size());
-    size_t i = 0;
-    while (i < s.size()) {
-        if (s[i] == L'\r') { ++i; continue; }
-        if (s[i] == L'\n') { out.push_back(L' '); ++i; continue; }
-        if (s[i] == L'<' && i + 3 < s.size()) {
-            if (_wcsnicmp(s.c_str() + i, L"<br>", 4) == 0) {
-                out.push_back(L' ');
-                i += 4;
-                continue;
-            }
-            if (_wcsnicmp(s.c_str() + i, L"<br/>", 5) == 0) {
-                out.push_back(L' ');
-                i += 5;
-                continue;
-            }
-            if (_wcsnicmp(s.c_str() + i, L"<br />", 6) == 0) {
-                out.push_back(L' ');
-                i += 6;
-                continue;
-            }
-        }
-        out.push_back(s[i]);
-        ++i;
-    }
-    return out;
-}
-
-static std::wstring NormalizeMarkupMathText(const std::wstring& s) {
-    std::wstring out;
-    out.reserve(s.size());
-    for (size_t i = 0; i < s.size(); ++i) {
-        wchar_t ch = s[i];
-        if (ch >= 0xFF01 && ch <= 0xFF5E) {
-            ch = static_cast<wchar_t>(ch - 0xFEE0);
-        }
-        out.push_back(ch);
-    }
-    std::wstring res;
-    res.reserve(out.size());
-    for (size_t i = 0; i < out.size(); ++i) {
-        if (i + 1 < out.size() && out[i] == L'-' && out[i + 1] == L'>') {
-            res.push_back(L'\u2192');
-            ++i;
-            continue;
-        }
-        res.push_back(out[i]);
-    }
-    return res;
-}
-
 static std::wstring NormalizeMathAnnotText(const Annotation& ann) {
     std::wstring body = StripMathDelims(ann.text);
     if (ann.mathKind == MathKind::Markup) {
         body = StripMarkupTags(body);
-        body = StripLineJoins(body);
-        body = NormalizeMarkupMathText(body);
+        body = mathrender::NormalizeMarkupSource(body);
     }
     return body;
 }
@@ -1727,26 +1675,19 @@ static bool RenderMathAnnotBitmap(const Annotation& ann, double widthPt, double 
     std::wstring body = NormalizeMathAnnotText(ann);
     auto node = mathrender::Parse(body);
     const int pad = std::max(2, static_cast<int>(std::round(4.0 * padScale * dpi / kDpi)));
-    int availW = std::max(1, wPx - pad * 2);
-    int availH = std::max(1, hPx - pad * 2);
-    if (node) {
-        auto layout = mathrender::Measure(*node, hdc, fontPx, mathrender::RenderStyle::Display);
-        int drawX = pad;
-        int drawY = pad;
-        if (layout.width > availW || layout.height > availH) {
-            int shrink = std::max(2, fontPx / 4);
-            int fontPx2 = std::max(6, fontPx - shrink);
-            layout = mathrender::Measure(*node, hdc, fontPx2, mathrender::RenderStyle::Display);
-            mathrender::Draw(*node, layout, hdc, drawX, drawY, fontPx2, RGB(255, 255, 255),
-                             mathrender::RenderStyle::Display);
-        } else {
-            mathrender::Draw(*node, layout, hdc, drawX, drawY, fontPx, RGB(255, 255, 255),
-                             mathrender::RenderStyle::Display);
-        }
-    }
+    const RECT content{pad, pad, wPx - pad, hPx - pad};
+    const bool rendered = node && mathrender::DrawInBox(*node, hdc, content, fontPx,
+                                                       RGB(255, 255, 255));
 
     if (oldFont) SelectObject(hdc, oldFont);
     SelectObject(hdc, oldBmp);
+
+    if (!rendered) {
+        if (hFont) DeleteObject(hFont);
+        DeleteObject(hbmp);
+        DeleteDC(hdc);
+        return false;
+    }
 
     out.resize(static_cast<size_t>(stride) * hPx);
     memcpy(out.data(), bits, out.size());
@@ -1777,7 +1718,7 @@ static bool RenderMathAnnotBitmap(const Annotation& ann, double widthPt, double 
     return true;
 }
 
-static void AddMathAnnotation(FPDF_DOCUMENT dest, FPDF_PAGE page, const Annotation& ann,
+[[nodiscard]] static bool AddMathAnnotation(FPDF_DOCUMENT dest, FPDF_PAGE page, const Annotation& ann,
                               double bitmapDpiScale, double coordScale) {
     double left = std::min(ann.x1, ann.x2);
     double right = std::max(ann.x1, ann.x2);
@@ -1785,28 +1726,32 @@ static void AddMathAnnotation(FPDF_DOCUMENT dest, FPDF_PAGE page, const Annotati
     double top = std::max(ann.y1, ann.y2);
     double wPt = right - left;
     double hPt = top - bottom;
-    if (wPt <= 0.1 || hPt <= 0.1) return;
+    if (wPt <= 0.1 || hPt <= 0.1) return false;
     int wPx = 0, hPx = 0, stride = 0;
     std::vector<uint8_t> buf;
     constexpr double kBaseDpi = 216.0;
     if (!RenderMathAnnotBitmap(ann, wPt, hPt, kBaseDpi * bitmapDpiScale, coordScale,
-                               buf, wPx, hPx, stride)) return;
+                               buf, wPx, hPx, stride)) return false;
 
     FPDF_PAGEOBJECT img = FPDFPageObj_NewImageObj(dest);
-    if (!img) return;
+    if (!img) return false;
     FPDF_BITMAP bmp = FPDFBitmap_CreateEx(wPx, hPx, FPDFBitmap_BGRA, buf.data(), stride);
-    if (!bmp) { FPDFPageObj_Destroy(img); return; }
+    if (!bmp) { FPDFPageObj_Destroy(img); return false; }
     if (!FPDFImageObj_SetBitmap(&page, 1, img, bmp)) {
         FPDFBitmap_Destroy(bmp);
         FPDFPageObj_Destroy(img);
-        return;
+        return false;
     }
     FPDFBitmap_Destroy(bmp);
-    FPDFImageObj_SetMatrix(img,
+    if (!FPDFImageObj_SetMatrix(img,
                            static_cast<float>(wPt), 0.0f,
                            0.0f, static_cast<float>(-hPt),
-                           static_cast<float>(left), static_cast<float>(bottom + hPt));
+                           static_cast<float>(left), static_cast<float>(bottom + hPt))) {
+        FPDFPageObj_Destroy(img);
+        return false;
+    }
     FPDFPage_InsertObject(page, img);
+    return true;
 }
 
 static COLORREF DarkenColor(COLORREF c, double factor = 0.85) {
@@ -1836,7 +1781,7 @@ static Annotation ScaleAnnotationForExport(const Annotation& src, double coordSc
     return scaled;
 }
 
-static void DrawAnnotationAppearance(const std::vector<Annotation>& annots,
+[[nodiscard]] static bool DrawAnnotationAppearance(const std::vector<Annotation>& annots,
                                  PdfTextFontCache& fonts,
                                  FPDF_DOCUMENT dest, FPDF_PAGE page, int pageIndex,
                                  bool standardTextAnnots,
@@ -1859,8 +1804,8 @@ static void DrawAnnotationAppearance(const std::vector<Annotation>& annots,
             local.x1 = 0; local.y1 = extent.height;
             local.x2 = extent.width; local.y2 = 0;
             const int firstObject = FPDFPage_CountObjects(page);
-            DrawAnnotationAppearance({local}, fonts, dest, page, pageIndex, standardTextAnnots,
-                                     matchPdfPaneTextLayout, 1.0, bitmapDpiScale);
+            if (!DrawAnnotationAppearance({local}, fonts, dest, page, pageIndex, standardTextAnnots,
+                                     matchPdfPaneTextLayout, 1.0, bitmapDpiScale)) return false;
             double aa = 1, bb = 0, cc = 0, dd = 1;
             switch (page_rotation::Normalize(a.contentRotation)) {
             case 1: aa = 0; bb = -1; cc = 1; dd = 0; break;
@@ -1889,18 +1834,7 @@ static void DrawAnnotationAppearance(const std::vector<Annotation>& annots,
                 FPDFPath_SetDrawMode(rect, FPDF_FILLMODE_ALTERNATE, FALSE);
                 FPDFPage_InsertObject(page, rect);
             };
-            if (!a.quads.empty()) {
-                for (size_t qi = 0; qi + 7 < a.quads.size(); qi += 8) {
-                    double minX = std::min(std::min(a.quads[qi + 0], a.quads[qi + 2]), std::min(a.quads[qi + 4], a.quads[qi + 6]));
-                    double maxX = std::max(std::max(a.quads[qi + 0], a.quads[qi + 2]), std::max(a.quads[qi + 4], a.quads[qi + 6]));
-                    double minY = std::min(std::min(a.quads[qi + 1], a.quads[qi + 3]), std::min(a.quads[qi + 5], a.quads[qi + 7]));
-                    double maxY = std::max(std::max(a.quads[qi + 1], a.quads[qi + 3]), std::max(a.quads[qi + 5], a.quads[qi + 7]));
-                    addRect(minX, minY, maxX, maxY);
-                }
-            } else {
-                addRect(std::min(a.x1, a.x2), std::min(a.y1, a.y2),
-                        std::max(a.x1, a.x2), std::max(a.y1, a.y2));
-            }
+            ForEachAnnotationTextRect(a, addRect);
             break;
         }
         case Annotation::Type::TextColor:
@@ -2167,7 +2101,7 @@ static void DrawAnnotationAppearance(const std::vector<Annotation>& annots,
                               bitmapDpiScale, coordScale);
             break;
         case Annotation::Type::MathBox:
-            AddMathAnnotation(dest, page, a, bitmapDpiScale, coordScale);
+            if (!AddMathAnnotation(dest, page, a, bitmapDpiScale, coordScale)) return false;
             break;
         case Annotation::Type::LinkMarker: {
             double radius = (a.width > 0.0) ? a.width : 6.0;
@@ -2203,6 +2137,7 @@ static void DrawAnnotationAppearance(const std::vector<Annotation>& annots,
             break;
         }
     }
+    return true;
 }
 
 // Rendering stays in this TU because it shares the existing font/math cache.
@@ -2228,13 +2163,13 @@ static void DrawAnnotationAppearance(const std::vector<Annotation>& annots,
         if (!scratch) return false;
         bool ok = false;
         try {
-            DrawAnnotationAppearance({ann}, fonts, dest, scratch, pageIndex, standardTextAnnots,
+            const bool appearance = DrawAnnotationAppearance({ann}, fonts, dest, scratch, pageIndex, standardTextAnnots,
                                      matchPdfPaneTextLayout, coordScale, bitmapDpiScale);
             const Annotation scaled = ScaleAnnotationForExport(ann, coordScale);
-            if (embedEditableData) {
+            if (appearance && embedEditableData) {
                 const Annotation editable = ScaleAnnotationForExport(original, coordScale);
                 ok = pdf_annotation_export::Add(dest, page, scratch, scaled, standardTextAnnots, &editable);
-            } else {
+            } else if (appearance) {
                 ok = pdf_annotation_export::Add(dest, page, scratch, scaled, standardTextAnnots, nullptr, false);
             }
         } catch (...) { /* Discard this output; source and recovery data remain. */ }
@@ -2708,8 +2643,8 @@ static void DrawShapeOutlineAlphaPx(HDC hdc, const RECT& rc, const std::vector<P
     DrawPolylineAlphaPx(hdc, pts, penW, color, alpha);
 }
 
-static void DrawMathAnnotationPx(HDC hdc, const RECT& rc, const Annotation& ann, double dpi) {
-    if (!hdc || rc.left >= rc.right || rc.top >= rc.bottom || dpi <= 0.0) return;
+[[nodiscard]] static bool DrawMathAnnotationPx(HDC hdc, const RECT& rc, const Annotation& ann, double dpi) {
+    if (!hdc || rc.left >= rc.right || rc.top >= rc.bottom || dpi <= 0.0) return false;
     double fontPt = (ann.fontPt > 0.0) ? ann.fontPt : g_textFontPt;
     int fontPx = std::max(6, static_cast<int>(std::round(fontPt * dpi / 72.0)));
     LOGFONTW lf{};
@@ -2724,24 +2659,13 @@ static void DrawMathAnnotationPx(HDC hdc, const RECT& rc, const Annotation& ann,
     SetTextColor(hdc, ann.color);
 
     const int pad = std::max(2, static_cast<int>(std::round(4.0 * dpi / kDpi)));
-    const int availW = std::max(1, static_cast<int>(rc.right - rc.left) - pad * 2);
-    const int availH = std::max(1, static_cast<int>(rc.bottom - rc.top) - pad * 2);
-    std::wstring body = NormalizeMathAnnotText(ann);
-    auto node = mathrender::Parse(body);
-    if (node) {
-        auto layout = mathrender::Measure(*node, hdc, fontPx, mathrender::RenderStyle::Display);
-        int drawFontPx = fontPx;
-        if (layout.width > availW || layout.height > availH) {
-            int shrink = std::max(2, fontPx / 4);
-            drawFontPx = std::max(6, fontPx - shrink);
-            layout = mathrender::Measure(*node, hdc, drawFontPx, mathrender::RenderStyle::Display);
-        }
-        mathrender::Draw(*node, layout, hdc, rc.left + pad, rc.top + pad, drawFontPx, ann.color,
-                         mathrender::RenderStyle::Display);
-    }
+    const auto node = mathrender::Parse(NormalizeMathAnnotText(ann));
+    const RECT content{rc.left + pad, rc.top + pad, rc.right - pad, rc.bottom - pad};
+    const bool rendered = node && mathrender::DrawInBox(*node, hdc, content, fontPx, ann.color);
 
     if (oldFont) SelectObject(hdc, oldFont);
     if (hFont) DeleteObject(hFont);
+    return rendered;
 }
 
 static bool DrawAnnotationsToBuffer(const std::vector<Annotation>& annots, int pageIndex, double pageHeightPt,
@@ -2793,18 +2717,7 @@ static bool DrawAnnotationsToBuffer(const std::vector<Annotation>& annots, int p
                 RECT rc{ std::min(l, r), std::min(t, b), std::max(l, r), std::max(t, b) };
                 TintRectTextPixels(hdc, rc, ann.color, buf, stride, wPx, hPx, pageTextRects);
             };
-            if (!ann.quads.empty()) {
-                for (size_t qi = 0; qi + 7 < ann.quads.size(); qi += 8) {
-                    const double minX = std::min(std::min(ann.quads[qi + 0], ann.quads[qi + 2]), std::min(ann.quads[qi + 4], ann.quads[qi + 6]));
-                    const double maxX = std::max(std::max(ann.quads[qi + 0], ann.quads[qi + 2]), std::max(ann.quads[qi + 4], ann.quads[qi + 6]));
-                    const double minY = std::min(std::min(ann.quads[qi + 1], ann.quads[qi + 3]), std::min(ann.quads[qi + 5], ann.quads[qi + 7]));
-                    const double maxY = std::max(std::max(ann.quads[qi + 1], ann.quads[qi + 3]), std::max(ann.quads[qi + 5], ann.quads[qi + 7]));
-                    tintRectPt(minX, minY, maxX, maxY);
-                }
-            } else {
-                tintRectPt(std::min(ann.x1, ann.x2), std::min(ann.y1, ann.y2),
-                           std::max(ann.x1, ann.x2), std::max(ann.y1, ann.y2));
-            }
+            ForEachAnnotationTextRect(ann, tintRectPt);
             break;
         }
         case Annotation::Type::MarkerText: {
@@ -2823,18 +2736,7 @@ static bool DrawAnnotationsToBuffer(const std::vector<Annotation>& annots, int p
                     FillRectAlpha(hdc, rc, col, a);
                 }
             };
-            if (!ann.quads.empty()) {
-                for (size_t qi = 0; qi + 7 < ann.quads.size(); qi += 8) {
-                    double minX = std::min(std::min(ann.quads[qi + 0], ann.quads[qi + 2]), std::min(ann.quads[qi + 4], ann.quads[qi + 6]));
-                    double maxX = std::max(std::max(ann.quads[qi + 0], ann.quads[qi + 2]), std::max(ann.quads[qi + 4], ann.quads[qi + 6]));
-                    double minY = std::min(std::min(ann.quads[qi + 1], ann.quads[qi + 3]), std::min(ann.quads[qi + 5], ann.quads[qi + 7]));
-                    double maxY = std::max(std::max(ann.quads[qi + 1], ann.quads[qi + 3]), std::max(ann.quads[qi + 5], ann.quads[qi + 7]));
-                    fillRectPt(minX, minY, maxX, maxY);
-                }
-            } else {
-                fillRectPt(std::min(ann.x1, ann.x2), std::min(ann.y1, ann.y2),
-                           std::max(ann.x1, ann.x2), std::max(ann.y1, ann.y2));
-            }
+            ForEachAnnotationTextRect(ann, fillRectPt);
             break;
         }
         case Annotation::Type::MarkerFree:
@@ -2957,9 +2859,10 @@ static bool DrawAnnotationsToBuffer(const std::vector<Annotation>& annots, int p
             int t = PtToPxY(topPt);
             int b = PtToPxY(bottomPt);
             RECT rc{ std::min(l, r), std::min(t, b), std::max(l, r), std::max(t, b) };
+            bool mathPainted = false;
             painted = ui::DrawQuarterTurnBox(hdc, rc, ann.contentRotation, [&](HDC localDc, const RECT& localRect) {
-                DrawMathAnnotationPx(localDc, localRect, ann, dpi);
-            }) && painted;
+                mathPainted = DrawMathAnnotationPx(localDc, localRect, ann, dpi);
+            }) && mathPainted && painted;
             break;
         }
         case Annotation::Type::LinkMarker: {

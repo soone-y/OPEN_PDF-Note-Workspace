@@ -42,6 +42,16 @@ bool KeepCurrentNoteOpenAcrossDirectoryChange();
 void AppendPinnedTemporaryFilesToCurrentLists();
 bool RemoveTemporaryFilePathFromCurrentList(const std::wstring& path, bool isNote);
 void RefreshTemporaryFileListDisplay(bool isNote);
+// Session pins belong to the current workspace and retain their original lecture.
+// Selecting a foreign pin navigates through the normal lecture/session switch.
+[[nodiscard]] bool PinSessionPath(const std::wstring& path);
+[[nodiscard]] bool UnpinSessionPath(const std::wstring& path);
+[[nodiscard]] std::wstring PinnedSessionLecturePath(const std::wstring& path);
+void AppendPinnedSessionsToCurrentList();
+// Metadata only; call after a successful directory rename, or with an empty
+// destination after removal. No source file is written by this operation.
+void UpdatePinsAfterDirectoryChange(const std::filesystem::path& source,
+                                    const std::filesystem::path& destination);
 struct TempExternalLecture {
     std::wstring path; // canonical path
 };

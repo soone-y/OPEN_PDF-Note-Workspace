@@ -29,8 +29,7 @@ static bool RunUiAutomationFailedNoteLoadMetadataScenario(const std::wstring& cu
     if (!TryGetUiAutomationWorkspaceRoot(&workspaceRoot)) {
         return fail(L"Failed note load probe requires its isolated workspace.");
     }
-    const std::filesystem::path directory = std::filesystem::path(workspaceRoot) /
-        L"__pdf_note_workspace__" / L"__tmp__" / L"open_work";
+    const std::filesystem::path directory = workspace_layout::Test(std::filesystem::path(workspaceRoot)) / L"open_work";
     std::error_code ec;
     std::filesystem::create_directories(directory, ec);
     const std::filesystem::path target = directory / L"failed_note_load_utf16.md";
@@ -81,8 +80,7 @@ static bool RunUiAutomationRejectedNoteOpenResultScenario(HWND owner,
     if (!TryGetUiAutomationWorkspaceRoot(&workspaceRoot)) {
         return fail(L"Rejected note open probe requires its isolated workspace.");
     }
-    const std::filesystem::path directory = std::filesystem::path(workspaceRoot) /
-        L"__pdf_note_workspace__" / L"__tmp__" / L"open_work";
+    const std::filesystem::path directory = workspace_layout::Test(std::filesystem::path(workspaceRoot)) / L"open_work";
     std::error_code ec;
     std::filesystem::create_directories(directory, ec);
     const std::filesystem::path target = directory / L"rejected_note_open_utf16.md";
@@ -122,8 +120,7 @@ static bool RunUiAutomationExternalReloadRetryScenario(HWND owner,
     std::wstring workspaceRoot;
     if (!TryGetUiAutomationWorkspaceRoot(&workspaceRoot))
         return fail(L"External reload probe requires its isolated workspace.");
-    const std::filesystem::path directory = std::filesystem::path(workspaceRoot) /
-        L"__pdf_note_workspace__" / L"__tmp__" / L"open_work";
+    const std::filesystem::path directory = workspace_layout::Test(std::filesystem::path(workspaceRoot)) / L"open_work";
     std::error_code ec;
     std::filesystem::create_directories(directory, ec);
     const std::filesystem::path target = directory / L"external_reload_retry.md";
@@ -197,8 +194,7 @@ static bool RunUiAutomationExternalCopyRetryScenario(HWND owner,
     std::wstring workspaceRoot;
     if (!TryGetUiAutomationWorkspaceRoot(&workspaceRoot))
         return fail(L"External copy probe requires its isolated workspace.");
-    const std::filesystem::path directory = std::filesystem::path(workspaceRoot) /
-        L"__pdf_note_workspace__" / L"__tmp__" / L"open_work";
+    const std::filesystem::path directory = workspace_layout::Test(std::filesystem::path(workspaceRoot)) / L"open_work";
     std::error_code ec;
     std::filesystem::create_directories(directory, ec);
     const std::filesystem::path target = directory / L"external_copy_retry.md";
@@ -321,6 +317,101 @@ static bool RunUiAutomationOpenWorkScenario(HWND owner, std::wstring* outError) 
     return true;
 }
 
+static bool RunUiAutomationSourceProtectionNoticeScenario(HWND owner, const std::wstring& pdf,
+                                                          std::wstring* outError) {
+    const auto fail = [&](const wchar_t* message) {
+        if (outError) *outError = message;
+        return false;
+    };
+    const auto warning = localization::Text(L"workspace.source_protection_pending_notice");
+    const auto stageText = localization::Text(L"workspace.source_staged_edits_protected_notice");
+    const auto openText = localization::Text(L"workspace.source_display_protected_notice");
+    const HWND foreground = GetForegroundWindow(), focus = GetFocus(), capture = GetCapture();
+    ShowSoftNotice(owner, warning, SoftNoticeKind::Warning);
+    HWND popup = FindUiAutomationSoftNoticeWindow();
+    if (!popup || !IsWindowVisible(popup)) return fail(L"Cannot prepare the owned notice fixture.");
+    ShowPassiveSoftNotice(owner, stageText);
+    DismissSoftNotice(owner, warning);
+    if (IsWindowVisible(popup)) return fail(L"Passive guidance replaced an existing ordinary notice.");
+    // This retained owner selects staged guidance without changing annotation
+    // data. Real checkpoint adoption/consumption has separate stage-host tests.
+    const auto stage = workspace_layout::Test(std::filesystem::path(g_workspaceRoot)) / L"ui_notice_probe.stage";
+    struct RetainedOwner {
+        std::filesystem::path stage;
+        ~RetainedOwner() { document_source_protection::ReleaseStage(stage); }
+    } retained{stage};
+    DWORD error = 0;
+    if (!document_source_protection::RetainStage(stage, pdf, &error))
+        return fail(L"Cannot retain the owned notice fixture.");
+    {
+        const std::lock_guard<std::recursive_mutex> lock(document_source_protection::mutex);
+        document_source_protection::noticeCooldown = {};
+        document_source_protection::pendingNoticeSource.reset();
+    }
+    const auto waitForObservation = [&]() {
+        const auto key = document_source_protection::Key(pdf);
+        const auto deadline = GetTickCount64() + 5000;
+        do {
+            {
+                const std::lock_guard<std::recursive_mutex> lock(document_source_protection::mutex);
+                for (const auto& entry : document_source_protection::sources)
+                    if (entry.second->path == key && entry.second->observation.watching()) return true;
+            }
+            if (!PumpOpenWorkMessages()) return false;
+            Sleep(10);
+        } while (GetTickCount64() < deadline);
+        return false;
+    };
+    const auto conflictingOpen = [&]() {
+        HANDLE probe = CreateFileW(ToExtendedWin32PathIfAbsoluteLocal(pdf).c_str(), DELETE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+        const DWORD code = GetLastError();
+        if (probe != INVALID_HANDLE_VALUE) CloseHandle(probe);
+        return probe == INVALID_HANDLE_VALUE && code == ERROR_SHARING_VIOLATION;
+    };
+    const auto waitForPopup = [&]() {
+        const auto deadline = GetTickCount64() + 5000;
+        do {
+            if (!PumpOpenWorkMessages()) return false;
+            if (IsWindowVisible(popup)) return true;
+            Sleep(10);
+        } while (GetTickCount64() < deadline);
+        return false;
+    };
+    if (!waitForObservation() || !conflictingOpen() || !waitForPopup())
+        return fail(L"Conflicting access did not produce protected-edit guidance.");
+    const LONG_PTR passive = GetWindowLongPtrW(popup, GWL_EXSTYLE);
+    if ((passive & (WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT)) !=
+            (WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT) ||
+        SendMessageW(popup, WM_NCHITTEST, 0, 0) != HTTRANSPARENT ||
+        GetForegroundWindow() != foreground || GetFocus() != focus || GetCapture() != capture)
+        return fail(L"Protection guidance activated a window, intercepted input, or changed focus/capture.");
+    const auto shown = GetTickCount64();
+    const UINT duration = std::min<UINT>(6000, ui::TransientDisplayDurationMs(stageText));
+    if (!waitForObservation() || !conflictingOpen()) return fail(L"Repeated notice probe lost source protection.");
+    const auto deadline = shown + duration + 1000;
+    while (IsWindowVisible(popup) && GetTickCount64() < deadline) {
+        if (!PumpOpenWorkMessages()) return fail(L"Notice expiry probe received quit.");
+        Sleep(10);
+    }
+    if (IsWindowVisible(popup) || GetTickCount64() + 100 < shown + duration)
+        return fail(L"Passive guidance did not expire within its bounded reading time.");
+    document_source_protection::ReleaseStage(stage);
+    if (!waitForObservation() || !conflictingOpen() || !waitForPopup())
+        return fail(L"Save/close guidance did not update after the retained edit was removed.");
+    DismissSoftNotice(owner, openText);
+    if (IsWindowVisible(popup)) return fail(L"Displayed-file guidance used the wrong localized message.");
+    ShowSoftNotice(owner, warning, SoftNoticeKind::Warning);
+    if ((GetWindowLongPtrW(popup, GWL_EXSTYLE) & (WS_EX_LAYERED | WS_EX_TRANSPARENT)) ||
+        SendMessageW(popup, WM_NCHITTEST, 0, 0) != HTCLIENT)
+        return fail(L"Ordinary notices retained passive input behavior.");
+    DismissSoftNotice(owner, warning);
+    if (GetForegroundWindow() != foreground || GetFocus() != focus || GetCapture() != capture)
+        return fail(L"Notice lifecycle changed foreground, focus, or capture.");
+    AppendUiAutomationTrace(L"open_work:source_protection_notice_ok");
+    return true;
+}
+
 static bool RunUiAutomationSourceProtectionCloseScenario(HWND owner, std::wstring* outError) {
     const auto fail = [&](const wchar_t* message) {
         if (outError) *outError = message;
@@ -329,6 +420,7 @@ static bool RunUiAutomationSourceProtectionCloseScenario(HWND owner, std::wstrin
     const std::wstring pdf = CurrentLogicalPdfPath(), note = g_currentNotePath;
     const std::wstring session = g_currentSessionPath;
     if (pdf.empty() || note.empty()) return fail(L"Close probe requires both documents.");
+    if (!RunUiAutomationSourceProtectionNoticeScenario(owner, pdf, outError)) return false;
     const auto protectedSource = [](const std::wstring& path, bool expected) {
         HANDLE probe = CreateFileW(ToExtendedWin32PathIfAbsoluteLocal(path).c_str(), DELETE,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
@@ -421,6 +513,9 @@ static bool RunUiAutomationSourceProtectionCloseScenario(HWND owner, std::wstrin
         !ReadUiAutomationFileBytes(note, &closedBytes) || closedBytes != originalBytes ||
         CountUiAutomationStagesForTarget(file_output::StagedDiffKind::Note, note) == 0)
         return fail(L"Closing edited files lost the checkpoint or changed the original.");
+    // The note checkpoint keeps its closed original protected, as for PDFs.
+    if (!protectedSource(note, true))
+        return fail(L"A note checkpoint did not keep its closed original protected.");
     if (!OpenPdfWithAnnotations(owner, pdf)) return fail(L"Cannot restore close fixture PDF.");
     LoadNoteFile(owner, note);
     if (GetNoteAutomationIndexingText() != originalText + token ||

@@ -10,6 +10,8 @@
 #include <string>
 #include <vector>
 
+namespace mathrender { class Formula; }
+
 namespace note {
 
 class NoteRenderPlacementStorage;
@@ -51,6 +53,9 @@ struct NoteRenderRunPlacement {
     // one whole-row fragment. This compact form is valid only for an
     // unwrapped run; adapters that perform wrapping publish explicit data.
     std::vector<NoteRenderRunPlacementFragment> fragments;
+    // A completed frame owns its parsed formula independently of view-cache
+    // invalidation. This opaque handle retains no HDC or mutable UI state.
+    std::shared_ptr<const mathrender::Formula> math_formula;
 };
 
 // Geometry emitted during measurement for non-text structural presentation.

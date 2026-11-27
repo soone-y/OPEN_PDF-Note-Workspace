@@ -47,6 +47,22 @@ function Get-PowerShellExePath {
     return (Join-Path $PSHOME "powershell.exe")
 }
 
+# Windows PowerShell 5.1 (.NET Framework) has no [IO.Path]::GetRelativePath.
+# Returns the path below RootPath, or $null when Path is not inside RootPath.
+function Get-PathBelowRoot {
+    param(
+        [Parameter(Mandatory)][string]$RootPath,
+        [Parameter(Mandatory)][string]$Path
+    )
+
+    $root = [System.IO.Path]::GetFullPath($RootPath).TrimEnd('\', '/') + '\'
+    $full = [System.IO.Path]::GetFullPath($Path)
+    if (-not $full.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $null
+    }
+    return $full.Substring($root.Length)
+}
+
 function Invoke-BuildViaAsciiJunction {
     param(
         [Parameter(Mandatory)][string]$RepoRootPath,
@@ -56,7 +72,10 @@ function Invoke-BuildViaAsciiJunction {
 
     $relayRoot = Join-Path $env:TEMP ("pdf_note_workspace_ascii_build_" + [Guid]::NewGuid().ToString("N"))
     $powerShellExe = Get-PowerShellExePath
-    $relativeScriptPath = [System.IO.Path]::GetRelativePath($RepoRootPath, $CurrentScriptPath)
+    $relativeScriptPath = Get-PathBelowRoot -RootPath $RepoRootPath -Path $CurrentScriptPath
+    if ([string]::IsNullOrEmpty($relativeScriptPath)) {
+        throw "Build script is outside the repository root: $CurrentScriptPath"
+    }
     $relayScriptPath = Join-Path $relayRoot $relativeScriptPath
     $relayArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $relayScriptPath)
 
@@ -193,7 +212,7 @@ function Write-EndTimeLog {
             Append-BuildDetailLog ($footer -join [Environment]::NewLine)
         }
         catch {
-            Write-Warning ("Failed to write the result to build detail log '{0}': {1}" -f $buildDetailLogPath, $_.Exception.Message)
+            Write-Warning ("ビルド詳細ログへ結果を書き込めませんでした (Failed to write the result to build detail log) '{0}': {1}" -f $buildDetailLogPath, $_.Exception.Message)
         }
     }
     try {
@@ -201,7 +220,7 @@ function Write-EndTimeLog {
         Add-Content -LiteralPath $endTimeLogPath -Value $line -Encoding UTF8
     }
     catch {
-        Write-Warning ("Failed to write end time log to '{0}': {1}" -f $endTimeLogPath, $_.Exception.Message)
+        Write-Warning ("終了時刻ログを書き込めませんでした (Failed to write end time log to) '{0}': {1}" -f $endTimeLogPath, $_.Exception.Message)
     }
 
     Write-Host ("Finished at: {0}" -f $line) -ForegroundColor DarkGray
@@ -275,7 +294,8 @@ function Sync-AppRuntimeArtifacts {
         [Parameter(Mandatory)][string]$Compiler
     )
 
-    $artifacts = @()
+    . (Join-Path $PSScriptRoot "sync_microtex_assets.ps1")
+    $artifacts = @(Sync-MicrotexAssets -SourceRoot (Get-Location).Path -DestinationRoot $BinDir)
     if (Test-Path -LiteralPath $OutputExePath) {
         $artifacts += $OutputExePath
     }
@@ -289,7 +309,7 @@ function Sync-AppRuntimeArtifacts {
         }
     }
     else {
-        Write-Warning "PDFium DLL not found: $pdfiumSource (Executable will fail to run)"
+        Write-Warning "PDFium DLL が見つかりません。実行ファイルは起動できません (PDFium DLL not found; executable will fail to run): $pdfiumSource"
     }
 
     $compilerCmd = Get-Command $Compiler -ErrorAction SilentlyContinue
@@ -306,7 +326,7 @@ function Sync-AppRuntimeArtifacts {
                 }
             }
             else {
-                Write-Warning "MinGW runtime DLL not found in toolchain: $dll (Executable may fail to run)"
+                Write-Warning "ツールチェーンに MinGW runtime DLL が見つかりません。実行ファイルが起動できない可能性があります (MinGW runtime DLL not found in toolchain; executable may fail to run): $dll"
             }
         }
     }
@@ -350,7 +370,14 @@ function Write-BuildInfoManifest {
             continue
         }
         $hash = (Get-FileHash -LiteralPath $artifactPath -Algorithm SHA256).Hash.ToLowerInvariant()
-        $name = Split-Path -Leaf $artifactPath
+        $name = Get-PathBelowRoot -RootPath (Split-Path -Parent $OutputExePath) -Path $artifactPath
+        if ([string]::IsNullOrEmpty($name)) {
+            throw "Build receipt resource escapes the application directory: $artifactPath"
+        }
+        $name = $name.Replace('\', '/')
+        if ($name.StartsWith('../') -or [IO.Path]::IsPathRooted($name)) {
+            throw "Build receipt resource escapes the application directory: $name"
+        }
         $lines += ("artifact`t{0}`t{1}" -f $name, $hash)
     }
 
@@ -432,7 +459,7 @@ function Stop-ProcessWithRetry {
             }
         }
         catch {
-            Write-Warning ("Failed to stop process '{0}' (PID={1}): {2}" -f $ProcessName, $proc.Id, $_.Exception.Message)
+            Write-Warning ("プロセスを停止できませんでした (Failed to stop process) '{0}' (PID={1}): {2}" -f $ProcessName, $proc.Id, $_.Exception.Message)
             return $false
         }
     }
@@ -460,17 +487,9 @@ function Write-BuildOutputSummary {
 Push-Location -LiteralPath $repoRoot
 $globalLockStream = $null
 try {
-    $lockFilePath = Join-Path $outRoot "build.lock"
-    if (-not (Test-Path -LiteralPath $outRoot)) {
-        New-Item -ItemType Directory -Force -Path $outRoot | Out-Null
-    }
-    try {
-        $globalLockStream = [System.IO.File]::Open($lockFilePath, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
-    }
-    catch {
-        Write-Host "Another build is currently running. Please wait for it to finish." -ForegroundColor Red
-        exit 1
-    }
+    # Waits for running builds and GUI tests (out_lock.ps1) instead of failing at once.
+    . (Join-Path $repoRoot "scripts/build/out_lock.ps1")
+    $globalLockStream = Enter-OutLock -OutRoot $outRoot -Mode Exclusive -Label "build $ArtifactName"
 
     $compiler = "g++"
     $cCompiler = "gcc"
@@ -559,6 +578,8 @@ try {
         "-Ithird_party/pdfium/include",
         "-Ithird_party/md4c/src",
         "-Ithird_party/zlib/include",
+        "-Ithird_party/microtex/lib",
+        "-Ithird_party/microtex/platform/gdi_win",
         "-Isrc",
         ("-I{0}" -f $generatedLocaleDir)
     )
@@ -567,6 +588,7 @@ try {
         "third_party/pdfium/lib/pdfium.dll.lib",
         "third_party/zlib/lib/libz.dll.a",
         "-lgdi32",
+        "-lgdiplus",
         "-lole32",
         "-loleacc",
         "-loleaut32",
@@ -698,6 +720,7 @@ try {
         ResourceFiles         = $resourceInputs
         TranslationUnitDesign = $TranslationUnitDesign
         OutputExe             = $outputExe
+        MicrotexAssetsHash    = (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot "sync_microtex_assets.ps1") -Algorithm SHA256).Hash
         BuildDriverHash       = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash
         VersionSupportHash = (Get-FileHash -LiteralPath $versionSupportPath -Algorithm SHA256).Hash
     }
@@ -1038,6 +1061,7 @@ try {
 
     $buildInfoArtifactPaths = Sync-AppRuntimeArtifacts -OutputExePath $outputExe -BinDir $binDir -Compiler $compiler
     Write-BuildInfoManifest -ManifestPath $buildInfoManifestPath -OutputExePath $outputExe -Version $appVersion -Edition $Edition -Locale $Locale -ArtifactPaths $buildInfoArtifactPaths
+    Write-OutBuildSource -OutRoot $outRoot -RepoRoot $repoRoot -Artifact ("{0}.{1}" -f $ArtifactName, $Edition.ToLowerInvariant())
 
     Set-ContentWithRetry -Path $signatureJsonPath -Value $signatureJson -Encoding UTF8
     Set-ContentWithRetry -Path $signatureHashPath -Value $signatureHash -Encoding ASCII -NoNewline
@@ -1048,9 +1072,7 @@ catch {
     throw
 }
 finally {
-    if ($null -ne $globalLockStream) {
-        $globalLockStream.Dispose()
-    }
+    Exit-OutLock $globalLockStream
     if ($restoreNativeCommandErrorPreference) {
         $PSNativeCommandUseErrorActionPreference = $previousNativeCommandErrorPreference
     }

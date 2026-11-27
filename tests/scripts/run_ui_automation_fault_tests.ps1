@@ -156,8 +156,8 @@ $workspaceRoot = Join-Path $outDir "workspace"
 $fixtureSessionSource = Join-Path $repoRoot "tests\fixtures\ui_automation_session"
 $resultFile = Join-Path $outDir "ui_automation_result.txt"
 $traceFile = "$resultFile.trace.txt"
-$noteStageDir = Join-Path $workspaceRoot "__pdf_note_workspace__\__tmp__\__stage__\note"
-$outputExportDir = Join-Path $workspaceRoot "__pdf_note_workspace__\__tmp__\ui_automation_output"
+$noteStageDir = Join-Path $workspaceRoot "__pdf_note_workspace__\__unsaved__\note"
+$outputExportDir = Join-Path $workspaceRoot "__pdf_note_workspace__\__test__\ui_automation_output"
 $workspaceConfigPath = Join-Path $workspaceRoot "workspace.json"
 # Keep the standard watchdog unchanged; longer suites can explicitly select
 # a bounded budget without disabling timeout cleanup or any assertion.
@@ -256,6 +256,8 @@ $binDir = Join-Path (Join-Path $repoRoot "out") ("app_" + $ArtifactName + "_" + 
 New-Item -ItemType Directory -Path $binDir -ErrorAction Stop | Out-Null
 $exePath = Join-Path $binDir ([IO.Path]::GetFileName($sourceExe))
 Copy-Item -LiteralPath $sourceExe -Destination $exePath -ErrorAction Stop
+. (Join-Path $repoRoot "scripts/build/sync_microtex_assets.ps1")
+Sync-MicrotexAssets -SourceRoot $repoRoot -DestinationRoot $binDir | Out-Null
 foreach ($dll in Get-ChildItem -LiteralPath $sourceBinDir -Filter "*.dll" -File) {
     Copy-Item -LiteralPath $dll.FullName -Destination (Join-Path $binDir $dll.Name) -ErrorAction Stop
 }
@@ -395,8 +397,8 @@ try {
         if ($PdfOnly -and $traceText -notmatch '(?m)^pdf_scroll_stability:completed cases=24 valid=1$') {
             throw 'PDF scrolling did not preserve later input across deferred zoom and scrollbar boundaries in all four flow modes.'
         }
-        if ($PdfOnly -and $traceText -notmatch '(?m)^pdf_text_edit_follow:completed cases=60 valid=1$') {
-            throw 'Paused text editing did not preserve the viewport, route Ctrl+Plus to PDF zoom and resume following on input.'
+        if ($PdfOnly -and $traceText -notmatch '(?m)^pdf_text_edit_follow:completed cases=72 valid=1$') {
+            throw 'Paused text editing did not preserve the viewport, route Ctrl+Plus by edit-box visibility and resume following on input.'
         }
         if ($traceText -notmatch '(?m)^pdf_ime:prerequisite native_control=1 native_context=1$') {
             throw 'PDF IME prerequisites were not available or not observed; this is not a completed PDF/IME check.'
@@ -479,6 +481,7 @@ try {
          $traceText -notmatch "(?m)^open_work:external_copy_retry_ok$" -or
          $traceText -notmatch "(?m)^open_work:source_protection_close_ok$" -or
          $traceText -notmatch "(?m)^open_work:source_protection_recovery_ok$" -or
+         $traceText -notmatch "(?m)^open_work:source_protection_notice_ok$" -or
          $traceText -notmatch "(?m)^open_work:parse_reuse_stage_external_ok$" -or
          $traceText -notmatch "(?m)^open_work:pdf_reopen_history_failure_ok$" -or
          $traceText -notmatch "(?m)^open_work:paired_auto_open_ok$" -or
@@ -612,7 +615,7 @@ try {
         if (Test-Path -LiteralPath $workspaceConfigPath) {
             throw "Corrupt workspace.json was recreated during the recovery test."
         }
-        $escapeFiles = Get-ChildItem -LiteralPath (Join-Path $workspaceRoot "__pdf_note_workspace__\__escape__") -File -ErrorAction SilentlyContinue
+        $escapeFiles = Get-ChildItem -LiteralPath (Join-Path $workspaceRoot "__pdf_note_workspace__\__failed__") -File -ErrorAction SilentlyContinue
         if (-not $escapeFiles) {
             throw "Corrupt workspace.json was not quarantined."
         }
@@ -635,7 +638,7 @@ try {
         if ($traceText -notmatch "(?m)^automation:settings_bundle_ok$") {
             throw "UI automation did not complete the settings bundle scenario."
         }
-        $escapeDir = Join-Path $workspaceRoot "__pdf_note_workspace__\__escape__"
+        $escapeDir = Join-Path $workspaceRoot "__pdf_note_workspace__\__backup__"
         $bundleBackups = Get-ChildItem -LiteralPath $escapeDir -Directory -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -like "settings_import_*" -and (Test-Path -LiteralPath (Join-Path $_.FullName "manifest.txt")) }
         if (-not $bundleBackups) {
@@ -678,7 +681,7 @@ try {
     }
     if ($PdfOnly -or $fullSuite) {
         & python -B (Join-Path $repoRoot "tests/python/pdf_page_rotation_check.py") `
-            (Join-Path $workspaceRoot "__pdf_note_workspace__/__tmp__/rotation_probe")
+            (Join-Path $workspaceRoot "__pdf_note_workspace__/__test__/rotation_probe")
         if ($LASTEXITCODE -ne 0) { throw 'Independent page rotation verification failed.' }
     }
     Write-Host "[PASS] UI automation" -ForegroundColor Green

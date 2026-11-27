@@ -1125,6 +1125,7 @@ static void EvictPageTextCoverage(PageCache& page) {
 
 static void EvictPageBitmap(PageCache& page) {
     EvictPageTextCoverage(page);
+    page.readableOverlayMemo = {};
     if (!page.pixels.empty()) {
         std::vector<uint8_t>().swap(page.pixels);
     }

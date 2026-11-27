@@ -177,7 +177,15 @@ int main() {
     Expect(!follow.Following(11002), "a later layout cannot resume following");
     follow.Input(12000);
     Expect(follow.Following(12001), "text input resumes following after navigation");
+    Expect(!follow.PdfZoomLatched(), "text input does not route the shortcut to the PDF");
+    follow.LatchPdfZoom();
+    follow.Suspend();
+    Expect(follow.PdfZoomLatched(), "a PDF zoom keeps later shortcuts on the PDF across viewing gestures");
+    follow.Input(12500);
+    Expect(!follow.PdfZoomLatched(), "resumed text input releases the PDF zoom latch");
+    follow.LatchPdfZoom();
     follow.Reset();
+    Expect(!follow.PdfZoomLatched(), "a new edit does not inherit the PDF zoom latch");
     Expect(!follow.Following(12002), "closing an edit clears following state");
     using scroll_input::WheelInput;
     using scroll_input::PixelRemainder;

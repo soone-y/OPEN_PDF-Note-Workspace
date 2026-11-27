@@ -78,6 +78,7 @@ class SetupJsonRoundTripTests(unittest.TestCase):
 #include <string>
 #include <vector>
 #include "core/atomic_write.h"
+#include "core/workspace_layout.h"
 #include "diagnostics/normal_operations.h"
 #include "core/text_encoding.h"
 #include "core/json_string.h"

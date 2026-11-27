@@ -578,6 +578,12 @@ bool LocalNoteKernel::SetClroListImplicitContinuation(bool value) {
     return true;
 }
 
+bool LocalNoteKernel::SetClroListBodyAlignment(bool value) {
+    if (!text_core_.SetClroListBodyAlignment(value)) return false;
+    ResetDerivedState(true);
+    return true;
+}
+
 bool LocalNoteKernel::CanReadSyntax() const {
     return text_core_.valid() && syntax_ready_ &&
            !pending_transaction_.active() && !deferred_full_refresh_ &&

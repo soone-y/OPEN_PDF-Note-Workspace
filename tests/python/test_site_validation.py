@@ -121,6 +121,22 @@ class SiteValidationRegressionTests(unittest.TestCase):
             self.assertGreaterEqual(len(descriptions), 2, "each catalogue entry needs Japanese and English descriptions")
             self.assertEqual(entry.count("パス / Path:"), 1, "each document has its own source path")
 
+    def test_detail_header_identifies_and_links_the_localized_documentation_portal(self) -> None:
+        for relative, label, href in (
+            ("Guide.md", "文書ポータル", "./index.html"),
+            ("docs/ja/Guide.md", "文書ポータル", "../../index.html"),
+            ("docs/en/Guide.md", "Documentation portal", "../../en/index.html"),
+            ("introduction/en/Guide.md", "Documentation portal", "../../en/index.html"),
+        ):
+            with self.subTest(document=relative):
+                source = self.portal / relative
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text("# Guide\n\nContent.\n", encoding="utf-8")
+                rendered = renderer.convert_md_file_to_html(source, self.portal).read_text(encoding="utf-8")
+                header = rendered.split('<div class="doc-header">', 1)[1].split('<main', 1)[0]
+                self.assertIn(f'<p class="portal-identity"><a href="{href}">{label}</a></p>', header)
+                self.assertLess(header.index('class="portal-identity"'), header.index('class="header-tools"'))
+
     def portal_jump_fixture(self) -> None:
         expected, _ = portal.allowlisted_portal_paths(REPO_ROOT, portal.ALLOWLIST_PATH)
         for relative in expected:
@@ -332,8 +348,8 @@ class SiteValidationRegressionTests(unittest.TestCase):
         expected = {
             "重要な文章にマーカーや下線を付ける", "図や余白へ手書きや図形を加える",
             "PDFへ文字で説明を書き足す", "資料へ数式を書き足す", "PDFとノートを並べて使う",
-            "資料とノートをリンクで結ぶ", "元のPDFと注釈を別々に保存する",
-            "書き込みを含めてPDFを書き出す", "必要なページだけを取り出す", "PDFの出力を結合する",
+            "資料とノートをリンクで結ぶ", "元のPDFと重ね書きを別々に保存する",
+            "重ね書きをPDF注釈にして書き出す", "必要なページだけを取り出す", "PDFの出力を結合する",
             "PDFの1ページを画像にする", "資料と自分の記録から検索する", "授業や回次ごとに資料をまとめる",
             "装飾や数式を含むノートを書く", "ノートを別の形式で書き出す", "Office文書や画像をPDFにする",
             "続きの位置から読み直す", "軽量な閲覧専用ソフトで読む",
@@ -344,7 +360,7 @@ class SiteValidationRegressionTests(unittest.TestCase):
         for feature in features:
             self.assertRegex(feature, r'<p>\S')
         self.assertIn("PDFの標準注釈として保存", section.group(1))
-        self.assertIn("ノート・PDF・注釈は、それぞれ別のファイルとして保存します", html)
+        self.assertIn("ノート・PDF・重ね書きは、それぞれ別のファイルとして保存します", html)
         self.assertIn("関連するPDFとノートは一緒に管理してください", html)
         self.assertIn("元のPDFを直接書き換える処理ではありません", section.group(1))
 
@@ -497,6 +513,33 @@ class SiteValidationRegressionTests(unittest.TestCase):
                 path.write_text(content, encoding="utf-8")
                 self.introduction_errors(expected)
 
+    def test_about_page_is_linked_both_ways_and_listed_in_sitemap(self) -> None:
+        self.replace("index.html", '<a href="about/">立ち位置</a>', "")
+        self.replace("index.html", '<a href="about/">このソフトの立ち位置</a>', "このソフトの立ち位置")
+        self.introduction_errors("must link to the introduction page: about/index.html")
+        self.replace("about/index.html", '<a class="brand" href="../">', '<a class="brand" href="#top">')
+        self.replace("about/index.html", '<a href="../">紹介トップ</a>', "紹介トップ")
+        self.introduction_errors("must link back to the introduction home")
+        sitemap = self.site / "sitemap.xml"
+        text = sitemap.read_text(encoding="utf-8")
+        sitemap.write_text(re.sub(r"\s*<url>\s*<loc>[^<]*/about/</loc>.*?</url>", "", text, flags=re.S), encoding="utf-8")
+        self.introduction_errors("only one canonical URL for each introduction page")
+
+    def test_about_page_metadata_and_structured_data_are_checked(self) -> None:
+        original = (self.site / "about/index.html").read_text(encoding="utf-8-sig")
+        for old, new, expected in (
+            (f'<link href="{introduction.ABOUT_URL}" rel="canonical"/>', f'<link href="{introduction.CANONICAL_URL}" rel="canonical"/>', "about/index.html must declare exactly one canonical"),
+            (f'<meta content="{introduction.ABOUT_URL}" property="og:url"/>', "", "about/index.html is missing required search metadata: og:url"),
+            ('"@type": "WebPage"', '"@type": "Article"', "about/index.html must declare one WebPage"),
+            ('"inLanguage": "ja"', '"inLanguage": "en"', "WebPage URL and language"),
+            ('"isPartOf": {"@type": "WebSite"', '"isPartOf": {"@type": "Thing"', "belong to the introduction WebSite"),
+            ("<h1>", "<h2>", "about/index.html must contain exactly one h1"),
+        ):
+            with self.subTest(expected=expected):
+                (self.site / "about/index.html").write_text(original, encoding="utf-8")
+                self.replace("about/index.html", old, new)
+                self.introduction_errors(expected)
+
     def test_sitemap_dates_are_validated_not_hardcoded(self) -> None:
         path = self.site / "sitemap.xml"
         original = path.read_text(encoding="utf-8")
@@ -640,7 +683,13 @@ class SiteValidationRegressionTests(unittest.TestCase):
         self.assertIn('<ul role="list">', outline)
         self.assertNotIn('<ol', outline)
         self.assertEqual([label for _, label in links], re.findall(r'^## (.+)$', markdown, re.MULTILINE))
-        self.assertEqual([label.split('. ', 1)[0] for _, label in links], [str(n) for n in range(8)])
+        # The guide's own 0-based step numbers stay contiguous and come first; the count follows
+        # the guide, and unnumbered sections (such as troubleshooting) may follow the steps.
+        numbered = [label.split('. ', 1)[0] for _, label in links if re.match(r'\d+\. ', label)]
+        self.assertGreaterEqual(len(numbered), 8)
+        self.assertEqual(numbered, [str(n) for n in range(len(numbered))])
+        self.assertEqual([label for _, label in links[:len(numbered)]],
+                         [label for _, label in links if re.match(r'\d+\. ', label)])
         for identifier, _ in links:
             self.assertIn(f'id="{identifier}"', body)
         css = re.search(r'\.document-outline ul\s*\{\{([^}]+)', renderer.HTML_TEMPLATE)
@@ -669,6 +718,16 @@ class SiteValidationRegressionTests(unittest.TestCase):
             self.assertEqual(renderer.main([str(self.portal)]), 0)
         rendered = document.with_suffix(".html").read_text(encoding="utf-8")
         self.assertIn('id="ログ生成物の容量を確認する"', rendered)
+
+    def test_heading_code_span_keeps_underscores_like_github(self) -> None:
+        document = self.portal / "docs/en/Help_Reference.md"
+        document.parent.mkdir(parents=True)
+        document.write_text("# Help\n\n### Management folder (`__pdf_note_workspace__`)\n\n## **Bold** _note_\n", encoding="utf-8")
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(renderer.main([str(self.portal)]), 0)
+        rendered = document.with_suffix(".html").read_text(encoding="utf-8")
+        self.assertIn('id="management-folder-__pdf_note_workspace__"', rendered)
+        self.assertIn('id="bold-note"', rendered)
 
     def test_statistics_history_is_rendered_and_linked_from_summary(self) -> None:
         history = self.portal / "docs/statistics/HISTORY.md"

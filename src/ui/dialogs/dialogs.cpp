@@ -3,6 +3,7 @@
 #include "core/localization.h"
 #include "core/preview_trace.h"
 #include "core/secure_memory.h"
+#include "file_output/file_output.h"
 #include "ui/noop_nav_guard.h"
 #include "ui/transient_display.h"
 
@@ -1491,17 +1492,6 @@ static std::wstring FormatFileTime(const std::filesystem::file_time_type& ft) {
     return buf;
 }
 
-static std::wstring ExtractDestFromMeta(const std::filesystem::path& metaPath) {
-    std::ifstream ifs(metaPath);
-    std::string line;
-    while (std::getline(ifs, line)) {
-        if (line.rfind("dest=", 0) == 0) {
-            return UTF8ToWide(line.substr(5));
-        }
-    }
-    return L"";
-}
-
 static LRESULT CALLBACK RestoreBackupDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     RestoreBackupDialogCtx* ctx = reinterpret_cast<RestoreBackupDialogCtx*>(GetWindowLongPtrW(hWnd, GWLP_USERDATA));
     switch (msg) {
@@ -1548,7 +1538,7 @@ static LRESULT CALLBACK RestoreBackupDlgProc(HWND hWnd, UINT msg, WPARAM wParam,
                     BackupEntry b;
                     b.metaPath = entry.path();
                     b.ftime = std::filesystem::last_write_time(entry.path(), ec);
-                    b.destPath = ExtractDestFromMeta(entry.path());
+                    b.destPath = file_output::BackupMetaDestination(entry.path()).wstring();
                     entries.push_back(b);
                 }
             }
@@ -2395,6 +2385,13 @@ void DismissAppExitDismissibleDialogs() {
 
 bool HasAppExitBlockingDialog() {
     return HasAppExitBlockingDialogInternal();
+}
+
+void ActivateAppExitBlockingDialog() {
+    if (!HasAppExitBlockingDialogInternal()) return;
+    HWND dialog = g_appExitBlockingDialogs.front();
+    if (IsIconic(dialog)) ShowWindow(dialog, SW_RESTORE);
+    SetForegroundWindow(dialog);
 }
 
 SilentDialogResult ShowSilentDialog(HWND owner, const SilentDialogOptions& options) {

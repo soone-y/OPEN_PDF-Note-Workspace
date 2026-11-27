@@ -57,6 +57,7 @@ def main():
         source_name = args.executable + ".exe" if name == "pdf_note_workspace.exe" else name
         shutil.copy2(repo / "out/bin" / source_name,
                      owned_executable if name == "pdf_note_workspace.exe" else root / name)
+    shutil.copytree(repo / "out/bin/resources/math", root / "resources/math")
     workspace = root / "workspace"
     session = workspace / "lecture1/session1"
     destination = session / "授業 日本語 destination"
@@ -911,7 +912,7 @@ def main():
                 send(editors[0], 0x102, ord(character), 1)  # Actual WM_CHAR input
             if token not in text(editors[0]):
                 raise RuntimeError("Owned note input was not accepted")
-            stage_dir = workspace / "__pdf_note_workspace__/__tmp__/__stage__/note"
+            stage_dir = workspace / "__pdf_note_workspace__/__unsaved__/note"
             wait(lambda: stage_dir.exists() and any(stage_dir.iterdir()))
             # Individual output must preserve the remaining queue. Cancel an
             # overwrite and inject an inaccessible destination without losing it.
@@ -1406,7 +1407,7 @@ def main():
             send(lists[2], 0x186, 0)
             send(main_window, 0x111, 1 << 16, lists[2])
             send(main_window, 0x111, 1043)  # Save a clockwise page rotation.
-            view_file = workspace / "__pdf_note_workspace__" / "__tmp__" / "pdf_view_positions.txt"
+            view_file = workspace / "__pdf_note_workspace__" / "__recent__" / "pdf_view_positions.txt"
 
             def saved_pdf_rotations(path):
                 for row in view_file.read_text(encoding="utf-8").splitlines():

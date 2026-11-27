@@ -787,6 +787,7 @@ static bool RefreshFinalNoteRenderFrameOnce(
         input.editor_selection = editorSelection;
         input.editor_caret = editorCaret;
         input.measurement_dc = measurementDc;
+        input.measurement_options.math_cache = &GetViewContext(hWnd).mathCache;
         input.measurement_options.inline_math_vertical_alignment =
             static_cast<note::NoteRenderInlineMathVerticalAlignment>(
                 std::clamp(g_config.noteInlineMathVerticalAlignment, 0, 2));

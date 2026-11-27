@@ -26,10 +26,20 @@ class PrototypeLicenseTests(unittest.TestCase):
                     shutil.copyfile(source, destination)
         self.output = self.root / 'out/bin'
 
+    def add_math_notices(self, output):
+        for name, relative in licenses.APP_MATH_NOTICES.items():
+            source = self.root / relative
+            source.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ROOT / relative, source)
+            target = output / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+
     def test_both_locales_preserve_originals(self):
         for locale in ('ja', 'en'):
             for variant in ('prototype', 'standard'):
                 output = self.output / locale / variant
+                if variant == 'standard': self.add_math_notices(output)
                 self.assertEqual(licenses.prepare(self.root, output, locale, False, variant), 26)
                 self.assertEqual(licenses.prepare(self.root, output, locale, True, variant), 26)
                 for name, source in licenses.source_files(self.root, locale, variant).items():
@@ -68,6 +78,21 @@ class PrototypeLicenseTests(unittest.TestCase):
     def test_output_outside_local_build_area_fails(self):
         with self.assertRaises(ValueError): licenses.prepare(self.root, self.root / 'outside', 'ja', False)
         self.assertFalse((self.root / 'outside').exists())
+
+    def test_shared_standard_output_accepts_only_complete_original_math_notices(self):
+        # The standard viewer renders formulas, so its bundle cannot omit the math notices.
+        with self.assertRaises(ValueError): licenses.prepare(self.root, self.output, 'ja', False, 'standard')
+        self.assertFalse((self.output / 'licenses/README.txt').exists())
+        self.add_math_notices(self.output)
+        licenses.prepare(self.root, self.output, 'ja', False, 'standard')
+        self.assertEqual(licenses.prepare(self.root, self.output, 'ja', True, 'standard'), 26)
+        target = self.output / 'licenses/xits/OFL.txt'
+        original = target.read_bytes()
+        target.write_bytes(b'changed')
+        with self.assertRaises(ValueError): licenses.prepare(self.root, self.output, 'ja', True, 'standard')
+        target.write_bytes(original)
+        target.unlink()
+        with self.assertRaises(ValueError): licenses.prepare(self.root, self.output, 'ja', True, 'standard')
 
 
 if __name__ == '__main__':

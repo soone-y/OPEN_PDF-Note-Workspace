@@ -32,6 +32,8 @@ try {
     foreach ($name in @('pdfium.dll', 'zlib1.dll', 'libgcc_s_seh-1.dll', 'libstdc++-6.dll', 'libwinpthread-1.dll')) {
         Copy-Item -LiteralPath (Join-Path $binDir $name) -Destination $outputDir
     }
+    . (Join-Path $repoRoot "scripts/build/sync_microtex_assets.ps1")
+    Sync-MicrotexAssets -SourceRoot $repoRoot -DestinationRoot $outputDir | Out-Null
     $process = Start-Process -FilePath $testExe -WorkingDirectory $outputDir -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput (Join-Path $outputDir 'stdout.log') -RedirectStandardError (Join-Path $outputDir 'stderr.log')
     $ownedHandle = $process.Handle
@@ -50,6 +52,8 @@ try {
     if ($testOutput -notmatch '(?m)^List scroll PASS:') { throw "Required precision-scroll and viewport cases were not observed: $outputDir" }
     if ($testOutput -notmatch '(?m)^List context reload PASS:') { throw "Required directory reload cases were not observed: $outputDir" }
     if ($testOutput -notmatch '(?m)^Nested sessions PASS:') { throw "Required nested session cases were not observed: $outputDir" }
+    if ($testOutput -notmatch '(?m)^File pins PASS:') { throw "Required file pin cases were not observed: $outputDir" }
+    if ($testOutput -notmatch '(?m)^Session pins PASS:') { throw "Required session pin cases were not observed: $outputDir" }
     Write-Output $testOutput.TrimEnd()
     Write-Host "Retained fixture and logs: $outputDir"
     Write-Host 'Real control/data/owner-draw paths were checked; physical scrolling, DPI changes and audio were not observed.'

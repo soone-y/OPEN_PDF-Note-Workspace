@@ -116,6 +116,15 @@ struct WorkspaceConfig {
     bool clroAsciiOnly = false;
     bool noteQuoteLazyContinuation = false;
     bool clroListImplicitContinuation = false;
+    bool clroListBodyAlignment = false;
+    void SetClroListImplicitContinuation(bool value) noexcept {
+        clroListImplicitContinuation = value;
+        if (value) clroListBodyAlignment = false;
+    }
+    void SetClroListBodyAlignment(bool value) noexcept {
+        clroListBodyAlignment = value;
+        if (value) clroListImplicitContinuation = false;
+    }
     int noteBottomSpaceMode = 0;
     int noteBottomSpaceFixedDip = 32;
     int noteBottomSpaceFontPercent = 400;
@@ -123,7 +132,7 @@ struct WorkspaceConfig {
     bool noteRawOnly = false;
     bool noteRenderMath = true;
     bool noteWrapEnabled = true;
-    bool noteVimModeEnabled = false;
+    bool noteVimModeEnabled = true;
     bool noteVimCaretLineRawTextVisible = false;
     bool noteVimClickEntersInsertMode = true;
     // Delay after the latest edit before refreshing the rendered note overlay.

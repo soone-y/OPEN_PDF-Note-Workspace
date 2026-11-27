@@ -11,6 +11,7 @@
 #include "pdf_view/pdf_view.h"
 #include "core/preview_trace.h"
 #include "core/atomic_write.h"
+#include "core/workspace_layout.h"
 #include "diagnostics/normal_operations.h"
 #include "settings/settings.h"
 #include "settings/palette_stock_store.h"
@@ -119,7 +120,6 @@ void ApplyConfigToUI(HWND hWnd) {
     g_noteVimModeEnabled = g_config.noteVimModeEnabled;
     g_noteVimCaretLineRawTextVisible = g_config.noteVimCaretLineRawTextVisible;
     g_noteVimClickEntersInsertMode = g_config.noteVimClickEntersInsertMode;
-    mathrender::SetSupSubGapSupPercent(g_config.noteMathSupSubGapSupPercent);
     if (!g_noteVimModeEnabled) {
         g_noteNormalMode = false;
         ExitCurrentNoteNormalMode();
@@ -512,6 +512,33 @@ bool ProbeDirectoryEditingAccess(const std::filesystem::path& dir, std::wstring*
     return TryOpenDirForList(dir, error) && TryWriteTempDeleteOnCloseFile(dir, error);
 }
 
+// DELETE_OR_KEEP.txt directly below the management root tells the user which
+// folders may be deleted and what the app does afterwards. The text comes from
+// the current UI language. It is rewritten only when missing or different, so
+// switching the language rewrites it once. A failure never blocks the caller:
+// the guide is informational and the folders are already in place.
+static void EnsureWorkspaceDeleteGuideBestEffort(const std::filesystem::path& workspace) {
+    const auto path = workspace_layout::DeleteGuide(workspace);
+    if (path.empty()) return;
+    const std::wstring text = localization::Text(L"workspace.delete_guide.body");
+    if (text.empty()) return;
+    std::wstring crlf;
+    crlf.reserve(text.size() + text.size() / 16);
+    for (const wchar_t ch : text) {
+        if (ch == L'\n') crlf += L'\r';
+        crlf += ch;
+    }
+    const std::string bytes = "\xEF\xBB\xBF" + WideToUTF8(crlf);
+    std::string existing;
+    if (ReadFileBytesWin32(path, existing) && existing == bytes) return;
+    std::wstring err;
+    if (!write_checks::ObservedWriteBytes(workspace, path, bytes.data(), bytes.size(),
+                                          workspace_layout::Tmp(workspace),
+                                          workspace_layout::Failed(workspace), &err)) {
+        preview_trace::Append(L"DeleteGuide", L"write_failed path=" + path.wstring() + L" err=" + err);
+    }
+}
+
 bool EnsureWorkspaceResourceDirsWithErr(const std::wstring& root,
                                                std::filesystem::path* settingsDir,
                                                std::wstring* outErr) {
@@ -520,12 +547,13 @@ bool EnsureWorkspaceResourceDirsWithErr(const std::wstring& root,
         if (outErr) *outErr = L"workspace root is empty";
         return false;
     }
-    std::filesystem::path resource = std::filesystem::path(root) / L"__pdf_note_workspace__";
-    std::filesystem::path settings = resource / L"__settings__";
-    std::filesystem::path cache = resource / L"__tmp__";
-    std::filesystem::path escape = resource / L"__escape__";
-    std::filesystem::path themes = resource / L"__theme__";
-    std::filesystem::path logs = resource / L"__log__";
+    const std::filesystem::path workspace(root);
+    std::filesystem::path settings = workspace_layout::Settings(workspace);
+    std::filesystem::path cache = workspace_layout::Tmp(workspace);
+    std::filesystem::path escape = workspace_layout::Failed(workspace);
+    std::filesystem::path themes = workspace_layout::Theme(workspace);
+    std::filesystem::path logs = workspace_layout::Log(workspace);
+    std::filesystem::path recent = workspace_layout::Recent(workspace);
     std::error_code ec;
     std::filesystem::create_directories(settings, ec);
     if (ec) {
@@ -552,8 +580,14 @@ bool EnsureWorkspaceResourceDirsWithErr(const std::wstring& root,
         if (outErr) *outErr = L"failed to create: " + logs.wstring() + L"\n" + UTF8ToWide(ec.message());
         return false;
     }
+    std::filesystem::create_directories(recent, ec);
+    if (ec) {
+        if (outErr) *outErr = L"failed to create: " + recent.wstring() + L"\n" + UTF8ToWide(ec.message());
+        return false;
+    }
+    EnsureWorkspaceDeleteGuideBestEffort(workspace);
 
-    // Move stale atomic temp files from __tmp__ to __escape__ (best-effort).
+    // Move stale atomic temp files from __tmp__ to __failed__ (best-effort).
     {
         std::error_code itEc;
         auto now = std::filesystem::file_time_type::clock::now();
@@ -1638,7 +1672,7 @@ static bool PickSettingsPresetSavePath(HWND owner, std::filesystem::path* outPat
     dialog->SetFileName(L"pdf_note_settings_preset.pnssettings");
     FILEOPENDIALOGOPTIONS options{};
     if (SUCCEEDED(dialog->GetOptions(&options))) {
-        options |= FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_NOREADONLYRETURN | FOS_OVERWRITEPROMPT;
+        options |= FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_NOREADONLYRETURN | FOS_OVERWRITEPROMPT | FOS_DONTADDTORECENT;
         dialog->SetOptions(options);
     }
     hr = dialog->Show(owner);
@@ -1684,7 +1718,7 @@ static bool PickSettingsPresetOpenPath(HWND owner, std::filesystem::path* outPat
     dialog->SetFileTypes(static_cast<UINT>(std::size(filters)), filters);
     FILEOPENDIALOGOPTIONS options{};
     if (SUCCEEDED(dialog->GetOptions(&options))) {
-        options |= FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST;
+        options |= FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST | FOS_DONTADDTORECENT;
         dialog->SetOptions(options);
     }
     hr = dialog->Show(owner);
@@ -1834,7 +1868,7 @@ static std::filesystem::path CreateSettingsImportBackupDir(const std::vector<Set
                                                            std::wstring* outErr) {
     const std::filesystem::path root(g_workspaceRoot);
     if (root.empty()) return {};
-    const std::filesystem::path escapeRoot = root / L"__pdf_note_workspace__" / L"__escape__";
+    const std::filesystem::path escapeRoot = workspace_layout::Backup(root);
     std::error_code ec;
     std::filesystem::create_directories(escapeRoot, ec);
     if (ec) {
@@ -2120,8 +2154,7 @@ void ShowRecoveryDialog(HWND hWnd) {
         ShowSoftNotice(hWnd, msg, SoftNoticeKind::Warning);
         return;
     }
-    std::filesystem::path resource = std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__";
-    std::filesystem::path backupRoot = resource / L"__escape__" / L"backup";
+    std::filesystem::path backupRoot = workspace_layout::Backup(std::filesystem::path(g_workspaceRoot));
 
     std::wstring msg = localization::Text(L"workspace.recovery.action_prompt");
 
@@ -2208,8 +2241,7 @@ void ShowRestoreBackupListDialogAndExecute(HWND hWnd) {
         if (ShowSilentDialog(hWnd, confirm) != SilentDialogResult::Yes) return;
     }
 
-    std::filesystem::path resource = std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__";
-    std::filesystem::path backupRoot = resource / L"__escape__" / L"backup";
+    std::filesystem::path backupRoot = workspace_layout::Backup(std::filesystem::path(g_workspaceRoot));
     std::filesystem::path pickedMeta;
     
     if (PromptBackupList(hWnd, backupRoot,
@@ -2250,7 +2282,7 @@ void ShowDeleteSavedBackupDialog(HWND hWnd) {
         return;
     }
 
-    std::filesystem::path backupRoot = std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__" / L"__escape__" / L"backup";
+    std::filesystem::path backupRoot = workspace_layout::Backup(std::filesystem::path(g_workspaceRoot));
     std::filesystem::path selected;
     if (!PromptBackupList(hWnd, backupRoot, ui.menuDeleteBackup,
                           localization::Text(L"menu.common.delete"), selected)) {

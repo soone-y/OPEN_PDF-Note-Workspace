@@ -5,6 +5,7 @@
 #include "note/note_parser.h"
 #include "note/note_render_final_display_run.h"
 #include "note/note_render_final_win32_adapter.h"
+#include "note/note_math_render_cache.h"
 
 namespace note_markup_test {
 struct Result { bool text = true, html = true, links = true, math = true, indent = true; };
@@ -75,12 +76,17 @@ struct Result { bool text = true, html = true, links = true, math = true, indent
     input.layout_key = {320, 96, 96, 1, 4, 8, true};
     input.owner_input.render_active = true;
     input.owner_input.editor_text_core_current = true;
-    note::NoteRenderFinalGdiMeasurementProvider provider(surface.dc);
+    note::NoteMathRenderCache mathCache;
+    note::NoteRenderFinalGdiMeasurementOptions measurement;
+    measurement.math_cache = &mathCache;
+    note::NoteRenderFinalGdiMeasurementProvider provider(surface.dc, measurement);
     const auto build = [&](const wchar_t* raw) {
         core.Reset(note::NoteId{13000}, {L"markup.clro", L"markup"}, raw, 1, 1);
         input.owner_input.visible_lines = {{0}, {core.logical_line_count()}};
         std::shared_ptr<const note::NoteRenderFinalPublication> frame;
         const auto built = note::NoteRenderFinalTransaction::BuildComplete(core, input, provider, &frame);
+        // A committed frame must own its prepared math after cache eviction.
+        mathCache.Clear();
         if (built != note::NoteRenderFinalCompleteBuildResult::Built) {
             std::cerr << "markup: frame failed result=" << int(built) << " raw=";
             for (const auto* ch = raw; *ch; ++ch) std::cerr << char(*ch);
@@ -147,8 +153,12 @@ struct Result { bool text = true, html = true, links = true, math = true, indent
         for (size_t i = 0; result.math && i < source.runs.size(); ++i) {
             if (source.runs[i].kind != note::NoteRenderSourceRunKind::InlineMath) continue;
             note::NoteRenderFinalHit hit;
+            const auto& mathPlacement = placed.runs[i];
+            if (mathPlacement.fragments.empty()) { result.math = false; break; }
+            const auto& mathFragment = mathPlacement.fragments.front();
             result.math = source.runs[i].styles.size() == 4 && adapter->HitTest(
-                placed.runs[i].x_px + placed.runs[i].width_px/2, 0, &hit) ==
+                mathPlacement.x_px + mathPlacement.width_px/2,
+                mathFragment.top_offset_px + mathFragment.height_px/2, &hit) ==
                 note::NoteRenderFinalPresentationInteractionResult::Resolved && hit.link_target == L"math";
             found = true;
         }

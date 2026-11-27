@@ -2,7 +2,10 @@
 // NOTE: Included by operations.cppinc. This fragment owns safe rename/move flows
 // and any linked note-path rewrites needed to keep data consistent.
 #include "clrop/hash.h"
+#include "core/workspace_layout.h"
 #include "note/note_file_policy.h"
+#include "core/workspace_relocation.h"
+#include "workspace/operation_record_store.h"
 
 #include <algorithm>
 #include <limits>
@@ -117,12 +120,12 @@ static bool ValidateOperationDestinationFolder(HWND owner,
 
 static std::filesystem::path OperationPreferredTmpDir() {
     if (g_workspaceRoot.empty()) return {};
-    return std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__" / L"__tmp__";
+    return workspace_layout::Tmp(std::filesystem::path(g_workspaceRoot));
 }
 
 static std::filesystem::path OperationQuarantineDir() {
     if (g_workspaceRoot.empty()) return {};
-    return std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__" / L"__escape__";
+    return workspace_layout::Failed(std::filesystem::path(g_workspaceRoot));
 }
 
 static bool ReadOperationFileBytes(const std::filesystem::path& path,
@@ -326,6 +329,13 @@ struct OperationTransaction {
     std::vector<OperationTransactionRewrite> rewrites;
     std::vector<OperationTransactionNoteAlias> noteAliases;
     std::vector<OperationTransactionResourceAlias> resourceAliases;
+    // Set when the record was read from a different workspace location than
+    // the one it was written at (the folder holding the workspace was renamed
+    // or moved while the app was closed). The record's own backups are then
+    // already resolved inside `dir`; members below `recordedWorkspaceRoot`
+    // are mapped onto the current workspace only after the user agrees.
+    std::filesystem::path recordedWorkspaceRoot;
+    bool workspaceRelocated = false;
 };
 
 // A failed recovery blocks only the session whose files are represented by
@@ -339,6 +349,9 @@ struct OperationRecoveryBlock {
     std::string state;
     bool hasTransaction = false;
     bool memberPathsVerified = false;
+    // The block came from the session scan (not from an operation that is
+    // still running), so the user may set the record aside or retry it.
+    bool fromSessionScan = false;
 };
 
 static OperationRecoveryBlock s_operationRecoveryBlock;
@@ -360,7 +373,7 @@ struct WorkspaceOperationHistory {
 static WorkspaceOperationHistory s_workspaceOperationHistory;
 
 static std::filesystem::path OperationTransactionsRoot() {
-    return OperationQuarantineDir() / L"operation_transactions";
+    return workspace_layout::Operations(std::filesystem::path(g_workspaceRoot));
 }
 
 static bool EnsureOperationResourceCatalogConfigured(std::wstring* outErr) {
@@ -508,13 +521,62 @@ static std::wstring OperationResourceAliasStepLabel(const std::string& step) {
     return localization::Text(L"workspace.file_ops.recovery_state_unknown");
 }
 
-static void ShowOperationRecoveryRequiredDialog(HWND owner,
-                                                const std::wstring& title,
-                                                const std::filesystem::path& manifest,
-                                                const OperationTransaction* transaction = nullptr,
-                                                const char* persistedState = nullptr,
-                                                const std::wstring& context = L"",
-                                                bool memberPathsVerified = false) {
+static std::filesystem::path OperationTransactionsSetAsideRoot() {
+    return workspace_layout::OperationsSetAside(std::filesystem::path(g_workspaceRoot));
+}
+
+// Sets one scanned record aside after the user confirmed it. The move itself
+// is operation_record_store::MoveRecordAside: the whole record directory is
+// moved to __operations_set_aside__, nothing is deleted, and the user's files are left
+// exactly as they are.
+static bool ConfirmAndSetAsideOperationTransactionRecord(HWND owner,
+                                                         const std::wstring& title,
+                                                         const std::filesystem::path& manifest) {
+    SilentDialogOptions confirm;
+    confirm.title = title.empty() ? OperationMenuTitle() : title;
+    confirm.message = localization::Text(L"workspace.file_ops.recovery_set_aside_confirm");
+    confirm.kind = SoftNoticeKind::Warning;
+    confirm.buttons = SilentDialogButtons::OkCancel;
+    confirm.okLabel = localization::Text(L"workspace.file_ops.recovery_set_aside");
+    confirm.cancelLabel = localization::Text(L"workspace.file_ops.recovery_set_aside_cancel");
+    confirm.defaultResult = SilentDialogResult::Cancel;
+    confirm.escapeResult = SilentDialogResult::Cancel;
+    confirm.preferredWidthPx = 640;
+    confirm.paths.push_back({localization::Text(L"workspace.file_ops.recovery_manifest"),
+                             manifest.wstring()});
+    confirm.paths.push_back({localization::Text(L"workspace.file_ops.recovery_set_aside_folder"),
+                             OperationTransactionsSetAsideRoot().wstring()});
+    if (ShowSilentDialog(owner, confirm) != SilentDialogResult::Ok) return false;
+
+    const std::filesystem::path recordDir = manifest.parent_path();
+    const std::filesystem::path asideRoot = OperationTransactionsSetAsideRoot();
+    operation_record_store::SetAsideResult moved;
+    if (!asideRoot.empty() && IsSafeOperationRecoveryDirectory(recordDir)) {
+        moved = operation_record_store::MoveRecordAside(recordDir, asideRoot);
+    }
+    if (!moved.ok) {
+        std::wstring err = localization::Text(L"workspace.file_ops.recovery_set_aside_failed");
+        if (moved.win32Error != ERROR_SUCCESS) {
+            err += L"\n\n" + atomic_write::Win32ErrorMessage(static_cast<int>(moved.win32Error));
+        }
+        ShowSilentMessageDialog(owner, confirm.title, err, SoftNoticeKind::Error,
+                                {{localization::Text(L"workspace.file_ops.recovery_manifest"),
+                                  manifest.wstring()}});
+        return false;
+    }
+    ShowSoftNotice(owner, localization::Text(L"workspace.file_ops.recovery_set_aside_done"),
+                   SoftNoticeKind::Info);
+    return true;
+}
+
+// The message and paths shared by every recovery-required dialog. Callers
+// choose the buttons; nothing here acts on a record.
+static SilentDialogOptions BuildOperationRecoveryDialog(const std::wstring& title,
+                                                        const std::filesystem::path& manifest,
+                                                        const OperationTransaction* transaction,
+                                                        const char* persistedState,
+                                                        const std::wstring& context,
+                                                        bool memberPathsVerified) {
     const std::filesystem::path recoveryDir = manifest.parent_path();
     const bool canOpenRecoveryDir = IsSafeOperationRecoveryDirectory(recoveryDir);
     SilentDialogOptions dialog;
@@ -592,14 +654,6 @@ static void ShowOperationRecoveryRequiredDialog(HWND owner,
         }
     }
     dialog.kind = SoftNoticeKind::Error;
-    dialog.buttons = canOpenRecoveryDir ? SilentDialogButtons::YesNo
-                                        : SilentDialogButtons::Ok;
-    dialog.yesLabel = localization::Text(L"workspace.file_ops.recovery_open_folder");
-    dialog.noLabel = localization::Text(L"workspace.file_ops.recovery_no_action");
-    dialog.defaultResult = canOpenRecoveryDir ? SilentDialogResult::No
-                                              : SilentDialogResult::Ok;
-    dialog.escapeResult = canOpenRecoveryDir ? SilentDialogResult::No
-                                             : SilentDialogResult::Ok;
     dialog.preferredWidthPx = 680;
     dialog.paths.push_back({localization::Text(L"workspace.file_ops.recovery_manifest"),
                             manifest.wstring()});
@@ -661,12 +715,13 @@ static void ShowOperationRecoveryRequiredDialog(HWND owner,
                                     alias.dest.wstring()});
         }
     }
+    return dialog;
+}
 
-    const SilentDialogResult result = ShowSilentDialog(owner, dialog);
-    if (result != SilentDialogResult::Yes || !canOpenRecoveryDir) return;
-
-    // This is an explicit user request, and it opens only the verified local
-    // transaction directory.  It never executes recovery or changes a file.
+// This is an explicit user request, and it opens only the verified local
+// transaction directory.  It never executes recovery or changes a file.
+static void OpenOperationRecoveryFolder(HWND owner, const std::filesystem::path& recoveryDir) {
+    if (!IsSafeOperationRecoveryDirectory(recoveryDir)) return;
     const std::wstring params = L"\"" + recoveryDir.wstring() + L"\"";
     const HINSTANCE opened = ShellExecuteW(owner, L"open", L"explorer.exe",
                                            params.c_str(), nullptr, SW_SHOWNORMAL);
@@ -677,6 +732,91 @@ static void ShowOperationRecoveryRequiredDialog(HWND owner,
     }
 }
 
+// For a record of an operation that failed or is still in progress: the user
+// can only look at the record. Nothing is moved or recovered from here.
+static void ShowOperationRecoveryRequiredDialog(HWND owner,
+                                                const std::wstring& title,
+                                                const std::filesystem::path& manifest,
+                                                const OperationTransaction* transaction = nullptr,
+                                                const char* persistedState = nullptr,
+                                                const std::wstring& context = L"",
+                                                bool memberPathsVerified = false) {
+    SilentDialogOptions dialog = BuildOperationRecoveryDialog(
+        title, manifest, transaction, persistedState, context, memberPathsVerified);
+    const bool canOpenRecoveryDir = IsSafeOperationRecoveryDirectory(manifest.parent_path());
+    dialog.buttons = canOpenRecoveryDir ? SilentDialogButtons::YesNo : SilentDialogButtons::Ok;
+    dialog.yesLabel = localization::Text(L"workspace.file_ops.recovery_open_folder");
+    dialog.noLabel = localization::Text(L"workspace.file_ops.recovery_no_action");
+    dialog.defaultResult = canOpenRecoveryDir ? SilentDialogResult::No : SilentDialogResult::Ok;
+    dialog.escapeResult = canOpenRecoveryDir ? SilentDialogResult::No : SilentDialogResult::Ok;
+    if (ShowSilentDialog(owner, dialog) == SilentDialogResult::Yes && canOpenRecoveryDir) {
+        OpenOperationRecoveryFolder(owner, manifest.parent_path());
+    }
+}
+
+// For a record found by the session scan: the user may also set it aside.
+// Returns true only when the record was set aside, so it no longer blocks.
+static bool ResolveScannedOperationRecord(HWND owner,
+                                          const std::filesystem::path& manifest,
+                                          const OperationTransaction& transaction,
+                                          const std::string& persistedState,
+                                          bool memberPathsVerified) {
+    const std::filesystem::path recoveryDir = manifest.parent_path();
+    if (!IsSafeOperationRecoveryDirectory(recoveryDir)) {
+        ShowOperationRecoveryRequiredDialog(owner, OperationMenuTitle(), manifest, &transaction,
+                                            persistedState.c_str(), L"", memberPathsVerified);
+        return false;
+    }
+    SilentDialogOptions dialog = BuildOperationRecoveryDialog(
+        OperationMenuTitle(), manifest, &transaction, persistedState.c_str(), L"",
+        memberPathsVerified);
+    dialog.message += L"\n\n" + localization::Text(L"workspace.file_ops.recovery_set_aside_hint");
+    dialog.buttons = SilentDialogButtons::YesNoCancel;
+    dialog.yesLabel = localization::Text(L"workspace.file_ops.recovery_set_aside");
+    dialog.noLabel = localization::Text(L"workspace.file_ops.recovery_open_folder");
+    dialog.cancelLabel = localization::Text(L"workspace.file_ops.recovery_no_action");
+    dialog.defaultResult = SilentDialogResult::Cancel;
+    dialog.escapeResult = SilentDialogResult::Cancel;
+    const SilentDialogResult result = ShowSilentDialog(owner, dialog);
+    if (result == SilentDialogResult::Yes) {
+        return ConfirmAndSetAsideOperationTransactionRecord(owner, dialog.title, manifest);
+    }
+    if (result == SilentDialogResult::No) OpenOperationRecoveryFolder(owner, recoveryDir);
+    return false;
+}
+
+// Asks before members recorded at the previous workspace location are read
+// as being in the current one. Recovery after a yes still checks every file's
+// recorded size and hash, so a mismatching file is never overwritten.
+static bool ConfirmOperationTransactionRelocation(HWND owner,
+                                                  const OperationTransaction& tx,
+                                                  const std::filesystem::path& manifest,
+                                                  const std::string& state) {
+    SilentDialogOptions dialog;
+    dialog.title = OperationMenuTitle();
+    dialog.message = localization::Text(L"workspace.file_ops.recovery_relocation_prompt");
+    dialog.message += L"\n\n" + localization::Format(
+        L"workspace.file_ops.recovery_state",
+        {{L"STATE", OperationRecoveryStateLabel(state.c_str())}});
+    dialog.kind = SoftNoticeKind::Warning;
+    dialog.buttons = SilentDialogButtons::YesNo;
+    dialog.yesLabel = localization::Text(L"workspace.file_ops.recovery_relocation_accept");
+    dialog.noLabel = localization::Text(L"workspace.file_ops.recovery_no_action");
+    dialog.defaultResult = SilentDialogResult::No;
+    dialog.escapeResult = SilentDialogResult::No;
+    dialog.preferredWidthPx = 680;
+    dialog.paths.push_back({localization::Text(L"workspace.file_ops.recovery_relocation_recorded_root"),
+                            tx.recordedWorkspaceRoot.wstring()});
+    dialog.paths.push_back({localization::Text(L"workspace.file_ops.recovery_relocation_current_root"),
+                            g_workspaceRoot});
+    dialog.paths.push_back({localization::Text(L"workspace.file_ops.recovery_manifest"),
+                            manifest.wstring()});
+    return ShowSilentDialog(owner, dialog) == SilentDialogResult::Yes;
+}
+
+bool RecoverPendingFileOperationTransactionsForSession(
+    HWND owner, const std::filesystem::path& sessionRoot);
+
 static bool RequireOperationSessionRecoveryResolved(
     HWND owner,
     const std::wstring& title,
@@ -684,6 +824,13 @@ static bool RequireOperationSessionRecoveryResolved(
     const std::wstring sessionKey = OperationSessionKey(sessionRoot);
     if (sessionKey.empty() || s_operationRecoveryBlock.sessionKey != sessionKey) {
         return true;
+    }
+    if (s_operationRecoveryBlock.fromSessionScan) {
+        // The block came from records found when the session opened. Scan
+        // again so the user can decide again (reinterpret a moved workspace,
+        // set a record aside, or leave it) instead of only seeing the block.
+        s_operationRecoveryBlock = {};
+        return RecoverPendingFileOperationTransactionsForSession(owner, sessionRoot);
     }
     const OperationTransaction* transaction =
         s_operationRecoveryBlock.hasTransaction
@@ -817,9 +964,24 @@ static bool DecodeOperationTransactionPath(const std::string& encoded,
     return !out->empty();
 }
 
-static bool WriteOperationTransactionManifest(const OperationTransaction& tx,
-                                              const char* state,
-                                              std::wstring* outErr) {
+// How member paths are written. V7 (record form) keeps V6's member layout:
+// workspace members are relative to the workspace, registered external
+// members use the identity "@external:" form, and the record's own backups
+// are stored by file name. Every older layout, and a fixture that must look
+// like a record written by an older version, uses absolute paths.
+enum class OperationManifestPathForm { Record, LegacyAbsolute };
+
+static std::vector<std::filesystem::path> OperationRecordExternalRoots() {
+    std::vector<std::filesystem::path> roots;
+    for (const auto& lecture : g_tempExternalLectures) roots.emplace_back(lecture.path);
+    return roots;
+}
+
+static bool WriteOperationTransactionManifest(
+    const OperationTransaction& tx,
+    const char* state,
+    std::wstring* outErr,
+    OperationManifestPathForm pathForm = OperationManifestPathForm::Record) {
     if (outErr) outErr->clear();
     std::ostringstream oss;
     const bool legacyV1 = tx.version == 1;
@@ -829,12 +991,36 @@ static bool WriteOperationTransactionManifest(const OperationTransaction& tx,
     const bool currentV5 = tx.version == 5;
     const bool currentV6 = tx.version == 6;
     if (!legacyV1 && !legacyV2 && !legacyV3 && !currentV4 && !currentV5 && !currentV6) return false;
-    oss << (legacyV1 ? "PDF_NOTE_OPERATION_TRANSACTION_V1\n"
-                     : (legacyV2 ? "PDF_NOTE_OPERATION_TRANSACTION_V2\n"
-                                 : (legacyV3 ? "PDF_NOTE_OPERATION_TRANSACTION_V3\n"
-                                             : (currentV4 ? "PDF_NOTE_OPERATION_TRANSACTION_V4\n"
-                                                          : (currentV5 ? "PDF_NOTE_OPERATION_TRANSACTION_V5\n"
-                                                                       : "PDF_NOTE_OPERATION_TRANSACTION_V6\n")))));
+    const bool recordForm = currentV6 && pathForm == OperationManifestPathForm::Record;
+    switch (tx.version) {
+    case 1: oss << "PDF_NOTE_OPERATION_TRANSACTION_V1\n"; break;
+    case 2: oss << "PDF_NOTE_OPERATION_TRANSACTION_V2\n"; break;
+    case 3: oss << "PDF_NOTE_OPERATION_TRANSACTION_V3\n"; break;
+    case 4: oss << "PDF_NOTE_OPERATION_TRANSACTION_V4\n"; break;
+    case 5: oss << "PDF_NOTE_OPERATION_TRANSACTION_V5\n"; break;
+    default:
+        oss << (recordForm ? "PDF_NOTE_OPERATION_TRANSACTION_V7\n"
+                           : "PDF_NOTE_OPERATION_TRANSACTION_V6\n");
+        break;
+    }
+    const std::filesystem::path workspaceRoot(g_workspaceRoot);
+    const std::vector<std::filesystem::path> externalRoots =
+        recordForm ? OperationRecordExternalRoots() : std::vector<std::filesystem::path>{};
+    bool pathsEncodable = true;
+    // A member must read back as the same path, or the record is refused.
+    auto member = [&](const std::filesystem::path& path) {
+        if (!recordForm) return EncodeOperationTransactionPath(path);
+        const std::wstring stored = workspace_relocation::ToRecordPath(path, workspaceRoot, externalRoots);
+        const auto back = workspace_relocation::FromRecordPath(stored, workspaceRoot);
+        if (!back || !AreSameLocalPath(*back, path)) pathsEncodable = false;
+        return EncodeOperationTransactionPath(std::filesystem::path(stored));
+    };
+    // A backup always lives directly in the record's own directory.
+    auto own = [&](const std::filesystem::path& path) {
+        if (!recordForm) return EncodeOperationTransactionPath(path);
+        if (!AreSameLocalPath(path.parent_path(), tx.dir) || !path.has_filename()) pathsEncodable = false;
+        return EncodeOperationTransactionPath(path.filename());
+    };
     oss << "state=" << (state ? state : "pending") << "\n";
     if (!legacyV1 && !legacyV2) {
         if (!IsSafeOperationTransactionId(tx.id)) {
@@ -847,13 +1033,13 @@ static bool WriteOperationTransactionManifest(const OperationTransaction& tx,
                 if (outErr) *outErr = localization::Text(L"workspace.file_ops.transaction_session_unavailable");
                 return false;
             }
-            oss << "session=" << EncodeOperationTransactionPath(tx.sessionRoot) << "\n";
+            oss << "session=" << member(tx.sessionRoot) << "\n";
         }
     }
     for (const auto& move : tx.moves) {
-        oss << "move\t" << EncodeOperationTransactionPath(move.src)
-            << "\t" << EncodeOperationTransactionPath(move.dest)
-            << "\t" << EncodeOperationTransactionPath(move.backup);
+        oss << "move\t" << member(move.src)
+            << "\t" << member(move.dest)
+            << "\t" << own(move.backup);
         if (!legacyV1) {
             if (!IsOperationSha256(move.originalSha256) ||
                 !IsOperationSha256(move.backupSha256) ||
@@ -876,8 +1062,8 @@ static bool WriteOperationTransactionManifest(const OperationTransaction& tx,
         oss << "\n";
     }
     for (const auto& rewrite : tx.rewrites) {
-        oss << "rewrite\t" << EncodeOperationTransactionPath(rewrite.target)
-            << "\t" << EncodeOperationTransactionPath(rewrite.backup);
+        oss << "rewrite\t" << member(rewrite.target)
+            << "\t" << own(rewrite.backup);
         if (!legacyV1) {
             const bool hasPostcondition = IsOperationSha256(rewrite.rewrittenSha256);
             const bool stepAllowsNoPostcondition =
@@ -910,8 +1096,8 @@ static bool WriteOperationTransactionManifest(const OperationTransaction& tx,
                 return false;
             }
             oss << "note_alias\t" << alias.noteId.value
-                << "\t" << EncodeOperationTransactionPath(alias.src)
-                << "\t" << EncodeOperationTransactionPath(alias.dest)
+                << "\t" << member(alias.src)
+                << "\t" << member(alias.dest)
                 << "\t" << alias.step << "\n";
         }
     }
@@ -927,10 +1113,14 @@ static bool WriteOperationTransactionManifest(const OperationTransaction& tx,
             }
             oss << "resource_alias\t" << kind
                 << "\t" << resourceId
-                << "\t" << EncodeOperationTransactionPath(alias.src)
-                << "\t" << EncodeOperationTransactionPath(alias.dest)
+                << "\t" << member(alias.src)
+                << "\t" << member(alias.dest)
                 << "\t" << alias.step << "\n";
         }
+    }
+    if (!pathsEncodable) {
+        if (outErr) *outErr = localization::Text(L"workspace.file_ops.error.move_manifest_incomplete");
+        return false;
     }
     return atomic_write::AtomicWriteUtf8(tx.manifest, oss.str(),
                                          OperationPreferredTmpDir(),
@@ -1153,6 +1343,35 @@ static bool PrepareOperationTransaction(
     return true;
 }
 
+// A transaction's backups always live directly in its own directory. When
+// every recorded backup names this same directory at another workspace
+// location, the record was written before the workspace folder was renamed or
+// moved: read the backups from where the record is now. This only changes
+// which of the record's own files are read; it never maps the user's files.
+// Records of any other shape are left untouched for validation to reject.
+static void ResolveOperationTransactionOwnFiles(OperationTransaction* tx) {
+    if (!tx || tx->dir.empty()) return;
+    std::vector<std::filesystem::path*> backups;
+    for (auto& move : tx->moves) backups.push_back(&move.backup);
+    for (auto& rewrite : tx->rewrites) backups.push_back(&rewrite.backup);
+    std::optional<workspace_relocation::Relocation> agreed;
+    for (const auto* backup : backups) {
+        if (backup->empty() || !backup->has_filename()) return;
+        const auto found =
+            workspace_relocation::DetectFromSelfPath(*backup, tx->dir / backup->filename());
+        if (!found) return;
+        if (!agreed) {
+            agreed = found;
+        } else if (!workspace_relocation::SameLocation(agreed->recordedRoot, found->recordedRoot)) {
+            return;
+        }
+    }
+    if (!agreed || !agreed->moved) return;
+    for (auto* backup : backups) *backup = tx->dir / backup->filename();
+    tx->recordedWorkspaceRoot = agreed->recordedRoot;
+    tx->workspaceRelocated = true;
+}
+
 static bool ReadOperationTransactionManifest(const std::filesystem::path& manifest,
                                              OperationTransaction* outTx,
                                              std::string* outState) {
@@ -1171,6 +1390,32 @@ static bool ReadOperationTransactionManifest(const std::filesystem::path& manife
     OperationTransaction tx;
     tx.manifest = manifest;
     tx.dir = manifest.parent_path();
+    bool recordForm = false;
+    auto decodeMember = [&](const std::string& field, std::filesystem::path* out) {
+        std::filesystem::path raw;
+        if (!out || !DecodeOperationTransactionPath(field, &raw)) return false;
+        if (!recordForm) {
+            *out = std::move(raw);
+            return true;
+        }
+        const auto resolved =
+            workspace_relocation::FromRecordPath(raw.wstring(), std::filesystem::path(g_workspaceRoot));
+        if (!resolved) return false;
+        *out = *resolved;
+        return true;
+    };
+    auto decodeOwn = [&](const std::string& field, std::filesystem::path* out) {
+        std::filesystem::path raw;
+        if (!out || !DecodeOperationTransactionPath(field, &raw)) return false;
+        if (!recordForm) {
+            *out = std::move(raw);
+            return true;
+        }
+        const auto resolved = workspace_relocation::FromOwnFileName(raw.wstring(), tx.dir);
+        if (!resolved) return false;
+        *out = *resolved;
+        return true;
+    };
     std::string line;
     if (!std::getline(input, line)) return false;
     if (!line.empty() && line.back() == '\r') line.pop_back();
@@ -1186,6 +1431,9 @@ static bool ReadOperationTransactionManifest(const std::filesystem::path& manife
         tx.version = 5;
     } else if (line == "PDF_NOTE_OPERATION_TRANSACTION_V6") {
         tx.version = 6;
+    } else if (line == "PDF_NOTE_OPERATION_TRANSACTION_V7") {
+        tx.version = 6;  // V6 member layout with record-form paths
+        recordForm = true;
     } else {
         return false;
     }
@@ -1209,7 +1457,7 @@ static bool ReadOperationTransactionManifest(const std::filesystem::path& manife
             if (!line.empty() && line.back() == '\r') line.pop_back();
             const std::string encodedSession = line.substr(8);
             if (encodedSession.empty() || encodedSession.size() > 64u * 1024u ||
-                !DecodeOperationTransactionPath(encodedSession, &tx.sessionRoot) ||
+                !decodeMember(encodedSession, &tx.sessionRoot) ||
                 !tx.sessionRoot.is_absolute()) {
                 return false;
             }
@@ -1226,24 +1474,24 @@ static bool ReadOperationTransactionManifest(const std::filesystem::path& manife
                 tx.resourceAliases.size() >= kManifestMaxMembers) return false;
         if (tx.version == 1 && fields.size() == 4 && fields[0] == "move") {
             OperationTransactionMove move;
-            if (!DecodeOperationTransactionPath(fields[1], &move.src) ||
-                !DecodeOperationTransactionPath(fields[2], &move.dest) ||
-                !DecodeOperationTransactionPath(fields[3], &move.backup)) {
+            if (!decodeMember(fields[1], &move.src) ||
+                !decodeMember(fields[2], &move.dest) ||
+                !decodeOwn(fields[3], &move.backup)) {
                 return false;
             }
             tx.moves.push_back(std::move(move));
         } else if (tx.version == 1 && fields.size() == 3 && fields[0] == "rewrite") {
             OperationTransactionRewrite rewrite;
-            if (!DecodeOperationTransactionPath(fields[1], &rewrite.target) ||
-                !DecodeOperationTransactionPath(fields[2], &rewrite.backup)) {
+            if (!decodeMember(fields[1], &rewrite.target) ||
+                !decodeOwn(fields[2], &rewrite.backup)) {
                 return false;
             }
             tx.rewrites.push_back(std::move(rewrite));
         } else if (tx.version == 2 && fields.size() == 9 && fields[0] == "move") {
             OperationTransactionMove move;
-            if (!DecodeOperationTransactionPath(fields[1], &move.src) ||
-                !DecodeOperationTransactionPath(fields[2], &move.dest) ||
-                !DecodeOperationTransactionPath(fields[3], &move.backup) ||
+            if (!decodeMember(fields[1], &move.src) ||
+                !decodeMember(fields[2], &move.dest) ||
+                !decodeOwn(fields[3], &move.backup) ||
                 !ParseOperationUint64(fields[4], &move.originalSize) ||
                 !IsOperationSha256(fields[5]) ||
                 !ParseOperationUint64(fields[6], &move.backupSize) ||
@@ -1259,9 +1507,9 @@ static bool ReadOperationTransactionManifest(const std::filesystem::path& manife
         } else if ((tx.version == 3 || tx.version == 4 || tx.version == 5 || tx.version == 6) &&
                    fields.size() == 11 && fields[0] == "move") {
             OperationTransactionMove move;
-            if (!DecodeOperationTransactionPath(fields[1], &move.src) ||
-                !DecodeOperationTransactionPath(fields[2], &move.dest) ||
-                !DecodeOperationTransactionPath(fields[3], &move.backup) ||
+            if (!decodeMember(fields[1], &move.src) ||
+                !decodeMember(fields[2], &move.dest) ||
+                !decodeOwn(fields[3], &move.backup) ||
                 !ParseOperationUint64(fields[4], &move.originalSize) ||
                 !IsOperationSha256(fields[5]) ||
                 !ParseOperationUint64(fields[6], &move.backupSize) ||
@@ -1280,8 +1528,8 @@ static bool ReadOperationTransactionManifest(const std::filesystem::path& manife
         } else if ((tx.version == 2 || tx.version == 3 || tx.version == 4 || tx.version == 5 || tx.version == 6) &&
                    fields.size() == 10 && fields[0] == "rewrite") {
             OperationTransactionRewrite rewrite;
-            if (!DecodeOperationTransactionPath(fields[1], &rewrite.target) ||
-                !DecodeOperationTransactionPath(fields[2], &rewrite.backup) ||
+            if (!decodeMember(fields[1], &rewrite.target) ||
+                !decodeOwn(fields[2], &rewrite.backup) ||
                 !ParseOperationUint64(fields[3], &rewrite.originalSize) ||
                 !IsOperationSha256(fields[4]) ||
                 !ParseOperationUint64(fields[5], &rewrite.backupSize) ||
@@ -1307,8 +1555,8 @@ static bool ReadOperationTransactionManifest(const std::filesystem::path& manife
             uint64_t noteId = 0;
             OperationTransactionNoteAlias alias;
             if (!ParseOperationUint64(fields[1], &noteId) || noteId == 0 ||
-                !DecodeOperationTransactionPath(fields[2], &alias.src) ||
-                !DecodeOperationTransactionPath(fields[3], &alias.dest) ||
+                !decodeMember(fields[2], &alias.src) ||
+                !decodeMember(fields[3], &alias.dest) ||
                 (fields[4] != "prepared" && fields[4] != "rebinding" &&
                  fields[4] != "postcondition_verified")) {
                 return false;
@@ -1321,8 +1569,8 @@ static bool ReadOperationTransactionManifest(const std::filesystem::path& manife
             const auto resourceId = WorkspaceResourceIdFromHex(fields[2]);
             OperationTransactionResourceAlias alias;
             if (!kind.has_value() || !resourceId.has_value() ||
-                !DecodeOperationTransactionPath(fields[3], &alias.src) ||
-                !DecodeOperationTransactionPath(fields[4], &alias.dest) ||
+                !decodeMember(fields[3], &alias.src) ||
+                !decodeMember(fields[4], &alias.dest) ||
                 (fields[5] != "prepared" && fields[5] != "rebinding" &&
                  fields[5] != "postcondition_verified")) {
                 return false;
@@ -1336,8 +1584,47 @@ static bool ReadOperationTransactionManifest(const std::filesystem::path& manife
         }
     }
     if (tx.moves.empty()) return false;
+    if (!recordForm) ResolveOperationTransactionOwnFiles(&tx);
     *outTx = std::move(tx);
     *outState = state;
+    return true;
+}
+
+// Maps members recorded below the previous workspace root onto the current
+// one. Members in registered external folders keep their recorded paths.
+// Returns false when the record is not relocated or nothing maps.
+static bool RebaseOperationTransactionMembers(const OperationTransaction& tx,
+                                              OperationTransaction* out) {
+    if (!out || !tx.workspaceRelocated || tx.recordedWorkspaceRoot.empty() ||
+        g_workspaceRoot.empty()) {
+        return false;
+    }
+    const std::filesystem::path from = tx.recordedWorkspaceRoot;
+    const std::filesystem::path to(g_workspaceRoot);
+    OperationTransaction mapped = tx;
+    bool any = false;
+    auto map = [&](std::filesystem::path& value) {
+        if (auto rebased = workspace_relocation::Rebase(value, from, to)) {
+            value = *rebased;
+            any = true;
+        }
+    };
+    map(mapped.sessionRoot);
+    for (auto& move : mapped.moves) {
+        map(move.src);
+        map(move.dest);
+    }
+    for (auto& rewrite : mapped.rewrites) map(rewrite.target);
+    for (auto& alias : mapped.noteAliases) {
+        map(alias.src);
+        map(alias.dest);
+    }
+    for (auto& alias : mapped.resourceAliases) {
+        map(alias.src);
+        map(alias.dest);
+    }
+    if (!any) return false;
+    *out = std::move(mapped);
     return true;
 }
 
@@ -1647,17 +1934,41 @@ bool RecoverPendingFileOperationTransactionsForSession(
     }
     bool recoveredAny = false;
     bool allOk = true;
-    std::filesystem::directory_iterator it(root, ec);
-    const std::filesystem::directory_iterator end;
-    if (ec) return false;
-    for (; it != end; it.increment(ec)) {
-        if (ec) {
-            allOk = false;
-            break;
+    // Collect first: the user may set a record aside while the scan runs.
+    std::vector<std::filesystem::path> manifests;
+    {
+        std::filesystem::directory_iterator it(root, ec);
+        const std::filesystem::directory_iterator end;
+        if (ec) return false;
+        for (; it != end; it.increment(ec)) {
+            if (ec) {
+                allOk = false;
+                break;
+            }
+            std::error_code typeEc;
+            if (!it->is_directory(typeEc) || typeEc) continue;
+            manifests.push_back(it->path() / L"manifest.tsv");
         }
-        std::error_code typeEc;
-        if (!it->is_directory(typeEc) || typeEc) continue;
-        const std::filesystem::path manifest = it->path() / L"manifest.tsv";
+    }
+    std::sort(manifests.begin(), manifests.end());
+
+    // Shows the record and lets the user set it aside. A record the user
+    // keeps blocks this session's file operations until it is resolved.
+    auto blockOrSetAside = [&](const std::filesystem::path& manifest,
+                               const OperationTransaction& tx,
+                               const std::string& state,
+                               bool memberPathsVerified) {
+        if (ResolveScannedOperationRecord(owner, manifest, tx, state, memberPathsVerified)) {
+            return;
+        }
+        allOk = false;
+        BlockOperationSessionForRecovery(sessionRoot, manifest, &tx, state, memberPathsVerified);
+        if (s_operationRecoveryBlock.sessionKey == OperationSessionKey(sessionRoot)) {
+            s_operationRecoveryBlock.fromSessionScan = true;
+        }
+    };
+
+    for (const auto& manifest : manifests) {
         OperationTransaction tx;
         std::string state;
         if (!ReadOperationTransactionManifest(manifest, &tx, &state)) {
@@ -1665,24 +1976,41 @@ bool RecoverPendingFileOperationTransactionsForSession(
             // it as evidence but never let it block an unrelated session.
             continue;
         }
+        bool needsRelocation = false;
+        OperationTransaction relocated;
         if (!TransactionBelongsToOperationSession(tx, sessionRoot)) {
-            continue;
+            // A session inside a renamed or moved workspace is recorded under
+            // the previous workspace root.
+            if (!RebaseOperationTransactionMembers(tx, &relocated) ||
+                !TransactionBelongsToOperationSession(relocated, sessionRoot)) {
+                continue;
+            }
+            needsRelocation = true;
+        }
+        // A committed or recovered record needs no action. Keep it as
+        // evidence even when its recorded paths no longer match (for example
+        // after the workspace folder was renamed); it must not block.
+        if (state == "committed" || state == "recovered") continue;
+        if (needsRelocation) {
+            if (!ConfirmOperationTransactionRelocation(owner, tx, manifest, state)) {
+                allOk = false;
+                BlockOperationSessionForRecovery(sessionRoot, manifest, &tx, state);
+                if (s_operationRecoveryBlock.sessionKey == OperationSessionKey(sessionRoot)) {
+                    s_operationRecoveryBlock.fromSessionScan = true;
+                }
+                continue;
+            }
+            tx = std::move(relocated);
         }
         if (!ValidateOperationTransactionPaths(tx, sessionRoot)) {
-            allOk = false;
-            BlockOperationSessionForRecovery(sessionRoot, manifest, &tx, state);
-            ShowOperationRecoveryRequiredDialog(owner, OperationMenuTitle(), manifest, &tx, state.c_str());
+            blockOrSetAside(manifest, tx, state, false);
             continue;
         }
-        if (state == "committed" || state == "recovered") continue;
         if ((tx.version == 3 || tx.version == 4 || tx.version == 5 || tx.version == 6) &&
             (state == "prepared" || state == "applying" || state == "applied")) {
             std::wstring recoverErr;
             if (!RecoverOperationTransactionToOriginalState(&tx, sessionRoot, &recoverErr)) {
-                allOk = false;
-                BlockOperationSessionForRecovery(sessionRoot, manifest, &tx, state, true);
-                ShowOperationRecoveryRequiredDialog(owner, OperationMenuTitle(), manifest, &tx,
-                                                    state.c_str(), L"", true);
+                blockOrSetAside(manifest, tx, state, true);
             } else {
                 recoveredAny = true;
             }
@@ -1690,17 +2018,7 @@ bool RecoverPendingFileOperationTransactionsForSession(
         }
         // Old manifests lack per-member fingerprints and are intentionally
         // retained as evidence.  Never infer that their destinations are ours.
-        if (tx.version != 1 || state != "pending") {
-            allOk = false;
-            BlockOperationSessionForRecovery(sessionRoot, manifest, &tx, state, true);
-            ShowOperationRecoveryRequiredDialog(owner, OperationMenuTitle(), manifest, &tx,
-                                                state.c_str(), L"", true);
-            continue;
-        }
-        allOk = false;
-        BlockOperationSessionForRecovery(sessionRoot, manifest, &tx, state, true);
-        ShowOperationRecoveryRequiredDialog(owner, OperationMenuTitle(), manifest, &tx,
-                                            state.c_str(), L"", true);
+        blockOrSetAside(manifest, tx, state, true);
     }
     if (allOk) {
         ClearOperationRecoveryBlock(sessionRoot);
@@ -2646,6 +2964,7 @@ static bool ApplyWorkspaceOperationDirection(HWND owner,
         return false;
     }
 
+    UpdatePinsAfterDirectoryChange(previousTarget, reopenedTarget);
     if (owner) {
         if (isPdf) (void)MovePdfViewInfoPath(previousTarget.wstring(), reopenedTarget.wstring());
         // The filesystem history must advance even when a committed file cannot be opened.
@@ -3000,6 +3319,7 @@ static bool RenameOrMoveOperationTarget(HWND owner, bool isPdf, bool renameOnly,
 
     fault_injection::MaybePauseForCrashTest(L"operation_committed");
     RecordCommittedWorkspaceOperation(transaction);
+    UpdatePinsAfterDirectoryChange(src, dest);
     if (isPdf) (void)MovePdfViewInfoPath(src.wstring(), dest.wstring());
     const bool viewUpdated = (!organizing || isCurrentTarget || activeNote.destinationLock.has_value())
         ? AfterOperationReopenCurrentTarget(owner, src, dest, isPdf, activeNote)
@@ -3149,6 +3469,82 @@ bool RunUiAutomationOperationTransactionRecoveryScenario(std::wstring* outError)
         !WriteOperationTransactionManifest(persistedTransaction, "prepared", &err)) {
         if (outError) *outError = L"A compatible V3 recovery fixture was not handled safely.";
         return false;
+    }
+    // A record written before the folder holding the workspace was renamed
+    // names the previous location in every path. The reader must take the
+    // record's own backups from where the record is now, must not attribute
+    // it to the session until the members are mapped (which needs the user's
+    // decision), and the mapping must yield exactly the original members.
+    {
+        const std::filesystem::path currentRoot(g_workspaceRoot);
+        const std::filesystem::path previousRoot =
+            currentRoot.parent_path() / (currentRoot.filename().wstring() + L"__ui_previous_name");
+        const std::string currentHex = EncodeOperationTransactionPath(currentRoot);
+        const std::string previousHex = EncodeOperationTransactionPath(previousRoot);
+        std::string manifestText;
+        // A current record is written in record form: no member names the
+        // workspace's absolute location, so renaming its folder changes nothing.
+        if (!ReadOperationFileBytes(transaction.manifest, manifestText, &err) ||
+            manifestText.rfind("PDF_NOTE_OPERATION_TRANSACTION_V7\n", 0) != 0 ||
+            manifestText.find(currentHex) != std::string::npos) {
+            if (outError) *outError = L"A new operation record was not written in location-independent form.";
+            return false;
+        }
+        // Rewrite it as an older version would have, then simulate the rename.
+        if (!WriteOperationTransactionManifest(persistedTransaction, "prepared", &err,
+                                               OperationManifestPathForm::LegacyAbsolute) ||
+            !ReadOperationFileBytes(transaction.manifest, manifestText, &err)) {
+            if (outError) *outError = L"Failed to prepare the legacy relocation fixture manifest.\n" + err;
+            return false;
+        }
+        size_t replaced = 0;
+        for (size_t at = manifestText.find(currentHex); at != std::string::npos;
+             at = manifestText.find(currentHex, at + previousHex.size())) {
+            manifestText.replace(at, currentHex.size(), previousHex);
+            ++replaced;
+        }
+        // session + move src/dest/backup + rewrite target/backup.
+        if (replaced < 6 ||
+            !atomic_write::AtomicWriteUtf8(transaction.manifest, manifestText, currentRoot,
+                                           OperationQuarantineDir(), &err)) {
+            if (outError) *outError = L"Failed to write the relocation fixture manifest.";
+            return false;
+        }
+        OperationTransaction relocatedRead;
+        std::string relocatedState;
+        OperationTransaction relocatedMapped;
+        const bool readOk = ReadOperationTransactionManifest(transaction.manifest, &relocatedRead,
+                                                             &relocatedState);
+        const bool ownFilesResolved =
+            readOk && relocatedRead.workspaceRelocated &&
+            workspace_relocation::SameLocation(relocatedRead.recordedWorkspaceRoot, previousRoot) &&
+            relocatedRead.moves.size() == persistedTransaction.moves.size() &&
+            relocatedRead.rewrites.size() == persistedTransaction.rewrites.size() &&
+            AreSameLocalPath(relocatedRead.moves.front().backup,
+                             persistedTransaction.moves.front().backup) &&
+            AreSameLocalPath(relocatedRead.rewrites.front().backup,
+                             persistedTransaction.rewrites.front().backup);
+        const bool notAttributedUnmapped =
+            readOk && !TransactionBelongsToOperationSession(relocatedRead, sessionRoot);
+        const bool mapped =
+            readOk && RebaseOperationTransactionMembers(relocatedRead, &relocatedMapped) &&
+            TransactionBelongsToOperationSession(relocatedMapped, sessionRoot) &&
+            ValidateOperationTransactionPaths(relocatedMapped, sessionRoot) &&
+            AreSameLocalPath(relocatedMapped.moves.front().src, source) &&
+            AreSameLocalPath(relocatedMapped.moves.front().dest, destination) &&
+            AreSameLocalPath(relocatedMapped.rewrites.front().target, rewriteTarget);
+        if (!WriteOperationTransactionManifest(persistedTransaction, "prepared", &err)) {
+            if (outError) *outError = L"Failed to restore the manifest after the relocation fixture.";
+            return false;
+        }
+        if (!readOk || !ownFilesResolved || !notAttributedUnmapped || !mapped) {
+            if (outError) {
+                *outError = std::wstring(L"A record written before the workspace folder was renamed was not handled safely: ") +
+                            (!readOk ? L"unreadable" : !ownFilesResolved ? L"own backups not resolved"
+                             : !notAttributedUnmapped ? L"attributed without mapping" : L"mapping mismatch");
+            }
+            return false;
+        }
     }
     OperationTransaction foreignSessionTransaction = persistedTransaction;
     foreignSessionTransaction.sessionRoot = sessionRoot.parent_path() / L"__ui_other_session";

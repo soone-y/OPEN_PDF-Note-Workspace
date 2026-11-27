@@ -17,6 +17,7 @@
         metadata.clro_ascii_only = config.clroAsciiOnly;
         metadata.quote_lazy_continuation = config.noteQuoteLazyContinuation;
         metadata.clro_list_implicit_continuation = config.clroListImplicitContinuation;
+        metadata.clro_list_body_alignment = config.clroListBodyAlignment && !config.clroListImplicitContinuation;
     }
     return metadata;
 }

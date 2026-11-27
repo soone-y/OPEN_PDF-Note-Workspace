@@ -23,7 +23,26 @@ UINT MenuStringState(bool enabled) {
     return enabled ? MF_STRING : (MF_STRING | MF_GRAYED);
 }
 
+bool SaveAllAvailable(bool hasStagedDiffs) {
+    return CurrentNoteEditorIsModified() || g_noteDirty || g_annotsDirty ||
+           g_noteNeedsIntegrate || g_annotsNeedsIntegrate || hasStagedDiffs ||
+           (!g_currentSessionPath.empty() && g_currentNotePath.empty());
+}
+
 } // namespace
+
+bool IsSaveAllMenuAvailable() {
+    return SaveAllAvailable(file_output::HasAnyStagedDiffs());
+}
+
+bool UpdateSaveAllMenuState(HMENU menu) {
+    if (!menu || GetMenuState(menu, ID_FILE_SAVE_ALL, MF_BYCOMMAND) == static_cast<UINT>(-1)) {
+        return false;
+    }
+    EnableMenuItem(menu, ID_FILE_SAVE_ALL,
+                   MF_BYCOMMAND | (IsSaveAllMenuAvailable() ? MF_ENABLED : MF_GRAYED));
+    return true;
+}
 
 HMENU BuildMenuBar() {
     return BuildMenuBarForState(CaptureMainMenuStateSnapshot());
@@ -177,10 +196,8 @@ HMENU BuildMenuBarForState(const MainMenuStateSnapshot& menuState) {
 
     HMENU save = CreatePopupMenu();
     const bool hasStagedDiffs = file_output::HasAnyStagedDiffs();
-    const UINT saveAllFlags = MenuStringState(CurrentNoteEditorIsModified() || g_noteDirty || g_annotsDirty ||
-                                               g_noteNeedsIntegrate || g_annotsNeedsIntegrate || hasStagedDiffs ||
-                                               (!g_currentSessionPath.empty() && g_currentNotePath.empty()));
-    AppendMenuW(save, saveAllFlags, ID_FILE_SAVE_ALL, text(L"menu.save.work").c_str());
+    AppendMenuW(save, MenuStringState(SaveAllAvailable(hasStagedDiffs)), ID_FILE_SAVE_ALL,
+                text(L"menu.save.work").c_str());
     AppendMenuW(save, hasStagedDiffs ? MF_STRING : (MF_STRING | MF_GRAYED), ID_OP_STAGE_MANAGE,
                 text(L"menu.save.review_diffs").c_str());
     AppendMenuW(save, MenuStringState(pending_write_retry::HasPending()), ID_FILE_PENDING_WRITES,

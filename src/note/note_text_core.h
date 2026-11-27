@@ -76,6 +76,8 @@ public:
     bool quote_lazy_continuation() const noexcept { return metadata_.quote_lazy_continuation; }
     [[nodiscard]] bool SetQuoteLazyContinuation(bool value) noexcept;
     bool clro_list_implicit_continuation() const noexcept { return metadata_.clro_list_implicit_continuation; }
+    bool clro_list_body_alignment() const noexcept { return metadata_.clro_list_body_alignment; }
+    [[nodiscard]] bool SetClroListBodyAlignment(bool value) noexcept;
     [[nodiscard]] bool SetClroListImplicitContinuation(bool value) noexcept;
 
 private:

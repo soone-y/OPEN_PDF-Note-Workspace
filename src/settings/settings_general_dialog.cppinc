@@ -460,7 +460,6 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             std::wstring defaultGridPitchLabel = std::to_wstring(defaults.noteGridPitch) + L"px";
             std::wstring defaultBgLabel = NoteBackgroundLabel(defaults.noteBgSource, defaults.noteBgThemeName, defaults.noteBgColor);
             std::wstring defaultMathMarginLabel = NoteRatioLabel(defaults.noteMathMarginTopPercent);
-            std::wstring defaultSupSubLabel = NoteSupSubDistributionLabel(defaults.noteMathSupSubGapSupPercent);
             std::wstring defaultInlineMathVerticalAlignmentLabel =
                 InlineMathVerticalAlignmentLabel(defaults.noteInlineMathVerticalAlignment);
             std::wstring defaultOverlayRefreshDelayLabel = std::to_wstring(defaults.noteOverlayRefreshDelayMs) + L" ms";
@@ -537,6 +536,9 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
                 localization::Text(L"settings.note.clro_ascii_only").c_str(), checkW);
             ctx->chkClroListImplicitContinuation = addCheck(IDC_CLRO_LIST_IMPLICIT_CONTINUATION,
                 localization::Text(L"settings.note.clro_list_implicit_continuation").c_str(), checkW);
+            ctx->chkClroListBodyAlignment = addCheck(IDC_CLRO_LIST_BODY_ALIGNMENT,
+                localization::Text(L"settings.note.clro_list_body_alignment").c_str(), checkW);
+            addLabel(localization::Text(L"settings.note.clro_list_exclusive_hint"));
             ctx->chkNoteQuoteLazyContinuation = addCheck(IDC_NOTE_QUOTE_LAZY_CONTINUATION,
                 localization::Text(L"settings.note.quote_lazy_continuation").c_str(), checkW);
             addLabel(localization::Text(L"settings.note.clro_syntax_hint"));
@@ -564,9 +566,6 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             const auto mathGroup = beginSubgroup(L"settings.subgroup.note_math");
             addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.4468bb0e2582").c_str(), defaultMathMarginLabel));
             ctx->cbNoteMathMargin = addCombo(IDC_NOTE_MATH_MARGIN, false, controlW);
-
-            addLabel(SettingLabelWithDefault(localization::Text(L"settings.general.e1164e3af8c7").c_str(), defaultSupSubLabel));
-            ctx->cbNoteMathSupSub = addCombo(IDC_NOTE_MATH_SUPSUB, false, controlW);
 
             addLabel(SettingLabelWithDefault(
                 localization::Text(L"settings.general.inline_math_vertical_alignment").c_str(),
@@ -1188,6 +1187,10 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
             SendMessageW(ctx->chkNoteWrapEnabled, BM_SETCHECK,
                          g_noteWrapEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
         }
+        if (ctx->chkClroListBodyAlignment) {
+            SendMessageW(ctx->chkClroListBodyAlignment, BM_SETCHECK,
+                         g_config.clroListBodyAlignment && !g_config.clroListImplicitContinuation ? BST_CHECKED : BST_UNCHECKED, 0);
+        }
         if (ctx->chkClroListImplicitContinuation) {
             SendMessageW(ctx->chkClroListImplicitContinuation, BM_SETCHECK,
                          g_config.clroListImplicitContinuation ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -1231,9 +1234,6 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
         }
         if (ctx->cbNoteMathMargin) {
             FillNoteRatioCombo(ctx->cbNoteMathMargin, g_config.noteMathMarginTopPercent, false);
-        }
-        if (ctx->cbNoteMathSupSub) {
-            FillNoteRatioCombo(ctx->cbNoteMathSupSub, g_config.noteMathSupSubGapSupPercent, true);
         }
         if (ctx->cbNoteInlineMathVerticalAlignment) {
             FillInlineMathVerticalAlignmentCombo(
@@ -1642,6 +1642,13 @@ static LRESULT CALLBACK GeneralSettingsProc(HWND hWnd, UINT msg, WPARAM wParam, 
         if (id == IDC_NOTE_RENDER_MODE && code == CBN_SELCHANGE) {
             UpdateGeneralNoteControlStates(ctx);
             return 0;
+        }
+        if (code == BN_CLICKED &&
+            (id == IDC_CLRO_LIST_BODY_ALIGNMENT || id == IDC_CLRO_LIST_IMPLICIT_CONTINUATION)) {
+            HWND chosen = id == IDC_CLRO_LIST_BODY_ALIGNMENT ? ctx->chkClroListBodyAlignment : ctx->chkClroListImplicitContinuation;
+            HWND other = id == IDC_CLRO_LIST_BODY_ALIGNMENT ? ctx->chkClroListImplicitContinuation : ctx->chkClroListBodyAlignment;
+            if (chosen && other && SendMessageW(chosen, BM_GETCHECK, 0, 0) == BST_CHECKED)
+                SendMessageW(other, BM_SETCHECK, BST_UNCHECKED, 0);
         }
         if (id == IDC_NOTE_VIM_MODE && code == BN_CLICKED) {
             UpdateGeneralNoteControlStates(ctx);

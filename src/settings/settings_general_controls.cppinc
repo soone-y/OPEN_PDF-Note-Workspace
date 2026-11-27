@@ -731,8 +731,11 @@ static bool ApplyGeneralSettings(GeneralSettingsCtx* ctx) {
         g_noteWrapEnabled = (SendMessageW(ctx->chkNoteWrapEnabled, BM_GETCHECK, 0, 0) == BST_CHECKED);
         g_config.noteWrapEnabled = g_noteWrapEnabled;
     }
+    if (ctx->chkClroListBodyAlignment) {
+        g_config.SetClroListBodyAlignment(SendMessageW(ctx->chkClroListBodyAlignment, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    }
     if (ctx->chkClroListImplicitContinuation) {
-        g_config.clroListImplicitContinuation = SendMessageW(ctx->chkClroListImplicitContinuation, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        g_config.SetClroListImplicitContinuation(SendMessageW(ctx->chkClroListImplicitContinuation, BM_GETCHECK, 0, 0) == BST_CHECKED);
     }
     if (ctx->chkNoteQuoteLazyContinuation) {
         g_config.noteQuoteLazyContinuation = SendMessageW(ctx->chkNoteQuoteLazyContinuation, BM_GETCHECK, 0, 0) == BST_CHECKED;
@@ -771,12 +774,6 @@ static bool ApplyGeneralSettings(GeneralSettingsCtx* ctx) {
         g_config.noteMathMarginTopPercent = static_cast<int>(SelectedComboItemData(
             ctx->cbNoteMathMargin, g_config.noteMathMarginTopPercent));
         g_config.noteMathMarginTopPercent = std::clamp(g_config.noteMathMarginTopPercent, 5, 95);
-    }
-    if (ctx->cbNoteMathSupSub) {
-        int supPercent = static_cast<int>(SelectedComboItemData(
-            ctx->cbNoteMathSupSub, g_config.noteMathSupSubGapSupPercent));
-        g_config.noteMathSupSubGapSupPercent = (supPercent <= 0) ? 0 : std::clamp(supPercent, 5, 95);
-        mathrender::SetSupSubGapSupPercent(g_config.noteMathSupSubGapSupPercent);
     }
     if (ctx->cbNoteInlineMathVerticalAlignment) {
         g_config.noteInlineMathVerticalAlignment = NormalizeInlineMathVerticalAlignment(

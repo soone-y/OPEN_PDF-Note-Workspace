@@ -574,7 +574,8 @@ class PaletteStockContractTests(unittest.TestCase):
         self.assertIn("WaitForSingleObject(mutex_, 0)", store)
         self.assertIn("ReadFileBytesNoFollowLimitedWin32", store)
         self.assertIn("FILE_ATTRIBUTE_REPARSE_POINT", store)
-        self.assertIn('L"__escape__"', store)
+        self.assertIn('workspace_layout::Failed(state.root)', store)
+        self.assertIn('workspace_layout::Backup(state.root)', store)
         self.assertLess(store.index("state.bytes, temp, escape, &error"),
                         store.index("FilePath(state.root, fileName), bytes, temp, escape, &error"))
         self.assertGreater(store.index("state = std::move(next)"),
@@ -1468,7 +1469,7 @@ class MigrateClropV1Tests(unittest.TestCase):
             keep.parent.mkdir(parents=True, exist_ok=True)
             keep.write_text("{}", encoding="utf-8")
 
-            ignored = root / "__pdf_note_workspace__" / "__tmp__" / "__stage__" / "clrop" / "staged.clrop"
+            ignored = root / "__pdf_note_workspace__" / "__unsaved__" / "clrop" / "staged.clrop"
             ignored.parent.mkdir(parents=True, exist_ok=True)
             ignored.write_text("{}", encoding="utf-8")
 
@@ -4027,6 +4028,20 @@ class PublicDocumentationStructureTests(unittest.TestCase):
         self.assertIn("\nintroduction/\n", f"\n{allowlist}")
         self.assertNotIn("\nllms.txt\n", f"\n{allowlist}")
 
+    def test_license_detection_file_matches_the_controlling_text_and_is_public(self) -> None:
+        # GitHub detects the license from a plain LICENSE; keep it identical to LICENSE.md's English original.
+        allowlist = (
+            REPO_ROOT / "docs/internal/public_repo_release_allowlist_2026-11-13.txt"
+        ).read_text(encoding="utf-8-sig")
+        self.assertIn("\nLICENSE\n", f"\n{allowlist}")
+        license_md = (REPO_ROOT / "LICENSE.md").read_text(encoding="utf-8-sig")
+        controlling = re.search(r"ライセンス本文:\s*\n\s*```text\n(zlib License\n.*?)```", license_md, re.S)
+        self.assertIsNotNone(controlling)
+        plain = (REPO_ROOT / "LICENSE").read_text(encoding="utf-8").replace("\r\n", "\n")
+        self.assertEqual(plain, controlling.group(1))
+        history = (REPO_ROOT / "scripts/release/create_public_history.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn('$licenseDocs = @("LICENSE", "LICENSE.md",', history)
+
     def test_locale_build_inputs_are_in_the_public_snapshot_allowlist(self) -> None:
         allowlist = (
             REPO_ROOT / "docs/internal/public_repo_release_allowlist_2026-11-13.txt"
@@ -4113,7 +4128,7 @@ class PublicSiteValidationTests(unittest.TestCase):
         portal = (REPO_ROOT / "site/github/index.html").read_text(encoding="utf-8-sig")
         self.assertIn("初めて使う・配布物を選ぶ", portal)
         self.assertIn("起動や保存で困っている", portal)
-        for group in ("導入・更新", "資料を読む・記録する", "保存・復元・問題への対処", "ファイルと記法"):
+        for group in ("導入・更新・アンインストール", "資料を読む・記録する", "保存・復元・問題への対処", "ファイルと記法"):
             self.assertIn(f"<h2>{group}</h2>", portal)
         self.assertIn('class="site-menu"', portal)
         self.assertIn('aria-current="page"><span class="menu-link-title">文書ポータルのトップ', portal)
@@ -4370,7 +4385,20 @@ class ReleaseLicenseGateTests(unittest.TestCase):
         for relative_path in release_license_gate.required_license_files(locale):
             target = release_dir / relative_path
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(f"License material: {relative_path}\n", encoding="utf-8")
+            if relative_path == release_license_gate.MATH_FONT:
+                target.write_bytes((REPO_ROOT / "third_party/microtex/res/xits/XITSMath-Regular.clm2").read_bytes())
+            else:
+                target.write_text(f"License material: {relative_path}\n", encoding="utf-8")
+
+    def test_rejects_changed_math_font_and_missing_ofl(self) -> None:
+        with repo_tempdir() as root:
+            release_dir = root / "release_math"
+            self.write_release(release_dir)
+            (release_dir / release_license_gate.MATH_FONT).write_bytes(b"changed font")
+            (release_dir / "licenses/xits/OFL.txt").unlink()
+            errors = release_license_gate.validate_release_directory(release_dir)
+            self.assertTrue(any("reviewed XITS resource" in error for error in errors))
+            self.assertTrue(any("licenses/xits/OFL.txt" in error for error in errors))
 
     def test_rejects_missing_license_in_zip(self) -> None:
         with repo_tempdir() as root:
@@ -4787,10 +4815,12 @@ class ReleaseLocaleContentGateTests(unittest.TestCase):
             "ja": {
                 "01_講義サンプル/第03回_最初期構想/ノート_最初期構想.clro": ("# 第03回", "> ", "PDF学習ワークスペース統合画面構成および基本仕様書.pdf"),
                 "01_講義サンプル/第04回_Office変換/ノート_Office変換.clro": ("# 第04回", "> ", "PPTX_機能紹介とネイティブ図表_変換結果.pdf"),
+                "01_講義サンプル/第05回_数式表示/ノート_数式表示.clro": ("# 第05回", "> ", "数式配置練習.pdf", "$$", "MathBox入力"),
             },
             "en": {
                 "01_Lecture_Samples/Session_03_Early_Design/early_design_notes.clro": ("# Session 03", "> ", "early_design_reference.pdf"),
                 "01_Lecture_Samples/Session_04_Office_Conversion/office_conversion_notes.clro": ("# Session 04", "> ", "feature_overview_and_charts_conversion_result.pdf"),
+                "01_Lecture_Samples/Session_05_Math_Display/math_display_notes.clro": ("# Session 05", "> ", "math_placement_practice.pdf", "$$", "MathBox input"),
             },
         }
         for locale, notes in samples.items():

@@ -20,6 +20,8 @@
 #include "json.h"
 #include "pdf_identity.h"
 #include "core/atomic_write.h"
+#include "core/localization.h"
+#include "core/workspace_layout.h"
 
 namespace clrop_bridge {
 namespace {
@@ -675,11 +677,12 @@ bool LoadAnnotations(const std::wstring& clropPath,
             std::filesystem::path wsRoot(g_workspaceRoot);
             std::filesystem::path src(clropPath);
             if (!wsRoot.empty() && IsPathUnderRoot(src, wsRoot)) {
-                std::filesystem::path escapeDir = wsRoot / L"__pdf_note_workspace__" / L"__escape__";
+                std::filesystem::path escapeDir = workspace_layout::Failed(wsRoot);
                 std::filesystem::path moved;
                 if (atomic_write::QuarantineFileBestEffort(src, escapeDir, &moved) && !moved.empty()) {
                     if (!err.empty()) err += L"\n";
-                    err += L"破損ファイルを退避しました: " + moved.wstring();
+                    err += localization::Format(L"clrop.load.corrupt_quarantined",
+                                                {{L"PATH", moved.wstring()}});
                 }
             }
         }
@@ -792,9 +795,8 @@ bool SaveAnnotations(const std::wstring& clropPath,
         preferredTmp = std::filesystem::path(clropPath).parent_path();
         quarantineDir = preferredTmp;
     } else if (!g_workspaceRoot.empty()) {
-        std::filesystem::path resource = std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__";
-        preferredTmp = resource / L"__tmp__";
-        quarantineDir = resource / L"__escape__";
+        preferredTmp = workspace_layout::Tmp(std::filesystem::path(g_workspaceRoot));
+        quarantineDir = workspace_layout::Failed(std::filesystem::path(g_workspaceRoot));
     }
     if (!clrop::SaveClropFile(clropPath, doc, err, preferredTmp, quarantineDir)) {
         return false;

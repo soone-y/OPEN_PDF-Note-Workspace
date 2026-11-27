@@ -50,6 +50,8 @@ $cppArgs = @(
     "-Isrc",
     "-Ithird_party/md4c/src",
     "-Ithird_party/pdfium/include",
+    "-Ithird_party/microtex/lib",
+    "-Ithird_party/microtex/platform/gdi_win",
     $src,
     "src/note/note_model.cpp",
      "src/note/note_dirty_graph.cpp",
@@ -98,11 +100,21 @@ $cppArgs = @(
     "src/note/note_md4c_adapter.cpp",
     "src/note/note_parser.cpp",
     "src/math/math_render.cpp",
+    "src/math/math_source.cpp",
+    "src/note_view/note_math_preview.cpp",
+    "src/math/math_box_render.cpp",
+    "src/math/math_render_gdi.cpp",
+    "src/note/note_math_render_cache.cpp",
     $md4cObj,
     "-lgdi32",
+    "-lgdiplus",
     "-o",
     $exe
 )
+
+$microtexSources = (Get-Content -Raw -LiteralPath (Join-Path $repoRoot "scripts/build/build_sources.json") | ConvertFrom-Json).BuildSourceFiles |
+    Where-Object { $_ -like 'third_party/microtex/*.cpp' }
+$cppArgs = @($microtexSources) + $cppArgs
 
 if ($Md4cFatalFaults) {
     $cppArgs = @("-DNOTE_MD4C_FATAL_FAULT_TEST") + $cppArgs
@@ -119,6 +131,9 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "compile failed"
     }
+
+    . (Join-Path $repoRoot "scripts/build/sync_microtex_assets.ps1")
+    Sync-MicrotexAssets -SourceRoot $repoRoot -DestinationRoot $outDir | Out-Null
 
     $oldPath = $env:PATH
     try {

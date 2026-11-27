@@ -1,0 +1,131 @@
+{
+  "schema": "pnw-python-tool-test-groups-v1",
+  "_comment": [
+    "Python Tool Tests groups. Classes not listed here belong to the always-run core group.",
+    "CI selects heavy tests one by one from the base commit's recorded inputs (files read, directories listed, Python functions executed); see .github/ci/selection.py.",
+    "paths: inputs of the group's child processes (PowerShell, g++, child Python), which the recorder cannot observe. A change matching them reruns the group's tests that start child processes.",
+    "all_groups_paths: CI selection plumbing; a change here runs every heavy test.",
+    "core_paths: known areas. A changed path matching neither core_paths nor any group's paths runs every heavy test."
+  ],
+  "all_groups_paths": [
+    "tests/python/run_python_tool_groups.py",
+    "tests/config/python_tool_test_groups.json",
+    "tests/scripts/run_repo_checks.ps1",
+    ".github/workflows/**",
+    ".github/ci/*.py",
+    ".github/ci/*.json"
+  ],
+  "core_paths": [
+    "src/**",
+    "docs/**",
+    "locales/**",
+    "third_party/**",
+    "fixtures/**",
+    "introduction/**",
+    "site/**",
+    "scripts/**",
+    "tests/**",
+    "tools/**",
+    "release_assets/**",
+    ".agents/**",
+    ".github/**",
+    "*.md",
+    "*.ps1",
+    "REPO_VERSION.txt",
+    ".gitignore",
+    ".gitattributes"
+  ],
+  "groups": {
+    "isolated_app": {
+      "classes": [
+        "tests/python/test_isolated_app_test.py::IsolatedAppTests",
+        "tests/python/test_isolated_app_test.py::IsolatedAppWindowsTests"
+      ],
+      "paths": [
+        "tools/dev/isolated_app_test.py",
+        "tests/scripts/app_test_desktop.ps1"
+      ]
+    },
+    "release": {
+      "classes": [
+        "tests/python/test_release_entrypoints.py::ReleaseEntrypointTests",
+        "tests/python/test_build_version_refresh.py::BuildVersionRefreshTests"
+      ],
+      "paths": [
+        "*.ps1",
+        "scripts/**",
+        "release_assets/**",
+        "REPO_VERSION.txt"
+      ]
+    },
+    "statistics_site": {
+      "classes": [
+        "tests/python/test_public_statistics.py::PublicStatisticsTests",
+        "tests/python/test_public_statistics.py::PreparedStatisticsTests",
+        "tests/python/test_public_statistics.py::HistoricalStatisticsTests",
+        "tests/python/test_public_statistics.py::StatisticsPipelineTests",
+        "tests/python/test_site_validation.py::SiteValidationRegressionTests"
+      ],
+      "paths": [
+        "site/**",
+        "introduction/**",
+        "scripts/**",
+        "*.ps1",
+        "tools/**"
+      ]
+    },
+    "check_contracts": {
+      "classes": [
+        "tests/python/test_check_failure_contracts.py::CheckFailureContractTests"
+      ],
+      "paths": [
+        "tests/scripts/**",
+        "tests/config/**",
+        "scripts/**",
+        "*.ps1"
+      ]
+    },
+    "libreoffice": {
+      "classes": [
+        "tests/python/test_libreoffice_conversion_expectations.py::ConversionExpectationsTests",
+        "tests/python/test_libreoffice_upstream_conversion.py::LibreOfficeUpstreamConversionTests",
+        "tests/python/test_libreoffice_conversion_corpus.py::LibreOfficeConversionCorpusTests"
+      ],
+      "paths": [
+        "tools/libreoffice/**",
+        "third_party/libreoffice/**"
+      ]
+    },
+    "readonly_viewer": {
+      "classes": [
+        "tests/python/test_readonly_viewer_migration.py::ReaderMigrationTests",
+        "tests/python/test_readonly_file_range.py::ReadonlyFileRangeTests",
+        "tests/python/test_readonly_viewer_next_licenses.py::PrototypeLicenseTests"
+      ],
+      "paths": [
+        "src/**",
+        "third_party/**",
+        "scripts/**",
+        "*.ps1"
+      ]
+    },
+    "setup_json": {
+      "classes": [
+        "tests/python/test_setup_json_roundtrip.py::SetupJsonRoundTripTests"
+      ],
+      "paths": [
+        "src/**",
+        "tests/unit/**"
+      ]
+    },
+    "dependency_security": {
+      "classes": [
+        "tests/python/test_dependency_security_gate.py::DependencySecurityGateTests"
+      ],
+      "paths": [
+        "third_party/**",
+        "tools/release_checks/**"
+      ]
+    }
+  }
+}

@@ -69,7 +69,20 @@ While viewing a PDF, use the left or right 90° rotation commands in **View** to
 
 ## Read notes and other documents
 
-The viewer supports Markdown, `.clro` notes, plain text, and a byte view. Reading view displays headings, tables, and supported Mermaid diagrams within the document. Switch views when you want to inspect the source.
+The viewer supports Markdown, `.clro` notes, `.tex` files, plain text, and a byte view. Reading view displays headings, tables, and supported Mermaid diagrams within the document. Switch views when you want to inspect the source.
+
+Math in notes and `.tex` files (`$…$`, `$$…$$`, `\(…\)`, `\[…\]`, and similar) is recognized with the same rules as the main application and rendered as formulas in reading view. In `.tex` files, everything other than math is shown as written, and headings such as `\section` are added to the outline. Formulas that cannot be rendered, and formulas inside tables, stay as source text. Rendered formulas are images, so text search does not match them.
+
+## View images
+
+You can also open image files such as PNG, JPEG, BMP, GIF, TIFF, and ICO. WebP, HEIC, AVIF, and similar formats display when Windows has a decoder for them. If a format is unsupported or the file is damaged, the image area explains why.
+
+- Images first appear fitted to the window. Zoom with the on-screen buttons, `Ctrl++` / `Ctrl+-`, or `Ctrl` with the mouse wheel; `Ctrl+0` fits the whole image again.
+- Drag, use the wheel, or press the arrow keys to move around. Double-click switches between actual size and fit.
+- Images are rotated according to their camera orientation (EXIF). Transparent areas are shown on white. For multi-page images, only the first page is shown.
+- The status area shows the original pixel size. Very large images are displayed from a reduced copy to protect memory.
+
+Images are read once and closed; the original file is never modified.
 
 | Key | View |
 | --- | --- |

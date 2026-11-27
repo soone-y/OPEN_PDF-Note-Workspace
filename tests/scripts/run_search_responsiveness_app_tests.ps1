@@ -38,6 +38,8 @@ try {
     foreach ($name in @('pdfium.dll', 'zlib1.dll', 'libgcc_s_seh-1.dll', 'libstdc++-6.dll', 'libwinpthread-1.dll')) {
         Copy-Item -LiteralPath (Join-Path $binDir $name) -Destination $outputDir
     }
+    . (Join-Path $repoRoot "scripts/build/sync_microtex_assets.ps1")
+    Sync-MicrotexAssets -SourceRoot $repoRoot -DestinationRoot $outputDir | Out-Null
     $process = Start-Process -FilePath $testExe -WorkingDirectory $outputDir -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput (Join-Path $outputDir 'stdout.log') -RedirectStandardError (Join-Path $outputDir 'stderr.log')
     $ownedHandle = $process.Handle

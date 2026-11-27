@@ -82,7 +82,7 @@ enum : int {
     IDC_NOTE_BG_MODE,
     IDC_NOTE_BG_CUSTOM,
     IDC_NOTE_MATH_MARGIN,
-    IDC_NOTE_MATH_SUPSUB,
+    IDC_NOTE_MATH_SUPSUB_RETIRED, // Keep following control IDs stable.
     IDC_NOTE_INLINE_MATH_VERTICAL_ALIGNMENT,
     IDC_NOTE_OVERLAY_REFRESH_DELAY,
     IDC_NOTE_FULL_REPARSE_DELAY,
@@ -112,6 +112,7 @@ enum : int {
     IDC_CLRO_ASCII_ONLY = 4227,
     IDC_NOTE_QUOTE_LAZY_CONTINUATION = 4228,
     IDC_CLRO_LIST_IMPLICIT_CONTINUATION = 4229,
+    IDC_CLRO_LIST_BODY_ALIGNMENT = 4256,
     IDC_NOTE_BOTTOM_SPACE_MODE = 4250,
     IDC_NOTE_BOTTOM_SPACE_FIXED,
     IDC_NOTE_BOTTOM_SPACE_FONT,
@@ -472,6 +473,7 @@ struct GeneralSettingsCtx {
     HWND chkClroAsciiOnly = nullptr;
     HWND chkNoteQuoteLazyContinuation = nullptr;
     HWND chkClroListImplicitContinuation = nullptr;
+    HWND chkClroListBodyAlignment = nullptr;
     HWND cbNoteBottomSpaceMode = nullptr;
     HWND editNoteBottomSpaceFixed = nullptr;
     HWND editNoteBottomSpaceFont = nullptr;
@@ -486,7 +488,6 @@ struct GeneralSettingsCtx {
     HWND btnNoteFgCustom = nullptr;
     COLORREF noteFgCustomColor = RGB(0, 0, 0);
     HWND cbNoteMathMargin = nullptr;
-    HWND cbNoteMathSupSub = nullptr;
     HWND cbNoteInlineMathVerticalAlignment = nullptr;
     HWND cbNoteOverlayRefreshDelay = nullptr;
     HWND cbNoteFullReparseDelay = nullptr;
@@ -562,11 +563,6 @@ static std::wstring InlineMathVerticalAlignmentLabel(int value) {
     case 1: return localization::Text(L"settings.note_inline_math.center");
     default: return localization::Text(L"settings.note_inline_math.bottom");
     }
-}
-
-static std::wstring NoteSupSubDistributionLabel(int supPercent) {
-    if (supPercent <= 0) return localization::Text(L"settings.general_foundation.9957a2dbbd88");
-    return NoteRatioLabel(supPercent);
 }
 
 static COLORREF ResolveNoteBackgroundColor(const std::wstring& source,

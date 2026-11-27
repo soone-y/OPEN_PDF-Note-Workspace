@@ -511,6 +511,7 @@ try {
         $appInputs = @(Get-CompilerInputPaths -BuildSourcesPath $buildSourcesPath -SourceProperty "BuildSourceFiles" -ObjectDirectory $appObjectDirectory)
         $appInputs += @(
             (Join-Path $repoRoot "scripts\build\build_workspace.ps1"),
+            (Join-Path $repoRoot "scripts/build/sync_microtex_assets.ps1"),
             $buildSourcesPath,
             (Join-Path $repoRoot "scripts/build/build_version.ps1"),
             (Join-Path $repoRoot "REPO_VERSION.txt"),
@@ -661,6 +662,9 @@ try {
         Copy-File -Source $pdfiumPackageLicense -Dest (Join-Path $licensesDir "pdfium\LICENSE")
     }
 
+    . (Join-Path $repoRoot "scripts\build\sync_microtex_assets.ps1")
+    Sync-MicrotexAssets -SourceRoot $repoRoot -DestinationRoot $outDir -DryRun:$DryRun | Out-Null
+
     $md4cLicense = Join-Path $repoRoot "third_party\md4c\LICENSE.md"
     if (Test-Path -LiteralPath $md4cLicense) {
         Copy-File -Source $md4cLicense -Dest (Join-Path $licensesDir "md4c\LICENSE.md")
@@ -775,6 +779,8 @@ try {
         "",
         "- pdfium/: package LICENSE plus PDFium and bundled component license texts.",
         "- md4c/: MIT license text for the vendored Markdown parser.",
+        "- microtex/: MIT license text for the embedded math renderer.",
+        "- xits/: OFL 1.1, FONTLOG and README for resources/math/xits/XITSMath-Regular.clm2.",
         "- mingw-w64/: license texts for libstdc++-6.dll, libgcc_s_seh-1.dll, and libwinpthread-1.dll.",
         "- zlib/: zlib license text for the vendored zlib1.dll.",
         "- libreoffice/: LibreOffice license.txt, LICENSE.html, and NOTICE for bundled private fonts.",

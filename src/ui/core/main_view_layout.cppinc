@@ -1129,6 +1129,127 @@ static bool HandleManagedAbnormalExit(HWND hWnd) {
     return true;
 }
 
+// Explains originals that vanished while their unintegrated changes remain in
+// stage. Protection cannot be re-acquired until the file returns, so offer the
+// recovery window (save elsewhere) instead of a misleading "re-acquiring".
+// Each vanished original is explained once until it returns. Returns true when
+// at least one checkpoint original is currently missing.
+static bool ExplainMissingStagedOriginals(HWND hWnd) {
+    static std::set<std::wstring> announced;
+    const auto missing = document_source_protection::MissingStagedOriginals();
+    for (auto it = announced.begin(); it != announced.end();) {
+        bool stillMissing = false;
+        for (const auto& item : missing) stillMissing = stillMissing || item.original == *it;
+        it = stillMissing ? std::next(it) : announced.erase(it);
+    }
+    if (missing.empty()) return false;
+    std::vector<std::pair<std::wstring, std::filesystem::path>> fresh;
+    const auto entries = file_output::ListStagedDiffEntries();
+    for (const auto& item : missing) {
+        if (!announced.insert(item.original).second) continue;
+        for (const auto& entry : entries) {
+            if (document_source_protection::Key(entry.stagePath) != item.stage) continue;
+            fresh.push_back({entry.targetPath, entry.stagePath});
+            break;
+        }
+    }
+    if (fresh.empty()) return true;
+    if (IsSaveOperationInProgress() || s_exitInProgress) {
+        ShowSoftNotice(hWnd, localization::Text(L"workspace.source_missing_notice"),
+                       SoftNoticeKind::Warning);
+        return true;
+    }
+    SilentDialogOptions dialog;
+    dialog.title = localization::Text(L"workspace.source_missing.title");
+    dialog.message = localization::Text(L"workspace.source_missing.message");
+    for (const auto& item : fresh) dialog.paths.push_back({L"", item.first});
+    dialog.kind = SoftNoticeKind::Warning;
+    dialog.buttons = SilentDialogButtons::YesNo;
+    dialog.yesLabel = localization::Text(L"ui.layout.exit_save_failed.recover");
+    dialog.noLabel = localization::Text(L"workspace.source_missing.later");
+    dialog.defaultResult = SilentDialogResult::No;
+    dialog.escapeResult = SilentDialogResult::No;
+    if (ShowSilentDialog(hWnd, dialog) == SilentDialogResult::Yes)
+        recovery::RequestStageRecovery(hWnd, fresh.front().second);
+    return true;
+}
+
+// Set by a confirmed recovery hand-off; consumed by the next exit attempt.
+static std::filesystem::path s_recoveryHandOffStage;
+
+// Recovery runs in the standalone tool, which owns the originals while the
+// main app is closed. Confirm, then exit keeping the checkpoints and start it.
+static void HandOffStageRecoveryToTool(HWND hWnd) {
+    const std::filesystem::path stage = recovery::TakePendingStageRecovery();
+    if (stage.empty() || s_exitInProgress || !hWnd) return;
+    if (IsSaveOperationInProgress() || IsSaveTransactionRunning() ||
+        HasActiveOfficeConversionJobs()) {
+        ShowSoftNotice(hWnd, localization::Text(L"recovery.app.busy"), SoftNoticeKind::Warning);
+        return;
+    }
+    SilentDialogOptions dialog;
+    dialog.title = localization::Text(L"recovery.tool.title");
+    dialog.message = localization::Text(L"recovery.tool.handoff_confirm");
+    dialog.kind = SoftNoticeKind::Info;
+    dialog.buttons = SilentDialogButtons::YesNo;
+    dialog.yesLabel = localization::Text(L"recovery.tool.handoff_go");
+    dialog.noLabel = localization::Text(L"main.ui.0684d9a0cd66");
+    dialog.defaultResult = SilentDialogResult::Yes;
+    dialog.escapeResult = SilentDialogResult::No;
+    if (ShowSilentDialog(hWnd, dialog) != SilentDialogResult::Yes) return;
+    s_recoveryHandOffStage = stage;
+    PostMessageW(hWnd, WM_CLOSE, 0, 0);
+}
+
+enum class AppExitSaveFailureChoice { Stay, Recover, ExitKeepingStages };
+
+// A failed exit save must not open a recovery tool by itself. Explain what is
+// kept and let the user hold, recover, or exit with the checkpoints retained.
+static AppExitSaveFailureChoice PromptAppExitSaveFailure(HWND hWnd) {
+    SilentDialogOptions dialog;
+    dialog.title = localization::Text(L"ui.layout.exit_save_failed.title");
+    dialog.message = localization::Text(L"ui.layout.exit_save_failed.message");
+    const std::wstring stagedLocations = file_output::FormatStagedDiffLocationSummary();
+    if (!stagedLocations.empty()) {
+        dialog.message += L"\n\n";
+        dialog.message += stagedLocations;
+    }
+    dialog.kind = SoftNoticeKind::Warning;
+    dialog.buttons = SilentDialogButtons::YesNoCancel;
+    dialog.yesLabel = localization::Text(L"ui.layout.exit_save_failed.stay");
+    dialog.noLabel = localization::Text(L"ui.layout.exit_save_failed.recover");
+    dialog.cancelLabel = localization::Text(L"ui.layout.exit_save_failed.exit");
+    dialog.defaultResult = SilentDialogResult::Yes;
+    dialog.escapeResult = SilentDialogResult::Yes;
+    switch (ShowSilentDialog(hWnd, dialog)) {
+    case SilentDialogResult::No: return AppExitSaveFailureChoice::Recover;
+    case SilentDialogResult::Cancel: return AppExitSaveFailureChoice::ExitKeepingStages;
+    default: return AppExitSaveFailureChoice::Stay;
+    }
+}
+
+// A memo that cannot be saved must not trap the user in the app. Offer to keep
+// working or to exit after handing the unsaved text over on the clipboard.
+static bool ConfirmExitWithUnsavedWorkspaceMemo(HWND hWnd) {
+    SilentDialogOptions dialog;
+    dialog.title = localization::Text(L"ui.layout.exit_memo_failed.title");
+    dialog.message = localization::Text(L"ui.layout.exit_memo_failed.message");
+    dialog.kind = SoftNoticeKind::Warning;
+    dialog.buttons = SilentDialogButtons::YesNo;
+    dialog.yesLabel = localization::Text(L"ui.layout.exit_save_failed.stay");
+    dialog.noLabel = localization::Text(L"ui.layout.exit_memo_failed.copy_and_exit");
+    dialog.defaultResult = SilentDialogResult::Yes;
+    dialog.escapeResult = SilentDialogResult::Yes;
+    if (ShowSilentDialog(hWnd, dialog) != SilentDialogResult::No) return false;
+    std::wstring text;
+    if (!CaptureWorkspaceMemoEditorText(&text) || !SetMainClipboardUnicodeText(hWnd, text)) {
+        ShowSoftNotice(hWnd, localization::Text(L"ui.layout.exit_memo_failed.copy_failed"),
+                       SoftNoticeKind::Warning);
+        return false;
+    }
+    return true;
+}
+
 static bool HandleAppExit(HWND hWnd) {
     const ULONGLONG startTick = preview_trace::TickNow();
     preview_trace::Append(
@@ -1143,13 +1264,20 @@ static bool HandleAppExit(HWND hWnd) {
     if (s_managedAbnormalExit.requested) {
         return HandleManagedAbnormalExit(hWnd);
     }
+    // Only this exit attempt may hand off; an aborted attempt forgets it.
+    const std::filesystem::path recoveryHandOffStage = std::move(s_recoveryHandOffStage);
+    s_recoveryHandOffStage.clear();
     DismissAppExitDismissibleDialogs();
     if (HasAppExitBlockingDialog()) {
         preview_trace::Append(L"HandleAppExit", L"abort=exit_blocking_dialog_open");
+        // Never refuse silently: show which window must be closed first.
+        ActivateAppExitBlockingDialog();
+        ShowSoftNotice(hWnd, localization::Text(L"ui.layout.exit_blocked_by_dialog"),
+                       SoftNoticeKind::Warning);
         return false;
     }
     if (!IsUiAutomationEnabled() && !pending_write_retry::ConfirmExit(hWnd)) return false;
-    if (!SaveWorkspaceMemoForExit()) return false;
+    if (!SaveWorkspaceMemoForExit(false) && !ConfirmExitWithUnsavedWorkspaceMemo(hWnd)) return false;
     CancelPendingLinkMode(hWnd);
     if (!CommitActiveEditsForAppExit(hWnd)) {
         preview_trace::Append(
@@ -1159,23 +1287,60 @@ static bool HandleAppExit(HWND hWnd) {
     }
     RememberCurrentSessionFiles();
     const std::wstring previewTempPath = g_pdfPreviewTempPath;
+    if (!recoveryHandOffStage.empty()) {
+        // Hand-off exit: keep every edit as a checkpoint, never integrate, and
+        // start the standalone tool, which waits for this process to exit.
+        if (!SaveNoteIfDirty(hWnd) || !SaveAnnotationsIfDirty(hWnd)) {
+            ShowSoftNotice(hWnd, localization::Text(L"ui.layout.exit_save_failed.preserve_failed"),
+                           SoftNoticeKind::Warning);
+            return false;
+        }
+        if (!recovery::LaunchStandaloneRecoveryAfterExit(g_workspaceRoot, recoveryHandOffStage)) {
+            ShowSoftNotice(hWnd, localization::Text(L"recovery.tool.launch_failed"),
+                           SoftNoticeKind::Warning);
+            return false;
+        }
+        if (!SaveStartupLastOpenTarget())
+            preview_trace::Append(L"HandleAppExit", L"startup_last_open_save_failed continue_exit=1");
+        FinalizeAppExitState(hWnd, previewTempPath);
+        preview_trace::Append(L"HandleAppExit", L"end recovery_handoff=1");
+        return true;
+    }
     // Normal application exit is also a durable boundary.  It creates the
     // pre-save backup and atomically integrates the protected work; the user
     // must not have to choose an internal checkpoint implementation detail.
-    // On failure the transaction leaves recoverable work intact and exit is
-    // canceled, so the original is never silently skipped or overwritten.
+    // On failure the transaction leaves recoverable work intact. Exit stops
+    // unless the user explicitly chooses to exit with the checkpoints kept, so
+    // the original is never silently skipped or overwritten.
     if (!file_output::RunSaveAndIntegrateTransactionForExit(hWnd)) {
+        // A failed integration queues its recovery window. Hold that request
+        // until the user chooses instead of opening it during exit.
+        const std::filesystem::path failedStage = recovery::TakePendingStageRecovery();
+        SaveLastPdfViewInfo();
+        const auto choice = PromptAppExitSaveFailure(hWnd);
         preview_trace::Append(
             L"HandleAppExit",
-            L"abort=save_and_integrate_failed elapsed_ms=" + preview_trace::ElapsedMs(startTick));
-        return PromptStayOrOpenDiffManager(
-            hWnd,
-            localization::Text(L"ui.layout.d7f54787589f").c_str(),
-            localization::Text(L"ui.layout.f2484c529c40").c_str());
+            L"abort=save_and_integrate_failed choice=" +
+            std::to_wstring(static_cast<int>(choice)) +
+            L" elapsed_ms=" + preview_trace::ElapsedMs(startTick));
+        if (choice == AppExitSaveFailureChoice::Recover) {
+            if (!failedStage.empty()) recovery::RequestStageRecovery(hWnd, failedStage);
+            else ShowStageManagerDialog(hWnd);
+            return false;
+        }
+        if (choice != AppExitSaveFailureChoice::ExitKeepingStages) return false;
+        // Exit only after every current edit is a durable checkpoint. The
+        // originals stay untouched; checkpoints are offered again next start.
+        if (!SaveNoteIfDirty(hWnd) || !SaveAnnotationsIfDirty(hWnd)) {
+            ShowSoftNotice(hWnd, localization::Text(L"ui.layout.exit_save_failed.preserve_failed"),
+                           SoftNoticeKind::Warning);
+            return false;
+        }
     }
+    // The startup record only chooses what reopens next time; it holds no
+    // work. A workspace that cannot store it must not make exit impossible.
     if (!SaveStartupLastOpenTarget()) {
-        ShowSoftNotice(hWnd, localization::Text(L"main.startup_state.save_failed"), SoftNoticeKind::Warning);
-        return false;
+        preview_trace::Append(L"HandleAppExit", L"startup_last_open_save_failed continue_exit=1");
     }
     FinalizeAppExitState(hWnd, previewTempPath);
     preview_trace::Append(

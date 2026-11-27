@@ -28,13 +28,15 @@ release パッケージを受け取った利用者は、`docs/` と `licenses/` 
 | MinGW-w64 winpthreads | `licenses/mingw-w64/winpthreads/` | `COPYING.txt` | winpthreads の MIT + BSD 系 notice |
 | zlib runtime | `licenses/zlib/LICENSE` | `third_party/zlib/LICENSE` | zlib1.dll の zlib License |
 | MD4C | `licenses/md4c/LICENSE.md` | `third_party/md4c/LICENSE.md` | MD4C の MIT License |
+| MicroTeX | `licenses/microtex/LICENSE.txt` | `third_party/microtex/LICENSE` | 数式組版の MIT License |
+| XITS Math | `licenses/xits/` | `OFL.txt`, `FONTLOG.txt`, `README.txt` | CLM2 フォント資源の OFL 1.1・著作権・予約名 |
 | LibreOffice | `licenses/libreoffice/` | `license.txt`, `LICENSE.html`, `NOTICE` | LibreOffice 本体、第三者コンポーネント、Apache NOTICE、フォント notice |
 
 ## 3. 第三者コンポーネント一覧
 
 | コンポーネント | 主な用途 | 同梱/利用形態 | 主なライセンス | 注意度 | 必要な対応 |
 | --- | --- | --- | --- | --- | --- |
-| PDFium package `159.0.8152.0` | PDFium バイナリ/ヘッダのパッケージ | `third_party/pdfium/`、release では `pdfium.dll` | MIT 系 | 低 | `third_party/pdfium/LICENSE` を同梱 |
+| PDFium package `160.0.8179.0` | PDFium バイナリ/ヘッダのパッケージ | `third_party/pdfium/`、release では `pdfium.dll` | MIT 系 | 低 | `third_party/pdfium/LICENSE` を同梱 |
 | PDFium 本体 | PDF 読み込み、描画、テキスト抽出、書き出し | `pdfium.dll` | BSD 3-Clause + Apache 2.0 系 | 中 | `pdfium.txt` と関連 license 群を同梱 |
 | Abseil | PDFium 依存 | PDFium 同梱 | Apache License 2.0 | 中 | LICENSE、NOTICE がある場合は NOTICE、改変表示 |
 | Anti-Grain Geometry / AGG 2.3 | PDFium 依存 | PDFium 同梱 | permissive notice | 低 | 著作権表示を保持 |
@@ -52,7 +54,9 @@ release パッケージを受け取った利用者は、`docs/` と `licenses/` 
 | MinGW-w64 runtime DLLs | C++/GCC runtime | `libstdc++-6.dll`, `libgcc_s_seh-1.dll`, `libwinpthread-1.dll` | GPLv3 + GCC Runtime Library Exception / MIT + BSD 系 | 中 | `COPYING3.txt`, `COPYING.RUNTIME.txt`, `COPYING.txt` を同梱 |
 | zlib runtime `1.4` | DOCX staging copy の ZIP 展開/検証 | `third_party/zlib/` の固定成果物から `zlib1.dll` を同梱 | zlib License | 低 | `third_party/zlib/LICENSE` を同梱 |
 | MD4C | Markdown 解析 | `third_party/md4c/src/md4c.c`, `md4c.h` をビルドに使用 | MIT License | 低 | `LICENSE.md` を同梱。局所パッチを管理 |
-| LibreOffice custom runtime `26.2.6.3` | docx/pptx から PDF への headless 変換 | 検証済みカスタム runtime を標準 release へ配置。`image/` の 26.2.3.2 管理者展開物は比較・フォント・license 参照専用 | MPL 2.0 中心 + LGPL/GPL/MPL/Apache 等多数 | 中〜高 | `license.txt`, `LICENSE.html`, `NOTICE` と custom build 入力・patch を同梱 |
+| MicroTeX openmath `086f4eb` | ノートと PDF 数式注釈の数式組版・描画 | `third_party/microtex/` の固定 source を静的に組み込み | MIT License | 低 | `licenses/microtex/LICENSE.txt` を同梱。出典・局所 patch を `third_party/microtex/` に記録 |
+| XITS Math | 数式用フォント（CLM2 形式へ変換済みの輪郭・metrics） | `resources/math/xits/XITSMath-Regular.clm2` を同梱 | SIL OFL 1.1 | 中 | `licenses/xits/` に OFL・FONTLOG・README を同梱。単独販売しない。予約名 `STIX Fonts`・`TM Math` を改変版の名称に用いない |
+| LibreOffice custom runtime `26.2.7.3` | docx/pptx から PDF への headless 変換 | 検証済みカスタム runtime を標準 release へ配置。`image/` の 26.2.3.2 管理者展開物は比較・フォント・license 参照専用 | MPL 2.0 中心 + LGPL/GPL/MPL/Apache 等多数 | 中〜高 | `license.txt`, `LICENSE.html`, `NOTICE` と custom build 入力・patch を同梱 |
 | LibreOffice 同梱フォント | 英語・記号向けフォント候補 | `FR_PRIVATE` でプロセス内読み込み | LibreOffice の各フォント notice に従う | 中 | `license.txt`, `LICENSE.html`, `NOTICE` を同梱。再配布範囲を選択フォントに限定 |
 | Windows / OS フォント | 日本語表示、注釈、PDF 書き出し | 利用者環境にインストール済みのフォントをフェイス名で利用 | 各 OS / 各フォントのライセンス | 中 | フォントファイルを本リポジトリの権利として扱わない。再配布権を与えない |
 
@@ -107,7 +111,7 @@ MinGW-w64 の DLL を release に含める場合、次を同梱します。
 
 | 項目 | 内容 |
 | --- | --- |
-| バージョン | custom runtime は LibreOffice `26.2.6.3`、比較・選択フォント用の管理者展開イメージは `26.2.3.2` |
+| バージョン | custom runtime は LibreOffice `26.2.7.3`、比較・選択フォント用の管理者展開イメージは `26.2.3.2` |
 | 取得元 MSI | `LibreOffice_26.2.3_Win_x86-64.msi` |
 | SHA256 | `468D1FB3880AF3BCDDAC002E9054155912C70B45D105BFA1C82036F33456133D` |
 | 主用途 | 同梱フォントの private font 利用。docx/pptx から PDF への headless 変換 |
@@ -226,7 +230,7 @@ PDF Note Workspace release/
       LICENSE.html
       NOTICE
       custom_build/
-        autogen_26.2.6.3.input
+        autogen_26.2.7.3.input
         communication_free_options.input
         release_reduction_manifest.json
         patches/

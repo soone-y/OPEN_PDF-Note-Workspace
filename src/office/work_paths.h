@@ -1,5 +1,6 @@
 #pragma once
 #include "core/path_safety.h"
+#include "core/workspace_layout.h"
 #include <windows.h>
 #include <filesystem>
 #include <map>
@@ -90,7 +91,7 @@ struct DirectoryEntry {
 // resolve a mutable current workspace or fall back to a host temporary path.
 [[nodiscard]] inline std::filesystem::path Root(const std::filesystem::path& workspace) {
     if (workspace.empty() || !workspace.is_absolute()) return {};
-    return (workspace / L"__pdf_note_workspace__" / L"__tmp__" / L"lo").lexically_normal();
+    return (workspace_layout::Tmp(workspace) / L"lo").lexically_normal();
 }
 struct IgnoreCase {
     bool operator()(const std::wstring& a, const std::wstring& b) const { return _wcsicmp(a.c_str(), b.c_str()) < 0; }

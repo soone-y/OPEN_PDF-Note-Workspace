@@ -85,7 +85,7 @@ empty_view_guide::Content Build(int displayMode, const std::vector<AnnotToolShor
     for (auto& row : ApplicationRows(bindings)) content.general.push_back(std::move(row));
     content.general.push_back(localization::Text(L"shortcut.context"));
     for (const wchar_t* id : {L"guide.save", L"guide.search", L"guide.focus", L"guide.zoom",
-                             L"guide.zoom_reset", L"guide.undo", L"guide.categories",
+                             L"guide.undo", L"guide.categories",
                              L"guide.details", L"guide.colors", L"guide.annotation_context"})
         content.general.push_back(localization::Text(id));
     for (const auto& binding : bindings) {

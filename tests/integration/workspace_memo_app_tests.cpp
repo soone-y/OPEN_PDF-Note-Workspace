@@ -412,7 +412,7 @@ int main(int argc, char** argv) {
             auto staleAttempt = stale;
             Require(!palette_active::Save(staleAttempt, stale.colors) && Equals(path, state.bytes), "stale active palette cannot overwrite newer colors");
             bool backup = false;
-            for (const auto& entry : fs::directory_iterator(activeRoot / L"__pdf_note_workspace__" / L"__escape__")) backup |= Equals(entry.path(), first);
+            for (const auto& entry : fs::directory_iterator(activeRoot / L"__pdf_note_workspace__" / L"__backup__")) backup |= Equals(entry.path(), first);
             Require(backup, "active auto-save retains previous palette bytes");
             auto parsed = colors;
             for (const auto& bad : {std::string("{}"), std::string("{\"colors\":[]}"),
@@ -460,7 +460,7 @@ int main(int argc, char** argv) {
             Require(palette_stock::Save(state, colors), "append stock with a recovery backup");
             const auto stockPath = palette_stock::FilePath(stockRoot);
             Require(!palette_stock::Save(stale, {RGB(9, 9, 9)}) && Equals(stockPath, state.bytes), "stale stock cannot overwrite newer colors");
-            const auto escape = stockRoot / L"__pdf_note_workspace__" / L"__escape__";
+            const auto escape = stockRoot / L"__pdf_note_workspace__" / L"__backup__";
             bool backedUp = false;
             for (const auto& entry : fs::directory_iterator(escape)) backedUp = backedUp || Equals(entry.path(), firstBytes);
             Require(backedUp, "stock update retains the previous file in workspace recovery data");
@@ -523,7 +523,7 @@ int main(int argc, char** argv) {
             const auto path = palette_presets::FilePath(presetRoot);
             Require(!palette_presets::Save(stale, stale.colors) && Equals(path, state.bytes),
                 "stale palette collection cannot overwrite newer presets");
-            const auto escape = presetRoot / L"__pdf_note_workspace__" / L"__escape__";
+            const auto escape = presetRoot / L"__pdf_note_workspace__" / L"__backup__";
             bool backup = false;
             for (const auto& entry : fs::directory_iterator(escape)) backup = backup || Equals(entry.path(), firstBytes);
             Require(backup, "palette preset update keeps previous file in workspace backup");
@@ -928,7 +928,7 @@ int main(int argc, char** argv) {
                 Equals(palettePath, paletteBytes), "clearing a user preset leaves the active palette unchanged");
         Require(ReadFileBytesWin32(setsPath, setsBytes), "capture cleared palette collection");
         Require(atomic_write::AtomicWriteUtf8(setsPath, "{}", setsPath.parent_path(),
-            workspace / L"__pdf_note_workspace__" / L"__escape__", &error), "prepare invalid palette collection for UI reload");
+            workspace / L"__pdf_note_workspace__" / L"__failed__", &error), "prepare invalid palette collection for UI reload");
         Send(palette, WM_COMMAND, 5267);
         Require(!IsWindowEnabled(GetDlgItem(palette, 5265)) && Equals(setsPath, "{}"),
                 "invalid palette collection disables user writes without replacing the file");
@@ -936,7 +936,7 @@ int main(int argc, char** argv) {
         Send(palette, WM_COMMAND, MAKEWPARAM(5262, CBN_SELCHANGE), reinterpret_cast<LPARAM>(setsList));
         Require(IsWindowEnabled(GetDlgItem(palette, 5264)), "initial palette set remains usable when the user file is invalid");
         Require(atomic_write::AtomicWriteUtf8(setsPath, setsBytes, setsPath.parent_path(),
-            workspace / L"__pdf_note_workspace__" / L"__escape__", &error), "restore owned palette collection after reload test");
+            workspace / L"__pdf_note_workspace__" / L"__failed__", &error), "restore owned palette collection after reload test");
         Send(palette, WM_COMMAND, 5267);
         Send(setsList, CB_SETCURSEL, 5);
         Send(palette, WM_COMMAND, MAKEWPARAM(5262, CBN_SELCHANGE), reinterpret_cast<LPARAM>(setsList));
@@ -1495,7 +1495,7 @@ int main(int argc, char** argv) {
         const auto capacityFile = workspace / L"__pdf_note_workspace__/__tmp__/capacity_fixture.bin";
         Require(atomic_write::AtomicWriteUtf8(capacityFile, std::string(123, 'x'), capacityFile.parent_path(), &error),
                 "seed capacity in the owned management directory");
-        // Opening the workspace already creates last-open state in __tmp__.
+        // Opening the workspace may already create files in __tmp__.
         // Independently sum the fixture metadata rather than assuming it is empty.
         std::uint64_t capacityBytes = 0, capacityFiles = 0;
         for (const auto& file : fs::recursive_directory_iterator(capacityFile.parent_path())) if (file.is_regular_file()) {

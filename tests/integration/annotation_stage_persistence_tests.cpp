@@ -158,10 +158,13 @@ void BackgroundAssistRoundTrip() {
     Require(clrop_bridge::SaveAnnotations(savedPath.wstring(), g_pdf.path, expected, error),
         "save all text and math background-assist modes");
     const std::string savedBytes = Read(savedPath);
-    for (const char* mode : {"inherit", "off", "auto", "inverted"}) {
+    // The default (inherit) is omitted when saving (03e24df6); the others are written.
+    for (const char* mode : {"off", "auto", "inverted"}) {
         Require(savedBytes.find(std::string("\"background_assist_mode\":\"") + mode + "\"") !=
-                std::string::npos, "saved CLROP contains each background-assist mode");
+                std::string::npos, "saved CLROP contains each non-default background-assist mode");
     }
+    Require(savedBytes.find("\"background_assist_mode\":\"inherit\"") == std::string::npos,
+            "saved CLROP omits the default background-assist mode");
     std::vector<Annotation> loaded;
     bool mismatch = false;
     Require(clrop_bridge::LoadAnnotations(savedPath.wstring(), g_pdf.path, loaded, mismatch,
@@ -172,21 +175,16 @@ void BackgroundAssistRoundTrip() {
                 loaded[index].backgroundAssistMode == expected[index].backgroundAssistMode,
                 "reload preserves the annotation kind and background-assist mode");
     }
-    const std::string inheritField = ",\"background_assist_mode\":\"inherit\"";
-    const size_t inheritPosition = savedBytes.find(inheritField);
-    Require(inheritPosition != std::string::npos, "owned CLROP has a legacy field-removal target");
-    std::string legacyBytes = savedBytes;
-    legacyBytes.erase(inheritPosition, inheritField.size());
-    const fs::path legacyPath = fs::path(g_workspaceRoot) / L"background-assist-legacy.clrop";
-    Write(legacyPath, legacyBytes);
-    loaded.clear(); error.clear(); mismatch = false;
-    Require(clrop_bridge::LoadAnnotations(legacyPath.wstring(), g_pdf.path, loaded, mismatch,
-        nullptr, error) && !mismatch && loaded.size() == expected.size() &&
-        loaded[0].backgroundAssistMode == TextBackgroundAssistMode::Inherit,
-        "legacy missing field retains inherited background assist");
+    // The saved file itself has no field for item 0, like files from versions
+    // before the field existed; the reload above already returned Inherit.
+    Require(!loaded.empty() && loaded[0].backgroundAssistMode == TextBackgroundAssistMode::Inherit,
+        "missing field retains inherited background assist");
+    const std::string offField = "\"background_assist_mode\":\"off\"";
+    const size_t offPosition = savedBytes.find(offField);
+    Require(offPosition != std::string::npos, "owned CLROP has a mode field to replace");
     std::string unsupportedBytes = savedBytes;
-    unsupportedBytes.replace(inheritPosition, inheritField.size(),
-        ",\"background_assist_mode\":\"future\"");
+    unsupportedBytes.replace(offPosition, offField.size(),
+        "\"background_assist_mode\":\"future\"");
     const fs::path unsupportedPath = fs::path(g_workspaceRoot) / L"background-assist-unsupported.clrop";
     Write(unsupportedPath, unsupportedBytes);
     loaded = {Text(L"caller-sentinel")}; error.clear(); mismatch = false;
@@ -296,14 +294,58 @@ void JournalDenied() {
     denial.Restore();
     Require(!saved && !error.empty(), "journal directory create denial fails explicitly");
 }
+void RequirePdfProtected() {
+    const auto path = ToExtendedWin32PathIfAbsoluteLocal(g_pdf.path);
+    Require(!DeleteFileW(path.c_str()) && GetLastError() == ERROR_SHARING_VIOLATION,
+        "checkpoint protects a closed PDF against external deletion");
+    const auto moved = path + L".external-move";
+    Require(!MoveFileExW(path.c_str(), moved.c_str(), 0) && GetLastError() == ERROR_SHARING_VIOLATION,
+        "checkpoint protects a closed PDF against external rename");
+}
+void ClosePdfFixture() {
+    if (g_pdf.doc) FPDF_CloseDocument(g_pdf.doc);
+    g_pdf.doc = nullptr;
+}
+void RequirePdfReleased() {
+    const auto path = ToExtendedWin32PathIfAbsoluteLocal(g_pdf.path);
+    HANDLE handle = CreateFileW(path.c_str(), DELETE | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    Require(handle != INVALID_HANDLE_VALUE, "consuming the last checkpoint releases an undisplayed PDF");
+    CloseHandle(handle);
+}
+void ProtectionAfterClose() {
+    const auto meta = Latest(); // Adopts a checkpoint created in the seed process.
+    ClosePdfFixture();
+    std::wstring error;
+    {
+        DocumentOpenLockCandidate opened(g_pdf.path, &error);
+        Require(opened.acquired(), "open the staged PDF with the production document lock");
+        opened.CommitReplacing({});
+    }
+    ReleaseDocumentOpenLock(g_pdf.path);
+    RequirePdfProtected();
+    // A failed checkpoint removal must not release the source.
+    {
+        LockedFixture lock(meta.stagePath, false);
+        Require(!file_output::DiscardStagedDiff(meta.stagePath), "failed checkpoint deletion reports failure");
+        Require(fs::exists(meta.stagePath) && fs::exists(meta.metaPath), "failed deletion preserves checkpoint and metadata");
+        RequirePdfProtected();
+    }
+    Require(file_output::DiscardStagedDiff(meta.stagePath), "explicitly discard the closed PDF checkpoint");
+    RequirePdfReleased();
+}
 void Integrate(bool denied) {
     const auto meta = Latest();
+    ClosePdfFixture();
+    RequirePdfProtected();
     std::wstring error;
     if (denied) {
         LockedFixture lock(meta.destPath, false);
         Require(!IntegrateStageMetaToDestination(nullptr, meta, true, &error) && !error.empty(),
             "locked original blocks integration explicitly");
         Require(fs::exists(meta.stagePath) && fs::exists(meta.metaPath), "failed integration retains recovery checkpoint");
+        RequirePdfProtected();
     } else {
         Require(file_output::IntegrateStagedDiff(nullptr, meta.stagePath), "public integration succeeds with backup enabled");
         std::vector<Annotation> result; bool mismatch = false;
@@ -312,6 +354,7 @@ void Integrate(bool denied) {
         Require(result.size() == 1 && result[0].text == L"journal-final", "integration preserves the final journal edit");
         Require(!fs::exists(meta.stagePath) && !fs::exists(meta.metaPath), "successful integration removes the consumed checkpoint");
         Require(ListAnnotJournalSegmentsForTarget(g_pdf.path).empty(), "successful integration removes the consumed journal segments");
+        RequirePdfReleased();
     }
 }
 void IntegrateRejectedInput() {
@@ -530,6 +573,7 @@ int wmain(int argc, wchar_t** argv) {
         else if (mode == L"journal-denied") JournalDenied();
         else if (mode == L"integrate-denied") Integrate(true);
         else if (mode == L"integrate") Integrate(false);
+        else if (mode == L"stage-protection") ProtectionAfterClose();
         else if (mode == L"integrate-rejected-input") IntegrateRejectedInput();
         else if (mode == L"retention-sync-denied") BackupRetention(false, true, false);
         else if (mode == L"retention-sync-success") BackupRetention(false, false, false);

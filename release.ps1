@@ -160,6 +160,40 @@ if ($Test) {
     exit 0
 }
 
+# Fail fast on snapshot input problems (for example allowlisted files not yet
+# tracked by Git) before version selection and the multi-minute build.  The
+# same gate still runs inside make_release_set.ps1; this check writes nothing.
+$sourcePreflightTool = Join-Path $PSScriptRoot "tools\release_checks\prepared_release_packages.py"
+Write-Info "release source の事前検査を実行します。"
+$previousErrorAction = $ErrorActionPreference
+$global:LASTEXITCODE = $null
+try {
+    # Relay stderr as text; Windows PowerShell 5.1 would otherwise raise it.
+    $ErrorActionPreference = "Continue"
+    & python -B $sourcePreflightTool preflight --repository $PSScriptRoot 2>&1 | ForEach-Object { Write-Host $_ }
+    $preflightExitCode = $global:LASTEXITCODE
+}
+finally { $ErrorActionPreference = $previousErrorAction }
+if ($null -eq $preflightExitCode -or $preflightExitCode -ne 0) {
+    throw "release source の事前検査に失敗しました（終了コード: $preflightExitCode）。ビルド前に停止しました。上記の未追跡ファイルを git add するか削除してから再実行してください。"
+}
+
+# A blocked dependency review stops publish Confirm, not release-set creation:
+# sets are also used for trial runs. Report it now so nobody waits for Confirm.
+$dependencyGateTool = Join-Path $PSScriptRoot "tools\release_checks\dependency_security_gate.py"
+$previousErrorAction = $ErrorActionPreference
+$global:LASTEXITCODE = $null
+try {
+    $ErrorActionPreference = "Continue"
+    $dependencyGateOutput = @(& python -B $dependencyGateTool 2>&1 | ForEach-Object { "$_" })
+    $dependencyGateExitCode = $global:LASTEXITCODE
+}
+finally { $ErrorActionPreference = $previousErrorAction }
+if ($dependencyGateExitCode -ne 0) {
+    $dependencyGateOutput | ForEach-Object { Write-Host $_ -ForegroundColor Yellow }
+    Write-Host "警告: 依存関係の安全性ゲートが通っていません（終了コード: $dependencyGateExitCode）。release set は作成を続けますが、このままでは publish の Confirm で停止し、公開できません。試験利用だけに使ってください。" -ForegroundColor Yellow
+}
+
 # Version selection belongs to release preparation, before directory names,
 # builds, packages, statistics and snapshots consume it. Test/Clean exit above.
 . (Join-Path $PSScriptRoot 'scripts/release/release_version.ps1')

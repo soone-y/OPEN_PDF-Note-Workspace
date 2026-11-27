@@ -1,6 +1,7 @@
 #include "ui/core/main_window_api.h"
 #include "workspace/workspace_config_io.h"
 #include "core/app_core.h"
+#include "core/workspace_layout.h"
 #include "core/localization.h"
 #include "core/identity_path_scope.h"
 #include "core/ui_prompts.h"
@@ -202,7 +203,7 @@ std::optional<std::filesystem::path> PromptCreatePathWithSaveDialog(
     }
     DWORD options = 0;
     if (SUCCEEDED(dialog->GetOptions(&options))) {
-        options |= FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_NOREADONLYRETURN;
+        options |= FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_NOREADONLYRETURN | FOS_DONTADDTORECENT;
         dialog->SetOptions(options);
     }
     if (!title.empty()) dialog->SetTitle(title.c_str());
@@ -1962,7 +1963,7 @@ bool BackupImportOverwriteTarget(const std::filesystem::path& dest,
         return false;
     }
 
-    std::filesystem::path backupDir = EscapeRootPath() / L"import_overwrite" / NowTimestampString();
+    std::filesystem::path backupDir = BackupRootPath() / L"import_overwrite" / NowTimestampString();
     std::filesystem::create_directories(backupDir, ec);
     if (ec) {
         if (outErr) *outErr = (localization::Text(L"workspace.actions.6433f07a6a99").c_str()) +
@@ -3339,9 +3340,11 @@ bool RunOfficeWorkerFaultTests(HWND owner, std::wstring* error) {
         }
     }
     if (HasOfficeConversionFeature()) {
-        const auto fixture = root / L"__pdf_note_workspace__" / L"__tmp__" /
+        const auto fixture = workspace_layout::Test(root) /
             (L"office_owned_worker_" + std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(GetTickCount64()));
         std::error_code ec;
+        std::filesystem::create_directories(fixture.parent_path(), ec);
+        if (ec) return false;
         if (!std::filesystem::create_directory(fixture, ec) || ec) return false;
         const auto bytes = OfficeCheckDemoDocx();
         std::vector<std::filesystem::path> documents;

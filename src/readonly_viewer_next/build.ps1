@@ -27,7 +27,8 @@ try {
     $sources = @($definition.ReadOnlyViewerSourceFiles | Where-Object { $_ -ne 'src/readonly_viewer/main.cpp' })
     $sources += 'src/readonly_viewer_next/main.cpp'
     $flags = @('-std=c++17', '-O2', '-DNDEBUG', '-DCLROP_READ_ONLY_BUILD', '-DUNICODE', '-D_UNICODE', '-Wall', '-Wno-unused-parameter',
-               '-Ithird_party/pdfium/include', '-Ithird_party/md4c/src', '-Isrc', "-I$generatedDir")
+               '-Ithird_party/pdfium/include', '-Ithird_party/md4c/src', '-Ithird_party/microtex/lib',
+               '-Ithird_party/microtex/platform/gdi_win', '-Isrc', "-I$generatedDir")
     $flags += if ($Locale -eq 'en') { '-DPDF_NOTE_LOCALE_EN=1' } else { '-DPDF_NOTE_LOCALE_EN=0' }
     $objects = @()
     foreach ($source in $sources) {
@@ -51,7 +52,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Manifest compilation failed.' }
     $candidate = Join-Path $binDir 'readonly_viewer_next.candidate.exe'
     $exePath = Join-Path $binDir 'readonly_viewer_next.exe'
-    & $compiler -municode -mwindows @objects $resourceObject third_party/pdfium/lib/pdfium.dll.lib -lgdi32 -luser32 -lmsimg32 -lshell32 -lole32 -luuid -lcomctl32 -luxtheme -o $candidate
+    & $compiler -municode -mwindows @objects $resourceObject third_party/pdfium/lib/pdfium.dll.lib -lgdi32 -lgdiplus -lwindowscodecs -luser32 -lmsimg32 -lshell32 -lole32 -luuid -lcomctl32 -luxtheme -o $candidate
     if ($LASTEXITCODE -ne 0) { throw 'Link failed.' }
     $toolchainDir = Split-Path -Parent $compiler
     $runtime = @('third_party/pdfium/bin/pdfium.dll')

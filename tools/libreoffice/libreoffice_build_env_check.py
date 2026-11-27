@@ -17,7 +17,7 @@ from typing import Sequence
 
 
 ARCHIVES = [
-    "third_party/libreoffice/source_archives/libreoffice-26.2.6.3.tar.xz",
+    "third_party/libreoffice/source_archives/libreoffice-26.2.7.3.tar.xz",
 ]
 
 COMMANDS = [

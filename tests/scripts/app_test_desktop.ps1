@@ -22,7 +22,11 @@ function Invoke-AppTestDesktop {
     $literalPath = "'" + $ScriptPath.Replace("'", "''") + "'"
     # Native children inherit these output handles. Use a -File bootstrap:
     # -EncodedCommand emits CLIXML stderr when redirected, even with Text output.
-    $command = "[Console]::OutputEncoding=[Text.UTF8Encoding]::new(`$false); `$OutputEncoding=[Console]::OutputEncoding; `$ErrorActionPreference='Stop'; try { `$bound=[Management.Automation.PSSerializer]::Deserialize([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$serialized'))); & $literalPath @bound; if (-not `$?) { exit 1 } } catch { [Console]::Error.WriteLine(`$_.ToString()); [Console]::Error.WriteLine(`$_.ScriptStackTrace); exit 1 }"
+    # The child is Windows PowerShell 5. A PowerShell 7 parent exports its own
+    # module paths first, which hides 5.x core modules (e.g. Get-FileHash), so
+    # rebuild the 5.x search path from its defaults and the persisted variables.
+    $moduleReset = "`$env:PSModulePath=((@([Environment]::GetFolderPath('MyDocuments')+'\WindowsPowerShell\Modules', `$env:ProgramFiles+'\WindowsPowerShell\Modules', `$PSHOME+'\Modules') + ([Environment]::GetEnvironmentVariable('PSModulePath','User') -split ';') + ([Environment]::GetEnvironmentVariable('PSModulePath','Machine') -split ';')) | Where-Object { `$_ } | Select-Object -Unique) -join ';'; "
+    $command = $moduleReset + "[Console]::OutputEncoding=[Text.UTF8Encoding]::new(`$false); `$OutputEncoding=[Console]::OutputEncoding; `$ErrorActionPreference='Stop'; try { `$bound=[Management.Automation.PSSerializer]::Deserialize([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$serialized'))); & $literalPath @bound; if (-not `$?) { exit 1 } } catch { [Console]::Error.WriteLine(`$_.ToString()); [Console]::Error.WriteLine(`$_.ScriptStackTrace); exit 1 }"
     $dispatch = Join-Path $root ('out/tests/desktop_launch_' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $dispatch -ErrorAction Stop | Out-Null
     $bootstrap = Join-Path $dispatch 'bootstrap.ps1'
@@ -33,6 +37,12 @@ function Invoke-AppTestDesktop {
     if ($Interactive) { $mode += '--interactive' }
     $previousEncoding = [Console]::OutputEncoding
     $previousErrorAction = $ErrorActionPreference
+    # Builds wait while this test uses out/bin; this test waits for a running build.
+    . (Join-Path $root 'scripts/build/out_lock.ps1')
+    $outLock = Enter-OutLock -OutRoot (Join-Path $root 'out') -Mode Shared -Label ('test ' + [IO.Path]::GetFileName($ScriptPath))
+    foreach ($record in @(Get-ChildItem -LiteralPath (Join-Path $root 'out/build_source') -Filter '*.txt' -File -ErrorAction SilentlyContinue)) {
+        Write-Host ('Build source: ' + (Get-Content -LiteralPath $record.FullName -TotalCount 1))
+    }
     try {
         [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
         $ErrorActionPreference = 'Continue'
@@ -47,6 +57,7 @@ function Invoke-AppTestDesktop {
     } finally {
         $ErrorActionPreference = $previousErrorAction
         [Console]::OutputEncoding = $previousEncoding
+        Exit-OutLock $outLock
     }
     return $true
 }

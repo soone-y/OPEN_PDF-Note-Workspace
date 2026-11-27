@@ -194,6 +194,7 @@ struct Draft {
     bool clroAsciiOnly = false;
     bool quoteLazyContinuation = false;
     bool listImplicitContinuation = false;
+    bool listBodyAlignment = false;
     int bottomSpaceMode = 0;
     std::wstring bottomSpaceFixed, bottomSpaceFont, bottomSpaceViewport;
     std::wstring hex;
@@ -211,6 +212,9 @@ static void Seed(const fs::path& workspace, bool flat, const fs::path& lectureRo
     draft.quoteLazyContinuation = Send(DescendantId(settings, 4228), BM_GETCHECK) == BST_CHECKED;
     Require(DescendantId(settings, 4229) != nullptr, "list implicit-continuation setting exists");
     draft.listImplicitContinuation = Send(DescendantId(settings, 4229), BM_GETCHECK) == BST_CHECKED;
+    Require(DescendantId(settings, 4256) != nullptr, "list alignment setting exists");
+    draft.listBodyAlignment = Send(DescendantId(settings, 4256), BM_GETCHECK) == BST_CHECKED;
+    Require(!(draft.listBodyAlignment && draft.listImplicitContinuation), "list policies are exclusive");
     Require(DescendantId(settings, 4250) && DescendantId(settings, 4251) &&
         DescendantId(settings, 4252) && DescendantId(settings, 4253), "bottom space controls exist");
     draft.bottomSpaceMode = static_cast<int>(Send(DescendantId(settings, 4250), CB_GETCURSEL));
@@ -236,6 +240,7 @@ static void Expect(HWND settings, const Draft& expected) {
         actual.headingFont == expected.headingFont && actual.lens == expected.lens && actual.hex == expected.hex &&
         actual.clroAsciiOnly == expected.clroAsciiOnly && actual.quoteLazyContinuation == expected.quoteLazyContinuation &&
         actual.listImplicitContinuation == expected.listImplicitContinuation &&
+        actual.listBodyAlignment == expected.listBodyAlignment &&
         actual.bottomSpaceMode == expected.bottomSpaceMode &&
         actual.bottomSpaceFixed == expected.bottomSpaceFixed && actual.bottomSpaceFont == expected.bottomSpaceFont &&
         actual.bottomSpaceViewport == expected.bottomSpaceViewport,
@@ -249,6 +254,7 @@ static void Expect(HWND settings, const Draft& expected) {
     changed.clroAsciiOnly = !old.clroAsciiOnly;
     changed.quoteLazyContinuation = !old.quoteLazyContinuation;
     changed.listImplicitContinuation = !old.listImplicitContinuation;
+    changed.listBodyAlignment = !changed.listImplicitContinuation;
     changed.bottomSpaceMode = (old.bottomSpaceMode + 1) % 3;
     changed.bottomSpaceFixed = old.bottomSpaceFixed == L"144" ? L"96" : L"144";
     changed.bottomSpaceFont = old.bottomSpaceFont == L"600" ? L"400" : L"600";
@@ -259,7 +265,15 @@ static void Expect(HWND settings, const Draft& expected) {
     Type(DescendantId(settings, 4253), changed.bottomSpaceViewport.c_str());
     Send(DescendantId(settings, 4227), BM_SETCHECK, changed.clroAsciiOnly ? BST_CHECKED : BST_UNCHECKED);
     Send(DescendantId(settings, 4228), BM_SETCHECK, changed.quoteLazyContinuation ? BST_CHECKED : BST_UNCHECKED);
-    Send(DescendantId(settings, 4229), BM_SETCHECK, changed.listImplicitContinuation ? BST_CHECKED : BST_UNCHECKED);
+    Send(DescendantId(settings, 4229), BM_SETCHECK, BST_UNCHECKED);
+    Send(DescendantId(settings, 4256), BM_SETCHECK, BST_UNCHECKED);
+    Send(DescendantId(settings, 4256), BM_CLICK);
+    Require(Send(DescendantId(settings, 4256), BM_GETCHECK) == BST_CHECKED &&
+        Send(DescendantId(settings, 4229), BM_GETCHECK) == BST_UNCHECKED, "alignment disables semantic continuation");
+    Send(DescendantId(settings, 4229), BM_CLICK);
+    Require(Send(DescendantId(settings, 4229), BM_GETCHECK) == BST_CHECKED &&
+        Send(DescendantId(settings, 4256), BM_GETCHECK) == BST_UNCHECKED, "semantic continuation disables alignment");
+    if (changed.listBodyAlignment) Send(DescendantId(settings, 4256), BM_CLICK);
     HWND font = DescendantId(settings, 4114); const int count = static_cast<int>(Send(font, CB_GETCOUNT));
     Require(count > 1, "note font has multiple choices"); changed.noteFont = (old.noteFont + 1) % count;
     Send(font, CB_SETCURSEL, changed.noteFont);
@@ -290,6 +304,7 @@ static void SettingsMatrix(const fs::path& executable, const fs::path& workspace
     Draft reverted = changed; reverted.noteFont = baseline.noteFont; reverted.clroAsciiOnly = baseline.clroAsciiOnly;
     reverted.quoteLazyContinuation = baseline.quoteLazyContinuation;
     reverted.listImplicitContinuation = baseline.listImplicitContinuation;
+    reverted.listBodyAlignment = baseline.listBodyAlignment;
     reverted.bottomSpaceMode = baseline.bottomSpaceMode;
     reverted.bottomSpaceFixed = baseline.bottomSpaceFixed; reverted.bottomSpaceFont = baseline.bottomSpaceFont;
     reverted.bottomSpaceViewport = baseline.bottomSpaceViewport; Expect(settings, reverted);
@@ -1098,7 +1113,7 @@ static void OverlongFontNameStartup(const fs::path& executable, const fs::path& 
     std::cout << "[PASS] overlong configured note font starts and exits normally\n";
 }
 [[nodiscard]] static std::vector<fs::path> Manifests(const fs::path& workspace) {
-    const auto directory = workspace / L"__pdf_note_workspace__" / L"__escape__" / L"operation_transactions";
+    const auto directory = workspace / L"__pdf_note_workspace__" / L"__operations__";
     std::vector<fs::path> found;
     if (fs::exists(directory)) for (const auto& entry : fs::recursive_directory_iterator(directory)) {
         if (entry.path().filename() == L"manifest.tsv") found.push_back(entry.path());

@@ -44,14 +44,15 @@ static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
     const int index = target->index;
     const POINT screenPt = target->screenPoint;
 
-    const auto& file = files[static_cast<size_t>(index)];
+    const auto file = files[static_cast<size_t>(index)];
     if (file.path.empty()) return false;
 
     const std::filesystem::path selectedPath(file.path);
     std::filesystem::path hierarchyRoot = g_currentSessionPath.empty()
         ? selectedPath.parent_path()
         : std::filesystem::path(g_currentSessionPath);
-    if (hierarchyRoot.empty()) hierarchyRoot = selectedPath.parent_path();
+    if (hierarchyRoot.empty() || !IsPathUnderRoot(selectedPath, hierarchyRoot))
+        hierarchyRoot = selectedPath.parent_path();
     const std::wstring label = FilenameOrPath(selectedPath);
     const std::wstring hierarchyLabel = FilenameOrPath(hierarchyRoot);
     const bool canShowHierarchy = !hierarchyRoot.empty();
@@ -95,6 +96,10 @@ static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
         AppendMenuW(menu.get(), MF_STRING, kCmdCloseFile,
                     localization::Text(L"ui.pdf_list.ce4e384de3db").c_str());
     }
+    AppendMenuW(menu.get(), MF_STRING,
+                isPinnedTemporaryPath ? kCmdUnpinTemporaryPath : kCmdPinTemporaryPath,
+                localization::Text(isPinnedTemporaryPath ? L"ui.pdf_list.8ba171ca98b1"
+                                                         : L"ui.pdf_list.664d20d41490").c_str());
 
     if (canRename || imageFile) {
         AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
@@ -120,16 +125,10 @@ static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
         });
         if (!menu.AppendSubmenu(locationMenu, localization::Text(L"menu.context.location").c_str())) return false;
     }
-    if (isPinnedTemporaryPath || isTemporaryPath) {
+    if (isTemporaryPath) {
         if (ui::context_menu::PopupMenu temporaryMenu; temporaryMenu) {
-            AppendMenuW(temporaryMenu.get(), MF_STRING,
-                        isPinnedTemporaryPath ? kCmdUnpinTemporaryPath : kCmdPinTemporaryPath,
-                        localization::Text(isPinnedTemporaryPath ? L"ui.pdf_list.8ba171ca98b1"
-                                                                 : L"ui.pdf_list.664d20d41490").c_str());
-            if (isTemporaryPath) {
-                AppendMenuW(temporaryMenu.get(), MF_STRING, kCmdRemoveTemporaryPath,
-                            localization::Text(L"ui.pdf_list.a56d092851ca").c_str());
-            }
+            AppendMenuW(temporaryMenu.get(), MF_STRING, kCmdRemoveTemporaryPath,
+                        localization::Text(L"ui.pdf_list.a56d092851ca").c_str());
             if (!menu.AppendSubmenu(temporaryMenu, localization::Text(L"menu.file.temporary_paths").c_str())) return false;
         }
     }
@@ -234,6 +233,7 @@ static bool ShowPdfListContextMenu(HWND list, LPARAM lParam) {
         if (NormalizePathKeyForList(file.path) == NormalizePathKeyForList(g_currentNotePath)) {
             ClearNoteEditorSilently(owner, L"");
         }
+        (void)UnpinTemporaryFilePath(file.path, true);
         RefreshCurrentSessionFiles();
         ShowSoftNotice(owner,
                        localization::Text(L"ui.pdf_list.8c6a6b99b060").c_str(),

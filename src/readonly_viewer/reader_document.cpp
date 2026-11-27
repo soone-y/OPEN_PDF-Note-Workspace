@@ -29,16 +29,69 @@ void AppendStyledText(RenderedDocument& document, std::wstring_view text, unsign
     document.styles.push_back({start, end, style, headingLevel});
 }
 
+namespace {
+struct ReaderMathContext {
+    const std::wstring* source = nullptr;
+    const std::vector<ReaderMathSpan>* spans = nullptr;
+};
+
+// Map a view position back to the original source. Views that are copies
+// (table cells) are outside the source buffer and never receive formulas.
+[[nodiscard]] size_t MathSpanAt(const ReaderMathContext* math, std::wstring_view view, size_t pos) {
+    if (!math || !math->source || !math->spans || math->spans->empty() || pos >= view.size()) return std::wstring::npos;
+    const wchar_t* base = math->source->data();
+    const wchar_t* at = view.data() + pos;
+    const std::less<const wchar_t*> before;
+    if (before(at, base) || !before(at, base + math->source->size())) return std::wstring::npos;
+    const size_t absolute = static_cast<size_t>(at - base);
+    const auto& spans = *math->spans;
+    const auto found = std::lower_bound(spans.begin(), spans.end(), absolute,
+        [](const ReaderMathSpan& span, size_t value) { return span.start < value; });
+    if (found == spans.end() || found->start != absolute || found->end <= found->start) return std::wstring::npos;
+    return static_cast<size_t>(found - spans.begin());
+}
+
+void AppendMath(RenderedDocument& document, size_t span, bool display, unsigned int style, int headingLevel) {
+    document.maths.push_back({document.text.size(), span, display, headingLevel});
+    AppendStyledText(document, std::wstring_view(&kReaderMathPlaceholder, 1),
+                     display ? TextStyleNone : style, display ? 0 : headingLevel);
+}
+
+// Outline titles show the formula source instead of an object placeholder.
+[[nodiscard]] std::wstring ReaderTitle(const RenderedDocument& document, size_t offset,
+                                       const std::vector<ReaderMathSpan>* spans) {
+    std::wstring title;
+    auto next = std::lower_bound(document.maths.begin(), document.maths.end(), offset,
+        [](const ReaderMath& item, size_t value) { return item.offset < value; });
+    for (size_t i = offset; i < document.text.size(); ++i) {
+        if (document.text[i] == kReaderMathPlaceholder && next != document.maths.end() && next->offset == i &&
+            spans && next->span < spans->size()) {
+            title += L'$' + (*spans)[next->span].tex + L'$';
+            ++next;
+        } else title += document.text[i];
+    }
+    return title;
+}
+} // namespace
+
 void RenderInlineMarkdown(
     std::wstring_view source,
     size_t start,
     size_t end,
     RenderedDocument& document,
     unsigned int style,
-    int headingLevel, unsigned int depth = 0) {
+    int headingLevel, unsigned int depth = 0, const ReaderMathContext* math = nullptr) {
     if (depth >= 32) { AppendStyledText(document, source.substr(start, end - start), style, headingLevel); return; }
     size_t pos = start;
     while (pos < end) {
+        if (const size_t span = MathSpanAt(math, source, pos); span != std::wstring::npos) {
+            const size_t length = (*math->spans)[span].end - (*math->spans)[span].start;
+            if (length <= end - pos) {
+                AppendMath(document, span, false, style, headingLevel);
+                pos += length;
+                continue;
+            }
+        }
         if (source[pos] == L'\\' && pos + 1 < end) {
             AppendStyledText(document, source.substr(pos + 1, 1), style, headingLevel);
             pos += 2;
@@ -80,7 +133,7 @@ void RenderInlineMarkdown(
             const std::wstring_view marker = source.substr(pos, 2);
             const size_t close = source.find(marker, pos + 2);
             if (close != std::wstring_view::npos && close < end) {
-                RenderInlineMarkdown(source, pos + 2, close, document, style | TextStyleBold, headingLevel, depth + 1);
+                RenderInlineMarkdown(source, pos + 2, close, document, style | TextStyleBold, headingLevel, depth + 1, math);
                 pos = close + 2;
                 continue;
             }
@@ -89,7 +142,7 @@ void RenderInlineMarkdown(
         if (pos + 1 < end && source[pos] == L'~' && source[pos + 1] == L'~') {
             const size_t close = source.find(L"~~", pos + 2);
             if (close != std::wstring_view::npos && close < end) {
-                RenderInlineMarkdown(source, pos + 2, close, document, style | TextStyleStrike, headingLevel, depth + 1);
+                RenderInlineMarkdown(source, pos + 2, close, document, style | TextStyleStrike, headingLevel, depth + 1, math);
                 pos = close + 2;
                 continue;
             }
@@ -99,7 +152,7 @@ void RenderInlineMarkdown(
             const wchar_t marker = source[pos];
             const size_t close = source.find(marker, pos + 1);
             if (close != std::wstring_view::npos && close < end && close > pos + 1) {
-                RenderInlineMarkdown(source, pos + 1, close, document, style | TextStyleItalic, headingLevel, depth + 1);
+                RenderInlineMarkdown(source, pos + 1, close, document, style | TextStyleItalic, headingLevel, depth + 1, math);
                 pos = close + 1;
                 continue;
             }
@@ -114,7 +167,7 @@ void RenderInlineMarkdown(
                 const size_t targetEnd = source.find(L')', labelEnd + 2);
                 if (targetEnd != std::wstring_view::npos && targetEnd < end) {
                     if (image) AppendStyledText(document, localization::Text(L"readonly.render.image_prefix"), style, headingLevel);
-                    RenderInlineMarkdown(source, labelStart, labelEnd, document, style | TextStyleLink, headingLevel, depth + 1);
+                    RenderInlineMarkdown(source, labelStart, labelEnd, document, style | TextStyleLink, headingLevel, depth + 1, math);
                     pos = targetEnd + 1;
                     continue;
                 }
@@ -206,8 +259,11 @@ void AppendMarkdownTable(RenderedDocument& document, const std::vector<std::vect
     document.tables.push_back(std::move(table));
 }
 
-RenderedDocument RenderMarkdown(const std::wstring& source, std::vector<InlineDiagram>* inline_diagrams) {
+RenderedDocument RenderMarkdown(const std::wstring& source, std::vector<InlineDiagram>* inline_diagrams,
+                                const std::vector<ReaderMathSpan>* mathSpans) {
     RenderedDocument document;
+    const ReaderMathContext mathContext{&source, mathSpans};
+    const ReaderMathContext* math = mathSpans && !mathSpans->empty() ? &mathContext : nullptr;
     bool inCodeBlock = false;
     bool inMermaidBlock = false;
     note::NoteCodeFenceRun openFence{};
@@ -228,6 +284,27 @@ RenderedDocument RenderMarkdown(const std::wstring& source, std::vector<InlineDi
         const bool hasFence = note::TryParseNoteCodeFenceRun(line, {0}, {line.size()},
             inMermaidBlock || inCodeBlock, &fence);
         const bool closesFence = hasFence && fence.marker == openFence.marker && fence.marker_count >= openFence.marker_count;
+        if (!inMermaidBlock && !inCodeBlock && math) {
+            size_t lead = 0;
+            while (lead < line.size() && iswspace(line[lead])) ++lead;
+            const size_t span = MathSpanAt(math, line, lead);
+            if (span != std::wstring::npos && (*mathSpans)[span].block) {
+                AppendMath(document, span, true, TextStyleNone, 0);
+                document.text.push_back(L'\n');
+                // The parser proves block math stands alone; keep any remainder readable.
+                const size_t after = (*mathSpans)[span].end;
+                size_t afterEnd = source.find(L'\n', after);
+                if (afterEnd == std::wstring::npos) afterEnd = source.size();
+                const std::wstring_view remainder = TrimMarkdownLine(std::wstring_view(source).substr(after, afterEnd - after));
+                if (!remainder.empty()) {
+                    RenderInlineMarkdown(remainder, 0, remainder.size(), document, TextStyleNone, 0, 0, math);
+                    document.text.push_back(L'\n');
+                }
+                if (afterEnd >= source.size()) break;
+                lineStart = afterEnd + 1;
+                continue;
+            }
+        }
         if (!inMermaidBlock && !inCodeBlock && !hasFence) {
             std::vector<std::wstring> header;
             const size_t separator_start = lineEnd == source.size() ? source.size() : lineEnd + 1;
@@ -241,8 +318,8 @@ RenderedDocument RenderMarkdown(const std::wstring& source, std::vector<InlineDi
                 setext.find_first_not_of(setext.front()) == std::wstring_view::npos) {
                 const int level = setext.front() == L'=' ? 1 : 2;
                 const size_t offset = document.text.size();
-                RenderInlineMarkdown(trimmed, 0, trimmed.size(), document, TextStyleBold, level);
-                document.headings.push_back({level, offset, document.text.substr(offset), lineStart});
+                RenderInlineMarkdown(trimmed, 0, trimmed.size(), document, TextStyleBold, level, 0, math);
+                document.headings.push_back({level, offset, ReaderTitle(document, offset, mathSpans), lineStart});
                 document.text.push_back(L'\n');
                 lineStart = separator_end == std::wstring::npos ? source.size() : separator_end + 1;
                 continue;
@@ -314,8 +391,8 @@ RenderedDocument RenderMarkdown(const std::wstring& source, std::vector<InlineDi
                 while (headingEnd > contentStart && line[headingEnd - 1] == L'#') --headingEnd;
                 while (headingEnd > contentStart && iswspace(line[headingEnd - 1])) --headingEnd;
                 const size_t headingOffset = document.text.size();
-                RenderInlineMarkdown(line, contentStart, headingEnd, document, TextStyleBold, headingLevel);
-                document.headings.push_back({headingLevel, headingOffset, document.text.substr(headingOffset), lineStart});
+                RenderInlineMarkdown(line, contentStart, headingEnd, document, TextStyleBold, headingLevel, 0, math);
+                document.headings.push_back({headingLevel, headingOffset, ReaderTitle(document, headingOffset, mathSpans), lineStart});
                 document.text.push_back(L'\n');
             } else if (IsHorizontalRule(line)) {
                 AppendStyledText(document, L"────────────────────────", TextStyleNone, 0);
@@ -342,7 +419,7 @@ RenderedDocument RenderMarkdown(const std::wstring& source, std::vector<InlineDi
                         while (contentStart < line.size() && iswspace(line[contentStart])) ++contentStart;
                     }
                 }
-                RenderInlineMarkdown(line, contentStart, line.size(), document, baseStyle, 0);
+                RenderInlineMarkdown(line, contentStart, line.size(), document, baseStyle, 0, 0, math);
                 document.text.push_back(L'\n');
             }
         }
@@ -357,8 +434,109 @@ RenderedDocument RenderMarkdown(const std::wstring& source, std::vector<InlineDi
 }
 
 namespace {
-void RtfText(std::string& out, std::wstring_view value, bool previousNewline) {
-    for (wchar_t c : value) {
+[[nodiscard]] int TeXSectionLevel(std::wstring_view line, std::wstring_view* title) {
+    static const struct { std::wstring_view command; int level; } kSections[] = {
+        {L"\\part", 1}, {L"\\chapter", 1}, {L"\\section", 2}, {L"\\subsection", 3},
+        {L"\\subsubsection", 4}, {L"\\paragraph", 5},
+    };
+    for (const auto& section : kSections) {
+        if (line.substr(0, section.command.size()) != section.command) continue;
+        size_t open = section.command.size();
+        if (open < line.size() && line[open] == L'*') ++open;
+        if (open >= line.size() || line[open] != L'{') continue;
+        size_t depth = 0;
+        for (size_t i = open; i < line.size(); ++i) {
+            if (line[i] == L'\\') { ++i; continue; }
+            if (line[i] == L'{') ++depth;
+            else if (line[i] == L'}' && --depth == 0) {
+                *title = TrimMarkdownLine(line.substr(open + 1, i - open - 1));
+                return title->empty() ? 0 : section.level;
+            }
+        }
+    }
+    return 0;
+}
+} // namespace
+
+RenderedDocument RenderTeXSource(const std::wstring& source, const std::vector<ReaderMathSpan>& math) {
+    RenderedDocument document;
+    size_t next = 0;
+    size_t pos = 0;
+    bool lineStart = true;
+    while (pos < source.size()) {
+        while (next < math.size() && math[next].start < pos) ++next;
+        if (lineStart) {
+            lineStart = false;
+            size_t lineEnd = source.find(L'\n', pos);
+            if (lineEnd == std::wstring::npos) lineEnd = source.size();
+            std::wstring_view line(source.data() + pos, lineEnd - pos);
+            if (!line.empty() && line.back() == L'\r') line.remove_suffix(1);
+            std::wstring_view title;
+            const bool mathOnLine = next < math.size() && math[next].start < lineEnd;
+            if (const int level = mathOnLine ? 0 : TeXSectionLevel(TrimMarkdownLine(line), &title)) {
+                // The command stays visible; only the outline gains an entry.
+                const size_t offset = document.text.size();
+                AppendStyledText(document, line, TextStyleBold, level);
+                document.headings.push_back({level, offset, std::wstring(title), pos});
+                document.text.push_back(L'\n');
+                pos = lineEnd + 1;
+                lineStart = true;
+                continue;
+            }
+        }
+        if (next < math.size() && math[next].start == pos && math[next].end > pos) {
+            const ReaderMathSpan& span = math[next];
+            if (span.block && !document.text.empty() && document.text.back() != L'\n') document.text.push_back(L'\n');
+            AppendMath(document, next, span.block, TextStyleNone, 0);
+            pos = span.end;
+            ++next;
+            if (span.block) {
+                while (pos < source.size() && (source[pos] == L' ' || source[pos] == L'\t' || source[pos] == L'\r')) ++pos;
+                if (pos < source.size() && source[pos] == L'\n') ++pos;
+                document.text.push_back(L'\n');
+                lineStart = true;
+            }
+            continue;
+        }
+        const wchar_t c = source[pos];
+        if (c == L'\r') { ++pos; continue; }
+        if (c == L'\n') { document.text.push_back(L'\n'); ++pos; lineStart = true; continue; }
+        size_t stop = source.find_first_of(L"\r\n", pos);
+        if (stop == std::wstring::npos) stop = source.size();
+        if (next < math.size() && math[next].start < stop) stop = math[next].start;
+        AppendStyledText(document, std::wstring_view(source).substr(pos, stop - pos), TextStyleNone, 0);
+        pos = stop;
+    }
+    return document;
+}
+
+namespace {
+struct RtfMathState {
+    const RenderedDocument* document = nullptr;
+    const ReaderMathPicture* picture = nullptr;
+    size_t next = 0;
+    bool centered = false;
+};
+
+void RtfText(std::string& out, std::wstring_view value, bool previousNewline, size_t offset, RtfMathState& math) {
+    for (size_t index = 0; index < value.size(); ++index) {
+        const wchar_t c = value[index];
+        const auto& maths = math.document->maths;
+        if (c == kReaderMathPlaceholder && math.next < maths.size() && maths[math.next].offset == offset + index) {
+            const ReaderMath& item = maths[math.next++];
+            const std::string picture = math.picture && *math.picture ? (*math.picture)(item) : std::string();
+            if (item.display) { out += "\\qc "; math.centered = true; }
+            // A failed late draw keeps one character so outline offsets stay valid.
+            out += picture.empty() ? std::string("\\u9633?") : picture;
+            previousNewline = false;
+            continue;
+        }
+        if (c == L'\n' && math.centered) {
+            out += "\\par\\ql\n";
+            math.centered = false;
+            previousNewline = true;
+            continue;
+        }
         if (c == L'\\' || c == L'{' || c == L'}') { out += '\\'; out += static_cast<char>(c); }
         else if (c == L'\n') out += previousNewline ? "\\fs8\\par\\fs25\n" : "\\par\n";
         else if (c == L'\r') continue;
@@ -368,7 +546,7 @@ void RtfText(std::string& out, std::wstring_view value, bool previousNewline) {
         previousNewline = c == L'\n';
     }
 }
-void StyledRange(std::string& out, const RenderedDocument& doc, size_t start, size_t end, size_t& runIndex) {
+void StyledRange(std::string& out, const RenderedDocument& doc, size_t start, size_t end, size_t& runIndex, RtfMathState& math) {
     while (start < end) {
         while (runIndex < doc.styles.size() && doc.styles[runIndex].end <= start) ++runIndex;
         const StyleRun* run = runIndex < doc.styles.size() && doc.styles[runIndex].start <= start ? &doc.styles[runIndex] : nullptr;
@@ -384,7 +562,7 @@ void StyledRange(std::string& out, const RenderedDocument& doc, size_t start, si
             }
             if (run->style & TextStyleCode) out += "\\f1\\highlight2 ";
         }
-        RtfText(out, std::wstring_view(doc.text).substr(start, limit - start), start > 0 && doc.text[start - 1] == L'\n');
+        RtfText(out, std::wstring_view(doc.text).substr(start, limit - start), start > 0 && doc.text[start - 1] == L'\n', start, math);
         out += '}'; start = limit;
     }
 }
@@ -395,17 +573,19 @@ int ReaderHeadingFontHalfPoints(int level) {
     return sizes[std::clamp(level, 0, 6)];
 }
 
-std::string BuildReaderRtf(const RenderedDocument& doc, int widthTwips) {
+std::string BuildReaderRtf(const RenderedDocument& doc, int widthTwips, const ReaderMathPicture& picture) {
     // Only this generator creates RTF controls; every document character is escaped.
     // Native tables keep full cell content, wrap at pixel-based column boundaries,
     // and are ordinary selectable/searchable text. No OLE/fields or URL loading.
+    // Formula pictures come only from the caller's own rasterizer, never from document bytes.
     std::string out = "{\\rtf1\\ansi\\deff0\\uc1{\\fonttbl{\\f0\\fnil\\fcharset128 Yu Gothic UI;}{\\f1\\fmodern Consolas;}}"
         "{\\colortbl;\\red32\\green44\\blue56;\\red235\\green239\\blue243;\\red24\\green69\\blue91;"
         "\\red209\\green219\\blue228;\\red229\\green237\\blue243;\\red245\\green247\\blue249;}"
         "\\viewkind4\\pard\\f0\\fs25\\cf1\\sl240\\slmult1\\sa60 ";
     size_t position = 0, runIndex = 0;
+    RtfMathState math{&doc, &picture};
     for (const auto& table : doc.tables) {
-        StyledRange(out, doc, position, table.start, runIndex);
+        StyledRange(out, doc, position, table.start, runIndex, math);
         const size_t columns = table.rows.front().size();
         std::vector<int> weights(columns, 8);
         for (const auto& row : table.rows) for (size_t c = 0; c < columns; ++c) {
@@ -429,7 +609,7 @@ std::string BuildReaderRtf(const RenderedDocument& doc, int widthTwips) {
                 out += "\\pard\\intbl\\sl240\\slmult1\\sa100\\sb100 ";
                 out += table.alignment[col] == 1 ? "\\qc " : (table.alignment[col] == 2 ? "\\qr " : "\\ql ");
                 const size_t cellEnd = cellStart + table.rows[row][col].size();
-                StyledRange(out, doc, cellStart, cellEnd, runIndex);
+                StyledRange(out, doc, cellStart, cellEnd, runIndex, math);
                 out += "\\cell "; cellStart = cellEnd + 1;
             }
             out += "\\row\n";
@@ -437,7 +617,7 @@ std::string BuildReaderRtf(const RenderedDocument& doc, int widthTwips) {
         out += "\\pard\\sl240\\slmult1\\sa60 ";
         position = table.end;
     }
-    StyledRange(out, doc, position, doc.text.size(), runIndex);
+    StyledRange(out, doc, position, doc.text.size(), runIndex, math);
     out += '}';
     return out;
 }

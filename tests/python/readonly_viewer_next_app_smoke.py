@@ -233,8 +233,9 @@ def main():
         tree = u.GetDlgItem(hwnd, 101)
         root_item = send(tree, 0x110A, 0)
         item = send(tree, 0x110A, 4, root_item)
-        # md4c, mingw-w64, pdfium, project, manifest, README.
-        for _ in range(3): item = send(tree, 0x110A, 1, item)
+        # Folders are listed first in name order (md4c, [microtex,] mingw-w64, pdfium, project, ...).
+        folders = sorted(p.name for p in (runtime_bin / 'licenses').iterdir() if p.is_dir())
+        for _ in range(folders.index('project')): item = send(tree, 0x110A, 1, item)
         require(item, 'project license folder present in native list')
         send(tree, 0x110B, 9, item)
         root_item = send(tree, 0x110A, 0)

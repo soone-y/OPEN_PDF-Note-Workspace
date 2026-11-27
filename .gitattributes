@@ -1,3 +1,6 @@
+# Normalize text line endings in the repository regardless of local Git settings.
+* text=auto
+
 /.gitattributes text eol=lf
 docs/internal/archive/operations/public_repo_release_allowlist_2026-07-28.txt text eol=lf
 docs/internal/archive/operations/public_repo_release_allowlist_2026-08-24.txt -text whitespace=cr-at-eol
@@ -21,3 +24,6 @@ third_party/pdfium/lib/pdfium.dll.lib -text
 
 STATISTICS.md text eol=lf
 docs/statistics/** text eol=lf
+
+# Preserve reviewed MicroTeX bytes, upstream notices and patch context.
+/third_party/microtex/** -text -whitespace

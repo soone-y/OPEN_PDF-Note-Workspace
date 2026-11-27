@@ -142,14 +142,14 @@
     const auto defaults = DefaultAnnotToolShortcuts();
     int digits = 0;
     for (const auto& binding : defaults) {
-        if (binding.ctrl && !binding.alt && !binding.shift && binding.vk >= '1' && binding.vk <= '9') {
+        if (binding.ctrl && !binding.alt && !binding.shift && binding.vk >= '0' && binding.vk <= '9') {
             if (binding.targetKind != AnnotToolShortcutTargetKind::Detail || IsReservedAnnotToolShortcut(binding)) {
                 return fail(L"Ctrl+digit default is indirect or conflicts with a fixed key.");
             }
             ++digits;
         }
     }
-    if (digits != 9 || !ReplaceAnnotToolShortcutBindings(defaults)) return fail(L"Ctrl+digit defaults are incomplete.");
+    if (digits != 10 || !ReplaceAnnotToolShortcutBindings(defaults)) return fail(L"Ctrl+digit defaults are incomplete.");
     const auto path = std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__" /
         L"__settings__" / L"tool_shortcuts.json";
     std::string before;
@@ -160,8 +160,8 @@
         return fail(L"Duplicate rejection changed the active shortcuts.");
     }
     auto reserved = defaults;
-    reserved.front().key = L"Ctrl+0";
-    if (ReplaceAnnotToolShortcutBindings(reserved)) return fail(L"Shortcut save bypassed the zoom reservation.");
+    reserved.front().key = L"Ctrl+S";
+    if (ReplaceAnnotToolShortcutBindings(reserved)) return fail(L"Shortcut save bypassed the save reservation.");
     HANDLE lock = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
     if (lock == INVALID_HANDLE_VALUE) return fail(L"Cannot prepare shortcut save-failure fixture.");
     auto changed = defaults;

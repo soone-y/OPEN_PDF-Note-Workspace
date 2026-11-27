@@ -1,4 +1,5 @@
 #include "note/note_render_final_gdi_measurement_provider.h"
+#include "note/note_math_render_cache.h"
 
 #include "note/note_render_final_display_run.h"
 #include "note/note_render_final_style.h"
@@ -371,16 +372,20 @@ struct FlowCursor {
                                      NoteRenderRunPlacement* out,
                                      uint32_t contentHeightPx = 0,
                                      NoteRenderInlineMathVerticalAlignment alignment =
-                                         NoteRenderInlineMathVerticalAlignment::Top) noexcept {
+                                         NoteRenderInlineMathVerticalAlignment::Top,
+                                     uint32_t verticalInsetPx = 0) noexcept {
     if (!hdc || !cursor || !out || rowHeightPx == 0 || cursor->content_right_px <= cursor->content_left_px ||
         tabWidthPx <= 0) return false;
     // A tall inline formula defines the row's height.  Align its shorter text
     // neighbours too; otherwise the formula itself has no spare row height in
-    // which to move and all alignment choices look identical.
+    // which to move and all alignment choices look identical.  Table cells
+    // reserve their border rows, so alignment uses only the inner height.
+    const uint32_t inset = rowHeightPx > verticalInsetPx * 2u ? verticalInsetPx : 0u;
+    const uint32_t innerHeight = rowHeightPx - inset * 2u;
     const uint32_t fragmentHeight = contentHeightPx == 0
-        ? rowHeightPx : std::min(contentHeightPx, rowHeightPx);
+        ? rowHeightPx : std::min(contentHeightPx, innerHeight);
     const uint32_t rowTopOffset = contentHeightPx == 0
-        ? 0 : ResolveNoteRenderInlineMathTopOffset(rowHeightPx, fragmentHeight, alignment);
+        ? 0 : inset + ResolveNoteRenderInlineMathTopOffset(innerHeight, fragmentHeight, alignment);
     try {
         NoteRenderRunPlacement candidate;
         candidate.source_span = sourceRun.source_span;
@@ -482,15 +487,19 @@ struct FlowCursor {
                                       const NoteRenderFinalDisplayRun& display,
                                       int fontHeightPx,
                                       mathrender::RenderStyle style,
-                                      mathrender::Layout* out) noexcept {
+                                      mathrender::Layout* out,
+                                      std::shared_ptr<const mathrender::Formula>* prepared = nullptr,
+                                      NoteMathRenderCache* cache = nullptr) noexcept {
     if (!hdc || !out || display.display_text.empty() || fontHeightPx <= 0) return false;
     try {
-        std::unique_ptr<mathrender::Node> node = mathrender::Parse(display.display_text);
+        auto node = cache ? cache->Find(display.display_text)
+                          : std::shared_ptr<const mathrender::Formula>(mathrender::Parse(display.display_text));
         if (!node) return false;
         const mathrender::Layout layout = mathrender::Measure(
             *node, hdc, fontHeightPx, style);
         if (layout.width <= 0 || layout.height <= 0) return false;
         *out = layout;
+        if (prepared) *prepared = std::move(node);
         return true;
     } catch (...) {
         return false;
@@ -500,8 +509,10 @@ struct FlowCursor {
 [[nodiscard]] bool MeasureInlineMathGraphic(HDC hdc,
                                             const NoteRenderFinalDisplayRun& display,
                                             int fontHeightPx,
-                                            mathrender::Layout* out) noexcept {
-    return MeasureMathGraphic(hdc, display, fontHeightPx, mathrender::RenderStyle::Inline, out);
+                                            mathrender::Layout* out,
+                                            std::shared_ptr<const mathrender::Formula>* prepared = nullptr,
+                                            NoteMathRenderCache* cache = nullptr) noexcept {
+    return MeasureMathGraphic(hdc, display, fontHeightPx, mathrender::RenderStyle::Inline, out, prepared, cache);
 }
 
 [[nodiscard]] bool BuildInlineMathPlacement(HDC hdc,
@@ -511,10 +522,13 @@ struct FlowCursor {
                                             uint32_t rowHeightPx,
                                             NoteRenderInlineMathVerticalAlignment alignment,
                                             FlowCursor* cursor,
-                                            NoteRenderRunPlacement* out) noexcept {
+                                            NoteRenderRunPlacement* out,
+                                            NoteMathRenderCache* cache,
+                                            uint32_t verticalInsetPx = 0) noexcept {
     if (!out || !cursor || rowHeightPx == 0) return false;
     mathrender::Layout mathLayout;
-    if (!MeasureInlineMathGraphic(hdc, display, fontHeightPx, &mathLayout) ||
+    std::shared_ptr<const mathrender::Formula> prepared;
+    if (!MeasureInlineMathGraphic(hdc, display, fontHeightPx, &mathLayout, &prepared, cache) ||
         mathLayout.width < 0 || mathLayout.height <= 0 ||
         static_cast<uint32_t>(mathLayout.height) > rowHeightPx) {
         return false;
@@ -523,8 +537,10 @@ struct FlowCursor {
         cursor->x_px != cursor->content_left_px) {
         if (!AdvanceToNextVisualRow(cursor)) return false;
     }
-    const uint32_t rowTopOffset = ResolveNoteRenderInlineMathTopOffset(
-        rowHeightPx, static_cast<uint32_t>(mathLayout.height), alignment);
+    const uint32_t inset = rowHeightPx > verticalInsetPx * 2u ? verticalInsetPx : 0u;
+    const uint32_t mathHeight = static_cast<uint32_t>(mathLayout.height);
+    const uint32_t rowTopOffset = std::min(rowHeightPx - mathHeight,
+        inset + ResolveNoteRenderInlineMathTopOffset(rowHeightPx - inset * 2u, mathHeight, alignment));
     if (cursor->visual_row >
             (std::numeric_limits<uint32_t>::max() - rowTopOffset) / rowHeightPx ||
         cursor->x_px > std::numeric_limits<int>::max() - mathLayout.width) {
@@ -533,6 +549,7 @@ struct FlowCursor {
     const uint32_t top = cursor->visual_row * rowHeightPx + rowTopOffset;
     NoteRenderRunPlacement candidate;
     candidate.source_span = sourceRun.source_span;
+    candidate.math_formula = std::move(prepared);
     candidate.x_px = cursor->x_px;
     candidate.width_px = mathLayout.width;
     candidate.fragments.push_back({sourceRun.source_span, cursor->x_px,
@@ -813,7 +830,7 @@ struct TaskCheckboxMetrics {
                         NoteRenderFinalDisplayRunBuildResult::Built ||
                     !MeasureInlineMathGraphic(hdc, display,
                                              std::max<LONG>(1, font.metrics().tmHeight),
-                                             &mathLayout) ||
+                                             &mathLayout, nullptr, options.math_cache) ||
                     mathLayout.height <= 0) {
                     return false;
                 }
@@ -913,7 +930,7 @@ struct TaskCheckboxMetrics {
                 ? BuildInlineMathPlacement(hdc, display, run,
                                            std::max<LONG>(1, font.metrics().tmHeight),
                                            rowHeight, options.inline_math_vertical_alignment,
-                                           runCursor, outRun)
+                                           runCursor, outRun, options.math_cache)
                 : BuildRunPlacement(hdc, display, run, wordWrap, tabWidth,
                                     rowHeight, runCursor, outRun,
                                     std::max<LONG>(1, font.metrics().tmHeight),
@@ -1068,9 +1085,10 @@ struct TaskCheckboxMetrics {
             return false;
         }
         mathrender::Layout mathLayout;
+        std::shared_ptr<const mathrender::Formula> prepared;
         if (!MeasureMathGraphic(hdc, display,
                                 std::max<LONG>(1, font.metrics().tmHeight),
-                                mathrender::RenderStyle::Display, &mathLayout)) {
+                                mathrender::RenderStyle::Display, &mathLayout, &prepared, options.math_cache)) {
             return false;
         }
         const uint64_t leftPadding = std::max<uint32_t>(layoutKey.horizontal_padding_px,
@@ -1117,6 +1135,7 @@ struct TaskCheckboxMetrics {
                              style.line_height_permille, &groupHeight)) return false;
         NoteRenderRunPlacement runPlacement;
         runPlacement.source_span = runIt->source_span;
+        runPlacement.math_formula = std::move(prepared);
         runPlacement.x_px = mathX;
         runPlacement.width_px = mathLayout.width;
         runPlacement.fragments.push_back({runIt->source_span, mathX, mathLayout.width,
@@ -1162,6 +1181,9 @@ struct TaskCheckboxMetrics {
         return NoteTableCellAlignment::Left;
     }
 }
+
+// Each table row paints a one-pixel border on its first and last row.
+constexpr uint32_t kTableRowBorderPx = 1;
 
 struct MeasuredTableRow {
     NoteRenderSourceLinePlan source_line;
@@ -1292,10 +1314,10 @@ struct MeasuredTableRow {
                 const int dividerHeight = ResolveNoteTableDividerHeightPx(1);
                 if (dividerHeight <= 0) return false;
                 row.height_px = static_cast<uint32_t>(dividerHeight);
-            } else if (row.height_px > std::numeric_limits<uint32_t>::max() - 2u) {
+            } else if (row.height_px > std::numeric_limits<uint32_t>::max() - kTableRowBorderPx * 2u) {
                 return false;
             } else {
-                row.height_px += 2u;
+                row.height_px += kTableRowBorderPx * 2u;
             }
             rows.push_back(std::move(row));
             if (line == std::numeric_limits<size_t>::max()) return false;
@@ -1418,13 +1440,15 @@ struct MeasuredTableRow {
                     ? BuildInlineMathPlacement(hdc, display, run,
                                                std::max<LONG>(1, font.metrics().tmHeight),
                                                row.height_px, options.inline_math_vertical_alignment,
-                                               &cursors[column], &runPlacement)
+                                               &cursors[column], &runPlacement, options.math_cache,
+                                               kTableRowBorderPx)
                     : BuildRunPlacement(hdc, display, run, false, tabWidth, row.height_px,
                                         &cursors[column], &runPlacement,
                                         std::max<LONG>(1, font.metrics().tmHeight),
                                         row.has_inline_math
                                             ? options.inline_math_vertical_alignment
-                                            : NoteRenderInlineMathVerticalAlignment::Top);
+                                            : NoteRenderInlineMathVerticalAlignment::Top,
+                                        kTableRowBorderPx);
                 if (!built) return false;
                 currentColumn = column;
                 placement.runs.push_back(std::move(runPlacement));

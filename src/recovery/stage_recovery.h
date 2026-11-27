@@ -38,16 +38,25 @@ enum class ReviewExit { Failed = 1, Deferred = 2, Saved = 3 };
 
 // UI thread only. Queue rather than enter a modal flow inside a save guard.
 void RequestStageRecovery(HWND owner, const std::filesystem::path &stage);
-[[nodiscard]] bool HasActiveStageRecovery();
 [[nodiscard]] bool HasPendingStageRecovery();
+// Withdraws a queued (not yet opened) request so the caller can let the user
+// choose first. Returns the stage that was queued, or empty when none was.
+[[nodiscard]] std::filesystem::path TakePendingStageRecovery();
 [[nodiscard]] bool IsStageRecoveryProcess();
-// Original note bytes are published by the parent that owns source protection.
+// Marks this process as the standalone recovery tool (see standalone_recovery).
+void EnterStandaloneRecoveryProcess();
+// `pdf_note_workspace.exe --recovery [workspace] [--stage <path>] [--wait-pid <pid>]`.
+// Runs before normal startup and reads no app setup.
+[[nodiscard]] bool TryRunStandaloneRecovery(int *exitCode);
+// Named while the standalone tool runs, so the main app does not start on it.
+[[nodiscard]] std::wstring StandaloneRecoveryMutexName();
+// Starts the standalone tool for this workspace after this process exits.
+[[nodiscard]] bool LaunchStandaloneRecoveryAfterExit(
+    const std::filesystem::path &workspace, const std::filesystem::path &stage);
+// Standalone tool only: writes a recovered note to its original location.
 [[nodiscard]] bool WriteStageRecoveryOriginalNote(
     const std::filesystem::path &destination, std::string_view bytes,
     bool expectedExists, uint64_t expectedFingerprint, std::wstring *error);
-void HandleStageRecoveryRequest(HWND owner);
-// Recognizes only the private recovery invocation before normal startup.
-[[nodiscard]] bool TryRunStageRecoveryProcess(int *exitCode);
 [[nodiscard]] ReviewExit RunStageRecoveryWindow(Review &review, HWND parent);
 } // namespace recovery
 
@@ -65,13 +74,8 @@ namespace file_output {
 SaveStageRecovery(recovery::Review &review, recovery::Candidate &candidate,
                   const std::filesystem::path &newDestination = {});
 [[nodiscard]] bool CompleteStageRecovery(recovery::Review &review);
-// Private local-process protocol. Records stay inside the validated review root.
-[[nodiscard]] bool ProtectRecoveryNoteWrite(
-    const recovery::Review &review, const std::wstring &token, uint64_t sequence,
+// Standalone tool: verified atomic note write in this process.
+[[nodiscard]] bool WriteRecoveryNoteInProcess(
     const std::filesystem::path &destination, std::string_view bytes,
-    bool expectedExists, uint64_t expectedFingerprint);
-[[nodiscard]] bool ServeRecoveryNoteWrite(
-    const recovery::Review &review, const std::wstring &token, uint64_t sequence);
-[[nodiscard]] bool ReadRecoveryNoteWriteReply(
-    const recovery::Review &review, const std::wstring &token, uint64_t sequence);
+    bool expectedExists, uint64_t expectedFingerprint, std::wstring *error);
 } // namespace file_output

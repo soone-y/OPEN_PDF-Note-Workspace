@@ -1,4 +1,5 @@
 #include "diagnostics/write_checks.h"
+#include "core/workspace_layout.h"
 #include "core/atomic_write.h"
 #include "diagnostics/normal_operations.h"
 #include <iomanip>
@@ -508,6 +509,18 @@ private:
 };
 NormalWriter* normalWriter = nullptr; // UI startup/shutdown only
 NormalWriter& Writer() { static NormalWriter writer; normalWriter = &writer; return writer; }
+// Folders that keep recovery material: unsaved edits, backups, records and
+// quarantined content (workspace_layout). Returns the folder holding `file`.
+std::filesystem::path RecoveryFolderOf(const std::filesystem::path& workspace, const std::filesystem::path& file) {
+    for (const wchar_t* name : {workspace_layout::kUnsavedName, workspace_layout::kRecoveryName,
+                                workspace_layout::kOperationsName, workspace_layout::kOperationsSetAsideName,
+                                workspace_layout::kBackupName, workspace_layout::kDeletedName,
+                                workspace_layout::kFailedName}) {
+        const auto folder = workspace_layout::Sub(workspace, name);
+        if (Within(file, folder)) return folder;
+    }
+    return {};
+}
 void ObserveNormal(const std::filesystem::path& owner, const std::filesystem::path& original,
                    Kind kind, const std::filesystem::path& explicitTarget, bool passed, DWORD error) noexcept {
     try {
@@ -526,8 +539,8 @@ void ObserveNormal(const std::filesystem::path& owner, const std::filesystem::pa
         if (kind == Kind::Count) {
             if (_wcsicmp(file.filename().c_str(), L"pdf_note_workspace_setup.json") == 0) { kind = Kind::SetupWrite; target = file.parent_path(); }
             else if (Within(file, resource / L"__settings__")) { kind = Kind::SettingsWrite; target = resource / L"__settings__"; }
-            else if (Within(file, resource / L"__tmp__")) { kind = Kind::TempWrite; target = resource / L"__tmp__"; }
-            else if (Within(file, resource / L"__escape__")) { kind = Kind::RecoveryWrite; target = resource / L"__escape__"; }
+            else if (Within(file, workspace_layout::Tmp(root))) { kind = Kind::TempWrite; target = workspace_layout::Tmp(root); }
+            else if (const auto recovery = RecoveryFolderOf(root, file); !recovery.empty()) { kind = Kind::RecoveryWrite; target = recovery; }
             else if (Within(file, resource / L"__log__")) { kind = Kind::LogsWrite; target = resource / L"__log__"; }
             else if (Within(file, resource)) { kind = Kind::WorkspaceWrite; target = root; }
             else if (_wcsicmp(file.extension().c_str(), L".pdf") == 0 || _wcsicmp(file.extension().c_str(), L".clrop") == 0) { kind = Kind::PdfWrite; target = file.parent_path(); }

@@ -16,7 +16,7 @@ find_path(PDFium_INCLUDE_DIR
     PATH_SUFFIXES "include"
 )
 
-set(PDFium_VERSION "159.0.8152.0")
+set(PDFium_VERSION "160.0.8179.0")
 
 if(WIN32)
   find_file(PDFium_LIBRARY

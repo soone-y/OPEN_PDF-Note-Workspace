@@ -17,6 +17,10 @@ REQUIRED_LICENSE_FILES = (
     "licenses/README.txt",
     "licenses/pdfium/LICENSE",
     "licenses/md4c/LICENSE.md",
+    "licenses/microtex/LICENSE.txt",
+    "licenses/xits/OFL.txt",
+    "licenses/xits/FONTLOG.txt",
+    "licenses/xits/README.txt",
     "licenses/zlib/LICENSE",
     "licenses/mingw-w64/gcc/COPYING.RUNTIME.txt",
     "licenses/mingw-w64/gcc/COPYING3.txt",
@@ -26,11 +30,14 @@ REQUIRED_LICENSE_FILES = (
     "licenses/libreoffice/NOTICE",
 )
 
+MATH_FONT = "resources/math/xits/XITSMath-Regular.clm2"
+MATH_FONT_SHA256 = "1bf9cbe66a4357d63600e3f8e8415321d9d2f87f1476cd4b7e36bed6534e3042"
+
 
 def required_license_files(locale: str) -> tuple[str, ...]:
     if locale not in {"ja", "en"}:
         raise ValueError(f"release locale must be ja or en, not {locale!r}")
-    return REQUIRED_LICENSE_FILES + ("LICENSE.md",)
+    return REQUIRED_LICENSE_FILES + ("LICENSE.md", MATH_FONT)
 
 
 def sha256_bytes(content: bytes) -> str:
@@ -48,6 +55,9 @@ def validate_release_directory(release_dir: Path, locale: str = "ja") -> list[st
             errors.append(f"required license file is missing: {relative_path}")
         elif path.stat().st_size == 0:
             errors.append(f"required license file is empty: {relative_path}")
+    font_path = release_dir / MATH_FONT
+    if font_path.is_file() and sha256_bytes(font_path.read_bytes()) != MATH_FONT_SHA256:
+        errors.append(f"math font differs from the reviewed XITS resource: {MATH_FONT}")
     return errors
 
 

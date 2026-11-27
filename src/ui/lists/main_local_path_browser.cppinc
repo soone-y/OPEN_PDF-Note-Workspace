@@ -1043,7 +1043,7 @@ static std::vector<std::wstring> PromptNativeExistingLocalPaths(HWND owner,
 
     DWORD options = 0;
     if (SUCCEEDED(dialog->GetOptions(&options))) {
-        options |= FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST;
+        options |= FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_DONTADDTORECENT;
         options |= requireDirectory ? FOS_PICKFOLDERS : FOS_FILEMUSTEXIST;
         if (allowMultiple) options |= FOS_ALLOWMULTISELECT;
         dialog->SetOptions(options);

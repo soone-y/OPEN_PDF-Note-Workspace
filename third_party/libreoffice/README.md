@@ -1,6 +1,6 @@
 # LibreOffice
 
-This directory records the adopted communication-free LibreOffice 26.2.6.3
+This directory records the adopted communication-free LibreOffice 26.2.7.3
 custom runtime and its reproducible inputs, plus an older administrative image
 used only for selected private fonts, notices, and comparison. The old image is
 not the application's conversion runtime.
@@ -20,10 +20,20 @@ administrative image.
 
 ## Source Archives For Custom Build
 
-The custom LibreOffice runtime is built from the official LibreOffice 26.2.6.3 core source archive, not from the Windows MSI administrative image. The retained administrative image above remains at 26.2.3.2 and is used only for selected private fonts, notices, and comparison; it is not the release conversion runtime.
+The custom LibreOffice runtime is built from the official LibreOffice 26.2.7.3 core source archive, not from the Windows MSI administrative image. The retained administrative image above remains at 26.2.3.2 and is used only for selected private fonts, notices, and comparison; it is not the release conversion runtime.
 
-The repository-local runtime and `VERSION` identify the adopted 26.2.6.3
-build. The current patch directory includes rebased `0044` (keep the official
+On 2026-11-25 the runtime moved to 26.2.7.3 for the 22 security advisories
+fixed after 26.2.6.3. Upstream libxml2 2.15.4 removed its HTTP client and now
+builds with CMake, so patch `0017` was withdrawn (its number stays reserved),
+`0003` was rebased onto the new xmlsec CFLAGS line, and `0046` received a
+context-only refresh. The other patches are unchanged. The reduced runtime has
+the same 1,285-file layout, passed the runtime gate and import/audio scan, and
+matched the 26.2.6.3 runtime across 12 fixed documents/89 pages and 11 official
+quick samples. Linked (not embedded) pictures in DOCX are no longer loaded from
+outside the document, which is the intended upstream security change.
+
+The repository-local runtime and `VERSION` identify the adopted 26.2.7.3
+build. Earlier notes below describe the 26.2.6.3 adoption history. The current patch directory includes rebased `0044` (keep the official
 Skia declaration fix; patch only its implementation), `0048`/`0049` build
 fixes, and `0050` allocation-failure backports for LibreOffice's separate
 MD4C 0.5.3 copy. The completed build and reduced runtime passed static gates,
@@ -52,9 +62,9 @@ through 500 UTF-16 units. Scoped baseline comparisons covered 12 fixed documents
 not full-corpus reduction acceptance or a claim that every maximum-length path
 works. See the long-path implementation record in `docs/internal/`.
 The verified source/cache inputs are recorded in
-`source_archives_26.2.6.3.manifest.tsv` and
-`external_tarballs_26.2.6.3.manifest.tsv`; its public local configuration
-is `custom_build/autogen_26.2.6.3.input`. Prior version manifests and autogen
+`source_archives_26.2.7.3.manifest.tsv` and
+`external_tarballs_26.2.7.3.manifest.tsv`; its public local configuration
+is `custom_build/autogen_26.2.7.3.input`. Prior version manifests and autogen
 inputs retained in the development repository are historical, not active inputs.
 
 Archive bodies and detached signatures are not tracked in Git because they are
@@ -65,24 +75,26 @@ it as a separate source bundle instead of committing it to the repository.
 The custom build source inputs are identified by these official archive names,
 source URLs, and SHA-256 hashes:
 
-The same information is also recorded in `source_archives_26.2.6.3.manifest.tsv` for line-based verification tooling. No separate Help, dictionaries or translations archive is consumed by this configuration.
+The same information is also recorded in `source_archives_26.2.7.3.manifest.tsv` for line-based verification tooling. No separate Help, dictionaries or translations archive is consumed by this configuration.
 
-The 83 selected external archives are recorded in `external_tarballs_26.2.6.3.manifest.tsv` with file names, sizes, and SHA-256 hashes. They were selected using `download.lst` and the generated build graph and all hashes were verified. Unused retained cache versions are not listed. The tarball bodies are not tracked in Git.
+The 83 selected external archives are recorded in `external_tarballs_26.2.7.3.manifest.tsv` with file names, sizes, and SHA-256 hashes. They were selected using `download.lst` and the generated build graph and all hashes were verified. Unused retained cache versions are not listed. The tarball bodies are not tracked in Git.
 
 | Archive | Source URL | SHA-256 |
 | --- | --- | --- |
-| `libreoffice-26.2.6.3.tar.xz` | `https://download.documentfoundation.org/libreoffice/src/26.2.6/libreoffice-26.2.6.3.tar.xz` | `3a2570aa7087bf8e0cbdf49ac5bd0e452c2025274af99e07882daa104c5685bd` |
+| `libreoffice-26.2.7.3.tar.xz` | `https://download.documentfoundation.org/libreoffice/src/26.2.7/libreoffice-26.2.7.3.tar.xz` | `61e16d05d18a55c9dcbca84836e1204d73a674fdda2cc62e8ca06032a0c7c4e4` |
 
 The reproducible custom build inputs are:
 
-- `custom_build/autogen_26.2.6.3.input`
+- `custom_build/autogen_26.2.7.3.input`
 - `custom_build/communication_free_options.input`
 - `custom_build/release_reduction_manifest.json`
 - `custom_build/patches/*.patch`
 
-Patch number `0042` is deliberately reserved. An experimental WSL-helper
-approach was reverted before adoption; do not recreate or renumber it during
-future rebases. The applied series is `0001`-`0041` and `0043`-`0051`.
+Patch numbers `0017` and `0042` are deliberately reserved. `0042` was an
+experimental WSL-helper approach reverted before adoption; `0017` disabled the
+libxml2 HTTP client and was withdrawn for 26.2.7.3 because libxml2 2.15 no
+longer contains one. Do not recreate or renumber them during future rebases.
+The applied series is `0001`-`0016`, `0018`-`0041` and `0043`-`0051`.
 
 The generated source tree, external tarball cache, downloaded source archives,
 detached signatures, and built `instdir` remain outside Git unless a later
@@ -93,14 +105,14 @@ publication review explicitly changes that policy.
 A user can verify the custom LibreOffice source basis without trusting the
 large archive bodies in this repository:
 
-1. Read `source_archives_26.2.6.3.manifest.tsv` and download each official LibreOffice archive,
+1. Read `source_archives_26.2.7.3.manifest.tsv` and download each official LibreOffice archive,
    `.sha256`, and `.asc` file from the listed official URLs.
 2. Check each downloaded archive with SHA-256 and compare it with the
    manifest value. On Windows, `Get-FileHash -Algorithm SHA256 <archive>`
    is sufficient for the hash comparison.
 3. Optionally verify each detached signature with GPG after importing the
    relevant LibreOffice release signing key: `gpg --verify <archive>.asc <archive>`.
-4. Compare `external_tarballs_26.2.6.3.manifest.tsv` with any retained or
+4. Compare `external_tarballs_26.2.7.3.manifest.tsv` with any retained or
    republished external tarball cache. This confirms the dependency archive
    names, sizes, and SHA-256 hashes actually selected for this build.
 5. Review `custom_build/communication_free_options.input` and
@@ -137,7 +149,7 @@ bodies and detached signatures as release assets or a separate source bundle.
 ## Historical Administrative Image Policy Changes
 
 The following lists describe the retained 26.2.3.2 comparison image, not the
-adopted 26.2.6.3 build or its release reduction policy. Current reduction is
+adopted 26.2.7.3 build or its release reduction policy. Current reduction is
 controlled by `custom_build/release_reduction_manifest.json`; its protected
 Math/Calc paths and their ancestors/descendants must not be removed.
 
@@ -379,16 +391,19 @@ The fixed first-pass exclusion options for that build are recorded in
 `tools/release_checks/libreoffice_runtime_gate.py` before any release packaging or app
 enablement decision.
 
-For the 26.2.6.3 Windows build, run native `make.exe` with `MSYSTEM` unset so
+For the 26.2.7.3 Windows build, run native `make.exe` with `MSYSTEM` unset so
 LibreOffice does not mistake the MSYS shell for its WSL path-conversion mode.
 The pinned ZXing 2.3.0 and zstd 1.5.7 archives contain dangling symbolic links;
 if Windows tar cannot create them, verify the archive against `download.lst`
 and pre-extract that archive with WSL tar into its `workdir/UnpackedTarball`
 directory. Do not replace the link with a copied file or modify the archived
-input.
+input. After the 2026-11-21 MSYS2 update (msys2-runtime 3.6.12, zip 3.0-5),
+parallel autocorr packaging in `extras` can fail with zip temporary-file
+errors; build that module once with `make -j1 PARALLELISM=1 extras`, then resume
+the parallel build. This changes only scheduling, not the produced files.
 
-As of 2026-10-05, the current A-path build output is produced outside the
-repository at `<LO_WORKDIR>\src\libreoffice-26.2.6.3\instdir`.
+As of 2026-11-25, the current A-path build output is produced outside the
+repository at `<LO_WORKDIR>\src\libreoffice-26.2.7.3\instdir`.
 That output has passed the runtime gate and the focused binary scan for the
 network/audio indicators used by this repository, and DOCX/PPTX smoke
 conversion has succeeded. Do not rebuild it for every verification run; reuse

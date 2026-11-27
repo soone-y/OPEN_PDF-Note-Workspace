@@ -16,7 +16,7 @@ from typing import Iterable
 
 
 DEFAULT_ARCHIVES = [
-    "third_party/libreoffice/source_archives/libreoffice-26.2.6.3.tar.xz",
+    "third_party/libreoffice/source_archives/libreoffice-26.2.7.3.tar.xz",
 ]
 
 TEXT_SUFFIXES = {

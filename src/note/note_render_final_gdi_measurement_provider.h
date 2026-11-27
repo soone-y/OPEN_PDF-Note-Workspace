@@ -10,6 +10,7 @@
 #include <windows.h>
 
 namespace note {
+class NoteMathRenderCache;
 
 // Position an inline math graphic within the visual row that owns it.  This
 // is geometry, rather than paint styling: the resulting placement is shared
@@ -36,6 +37,9 @@ struct NoteRenderFinalGdiMeasurementOptions {
     uint32_t code_block_inset_columns = 2;
     NoteRenderInlineMathVerticalAlignment inline_math_vertical_alignment =
         NoteRenderInlineMathVerticalAlignment::Bottom;
+    // Borrowed while measuring. It memoizes parsed formulas and does not
+    // contribute geometry to the layout key. Placements own returned handles.
+    NoteMathRenderCache* math_cache = nullptr;
 
     [[nodiscard]] bool valid() const noexcept;
 };

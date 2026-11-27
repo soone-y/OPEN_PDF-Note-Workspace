@@ -30,7 +30,9 @@ private:
 // An opened PDF, image, or note is exclusively owned by one application
 // process. Unlike the workspace lock, this permits independent workspaces
 // while preventing two windows from editing the same source file. A retained
-// read handle also denies external deletion/rename until close or switching.
+// read handle also denies external deletion/rename. Annotation and note checkpoints
+// retain that protection independently after close or switching, until their
+// integration/discard removes the last checkpoint or the process exits.
 // App-owned atomic replacement/move temporarily suspends only its target's
 // physical handle, then reacquires it before returning or retrying.
 // A failed reacquisition is retried by the process-owned recovery worker;

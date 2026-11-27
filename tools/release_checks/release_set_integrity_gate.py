@@ -245,7 +245,14 @@ def validate_build_info_artifacts(release_dir: Path, fields: dict[str, str], lab
         name = key.removeprefix("artifact:")
         if name == primary_name:
             continue
-        if not name or name in (".", "..") or "/" in name or "\\" in name:
+        math_resources = {
+            "resources/math/xits/XITSMath-Regular.clm2",
+            "licenses/microtex/LICENSE.txt", "licenses/xits/OFL.txt",
+            "licenses/xits/FONTLOG.txt", "licenses/xits/README.txt",
+        }
+        if not name or name in (".", "..") or "\\" in name or ":" in name or (
+            "/" in name and name not in math_resources
+        ):
             errors.append(f"{label}: invalid build-info artifact name: {name}")
             continue
         path = release_dir / name

@@ -1,5 +1,6 @@
 #pragma once
 #include "settings/palette_stock.h"
+#include "core/workspace_layout.h"
 #include "diagnostics/normal_operations.h"
 #include <string_view>
 
@@ -99,17 +100,21 @@ template<class Data, class Parser, class Serializer>
     next.bytes = bytes;
     next.colors = colors;
     next.exists = true;
-    const auto managed = state.root / L"__pdf_note_workspace__";
-    const auto temp = managed / L"__tmp__";
-    const auto escape = managed / L"__escape__";
+    const auto temp = workspace_layout::Tmp(state.root);
+    const auto escape = workspace_layout::Failed(state.root);
+    const auto previous = workspace_layout::Backup(state.root);
     // The write helper's temporary/quarantine folders must obey the same boundary.
-    for (const auto& dir : {temp, escape}) {
+    for (const auto& dir : {temp, escape, previous}) {
         bool reparse = false;
         if (TryIsReparsePointNoFollow(dir, reparse) && reparse) return false;
     }
     std::wstring error;
     if (state.exists) {
-        const auto backup = atomic_write::MakeUniqueDestInDir(escape,
+        // __backup__ is created on demand; a failure keeps the current file.
+        std::error_code dirError;
+        std::filesystem::create_directories(previous, dirError);
+        if (dirError) return false;
+        const auto backup = atomic_write::MakeUniqueDestInDir(previous,
             std::filesystem::path(fileName).stem().wstring() + L"_" + std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(GetTickCount64()) + L".json");
         if (!write_checks::ObservedWriteUtf8(state.root, backup, state.bytes, temp, escape, &error)) return false;
     }

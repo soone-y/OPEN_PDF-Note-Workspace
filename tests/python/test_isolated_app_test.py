@@ -325,6 +325,25 @@ class IsolatedAppWindowsTests(unittest.TestCase):
         self.assertEqual((evidence["selected"], evidence["disabled"], evidence["value"], evidence["count"]),
                          (False, False, "", 0))
 
+    def test_reentry_from_powershell7_keeps_windows_powershell_core_modules(self):
+        # A pwsh parent exports PowerShell 7 module paths; the Windows PowerShell 5
+        # child must still autoload its own core cmdlets such as Get-FileHash.
+        pwsh = shutil.which("pwsh")
+        if not pwsh:
+            self.skipTest("PowerShell 7 is not installed; the pwsh-parent case cannot be exercised.")
+        script = self.root / "module_path.ps1"
+        result = self.root / "module_path.txt"
+        helper = self.desktop_helper()
+        script.write_text(f". '{helper}'\n"
+            "if (Invoke-AppTestDesktop -ScriptPath $PSCommandPath -Parameters $PSBoundParameters) { return }\n"
+            f"(Get-FileHash -Algorithm SHA256 -LiteralPath $PSCommandPath).Hash | Set-Content -Encoding ASCII -LiteralPath '{str(result)}'\n",
+            encoding="utf-8-sig")
+        completed = subprocess.run([pwsh, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+                                   cwd=ROOT, capture_output=True, timeout=60)
+        self.assertEqual(completed.returncode, 0, completed.stdout.decode(errors="replace") +
+                         completed.stderr.decode(errors="replace"))
+        self.assertRegex(result.read_text(encoding="ascii").strip(), r"^[0-9A-F]{64}$")
+
     def test_nested_powershell_preserves_native_stderr_without_clixml(self):
         fixture = self.root / "nested_failure"
         fixture.mkdir()

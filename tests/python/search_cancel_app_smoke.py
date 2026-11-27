@@ -468,7 +468,7 @@ def main():
             send(scopes, 0x111, 4156)
             require(send(combo, 0x146) == 0 and group_path.read_bytes() != saved_group,
                     "explicit delete persists")
-            require(any((workspace / "__pdf_note_workspace__/__escape__").glob("search_groups_*.bin")),
+            require(any((workspace / "__pdf_note_workspace__/__backup__").glob("search_groups_*.bin")),
                     "previous group data remains backed up")
             send(scopes, 0x10)
             send(search, 0x10)

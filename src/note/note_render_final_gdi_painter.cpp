@@ -8,6 +8,9 @@
 #include "math/math_render.h"
 
 #include <algorithm>
+#include <cstddef>
+#include <cstring>
+#include <cwchar>
 #include <exception>
 #include <limits>
 #include <memory>
@@ -109,6 +112,59 @@ struct FinalPaintRunStyle {
     return resolved;
 }
 
+// Styled runs repeat the same few fonts on every paint. Creating and deleting
+// a GDI font for each styled run of each paint was the painter's main per-paint
+// GDI cost, so fonts are kept per painting thread. The cache is small and is
+// emptied whole when full; a font is never deleted while a ScopedPaintFont
+// has it selected, because runs are painted one at a time.
+class PaintFontCache final {
+public:
+    PaintFontCache() = default;
+    ~PaintFontCache() { Clear(); }
+    PaintFontCache(const PaintFontCache&) = delete;
+    PaintFontCache& operator=(const PaintFontCache&) = delete;
+
+    [[nodiscard]] HFONT Get(const LOGFONTW& font) noexcept {
+        for (const Entry& entry : entries_) {
+            if (SameFont(entry.font, font)) return entry.handle;
+        }
+        if (entries_.size() >= kMaxEntries) Clear();
+        HFONT handle = CreateFontIndirectW(&font);
+        if (!handle) return nullptr;
+        try {
+            entries_.push_back({font, handle});
+        } catch (...) {
+            (void)DeleteObject(handle);
+            return nullptr;
+        }
+        return handle;
+    }
+
+private:
+    struct Entry {
+        LOGFONTW font{};
+        HFONT handle = nullptr;
+    };
+    static constexpr size_t kMaxEntries = 32;
+
+    [[nodiscard]] static bool SameFont(const LOGFONTW& a, const LOGFONTW& b) noexcept {
+        return std::memcmp(&a, &b, offsetof(LOGFONTW, lfFaceName)) == 0 &&
+            std::wcsncmp(a.lfFaceName, b.lfFaceName, LF_FACESIZE) == 0;
+    }
+
+    void Clear() noexcept {
+        for (const Entry& entry : entries_) (void)DeleteObject(entry.handle);
+        entries_.clear();
+    }
+
+    std::vector<Entry> entries_;
+};
+
+[[nodiscard]] PaintFontCache& ThreadPaintFontCache() noexcept {
+    thread_local PaintFontCache cache;
+    return cache;
+}
+
 class ScopedPaintFont final {
 public:
     ScopedPaintFont(HDC hdc, const NoteRenderSourceLinePlan& line,
@@ -142,15 +198,14 @@ public:
             std::copy(style.font_family.begin(), style.font_family.end(), font.lfFaceName);
             font.lfFaceName[style.font_family.size()] = L'\0';
         }
-        owned_ = CreateFontIndirectW(&font);
-        if (!owned_ || SelectObject(hdc_, owned_) == HGDI_ERROR) return;
+        HFONT cached = ThreadPaintFontCache().Get(font);
+        if (!cached || SelectObject(hdc_, cached) == HGDI_ERROR) return;
         selected_ = true;
         valid_ = true;
     }
 
     ~ScopedPaintFont() {
         if (selected_ && hdc_ && old_) (void)SelectObject(hdc_, old_);
-        if (owned_) (void)DeleteObject(owned_);
     }
 
     ScopedPaintFont(const ScopedPaintFont&) = delete;
@@ -161,7 +216,6 @@ public:
 private:
     HDC hdc_ = nullptr;
     HGDIOBJ old_ = nullptr;
-    HFONT owned_ = nullptr;
     bool selected_ = false;
     bool valid_ = false;
 };
@@ -429,6 +483,7 @@ private:
 
 [[nodiscard]] bool DrawMathFragment(HDC hdc,
                                     const NoteRenderFinalDisplayRun& display,
+                                    const std::shared_ptr<const mathrender::Formula>& formula,
                                     const NoteRenderRunPlacementFragment& fragment,
                                     uint64_t contentTop,
                                     int baseline,
@@ -447,14 +502,12 @@ private:
         return true;
     }
     try {
-        std::unique_ptr<mathrender::Node> node = mathrender::Parse(display.display_text);
-        if (!node) return false;
+        if (!formula) return false;
         TEXTMETRICW metrics{};
         if (!GetTextMetricsW(hdc, &metrics)) return false;
         const mathrender::Layout layout{fragment.width_px, static_cast<int>(fragment.height_px), baseline};
-        mathrender::Draw(*node, layout, hdc, clientX, y,
-                         std::max<LONG>(1, metrics.tmHeight), colour, style);
-        return true;
+        return mathrender::Draw(*formula, layout, hdc, clientX, y,
+                                std::max<LONG>(1, metrics.tmHeight), colour, style);
     } catch (...) {
         return false;
     }
@@ -715,7 +768,7 @@ private:
             const bool math = sourceRun.kind == NoteRenderSourceRunKind::InlineMath ||
                 sourceRun.kind == NoteRenderSourceRunKind::BlockMath;
             const bool drawn = math
-                ? DrawMathFragment(hdc, display, fragment, layout.top_px,
+                ? DrawMathFragment(hdc, display, placement.math_formula, fragment, layout.top_px,
                                    fragment.baseline_offset_px,
                                    sourceRun.kind == NoteRenderSourceRunKind::BlockMath
                                        ? mathrender::RenderStyle::Display

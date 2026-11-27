@@ -406,20 +406,27 @@ static bool ShowDirectoryListContextMenu(HWND list, LPARAM lParam) {
     std::wstring label = ListBoxTextAt(list, index);
     if (label.empty()) label = DirectoryHierarchyDisplayName(root);
     const bool isTempExternalLecture = isLectureList && IsTempExternalLecturePath(root.wstring());
+    const auto pinnedLecture = isLectureList ? std::wstring{} : PinnedSessionLecturePath(root.wstring());
+    const auto sourceLecture = pinnedLecture.empty() ? g_currentLecturePath : pinnedLecture;
+    const auto sourceWorkspace = g_workspaceRoot;
+    const bool foreignSession = !pinnedLecture.empty() &&
+        NormalizePathKeyForList(pinnedLecture) != NormalizePathKeyForList(g_currentLecturePath);
     const bool isDirectFilesSession =
-        (!isLectureList && IsDirectFilesSessionPath(root.wstring(), g_currentLecturePath));
+        (!isLectureList && IsDirectFilesSessionPath(root.wstring(),
+                                                  pinnedLecture.empty() ? g_currentLecturePath : pinnedLecture));
     const bool canRename = isLectureList
         ? (IsWorkspaceManagedDirectoryTarget(root) && !isTempExternalLecture)
-        : (IsWorkspaceManagedDirectoryTarget(root) && !isDirectFilesSession);
+        : (IsWorkspaceManagedDirectoryTarget(root) && !isDirectFilesSession && !foreignSession);
     const bool canDelete = isLectureList
         ? (isTempExternalLecture || IsWorkspaceManagedDirectoryTarget(root))
-        : (IsWorkspaceManagedDirectoryTarget(root) && !isDirectFilesSession);
+        : (IsWorkspaceManagedDirectoryTarget(root) && !isDirectFilesSession && !foreignSession);
     const bool canCreateSession = isLectureList
         ? (IsWorkspaceManagedDirectoryTarget(root) && !isTempExternalLecture)
         : (!g_currentLecturePath.empty() &&
            IsWorkspaceManagedDirectoryTarget(std::filesystem::path(g_currentLecturePath)));
     const bool canCreateNote = !isLectureList &&
-        IsWorkspaceManagedDirectoryTarget(root) && !isDirectFilesSession;
+        IsWorkspaceManagedDirectoryTarget(root) && !isDirectFilesSession && !foreignSession;
+    const bool canConvertOffice = !kIsLiteEdition && !foreignSession;
     const bool canCloseLecture = isLectureList && IsCurrentLectureTargetPath(root);
     const bool canCloseSession = !isLectureList && IsCurrentSessionTargetPath(root);
     const std::wstring deleteLabel = isTempExternalLecture
@@ -444,6 +451,7 @@ static bool ShowDirectoryListContextMenu(HWND list, LPARAM lParam) {
     constexpr UINT kCmdReload = 20;
     constexpr UINT kCmdCopyName = 21;
     constexpr UINT kCmdPriority = 22;
+    constexpr UINT kCmdPinSession = 23;
 
     AppendMenuW(menu.get(), MF_STRING, kCmdOpenInApp,
                 localization::Text(L"ui.directory_list.de691a7bc023").c_str());
@@ -455,8 +463,13 @@ static bool ShowDirectoryListContextMenu(HWND list, LPARAM lParam) {
                     localization::Text(isLectureList ? L"ui.directory_list.8bd547f6bad9"
                                                      : L"ui.directory_list.8b37e122658e").c_str());
     }
+    if (!isLectureList) {
+        AppendMenuW(menu.get(), MF_STRING, kCmdPinSession,
+                    localization::Text(pinnedLecture.empty() ? L"ui.pdf_list.664d20d41490"
+                                                             : L"ui.pdf_list.8ba171ca98b1").c_str());
+    }
 
-    if ((isLectureList && canCreateSession) || canCreateNote || canRename || !kIsLiteEdition) {
+    if ((isLectureList && canCreateSession) || canCreateNote || canRename || canConvertOffice) {
         AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
     }
     if (isLectureList && canCreateSession) {
@@ -471,7 +484,7 @@ static bool ShowDirectoryListContextMenu(HWND list, LPARAM lParam) {
         AppendMenuW(menu.get(), MF_STRING, kCmdRename,
                     localization::Text(L"ui.directory_list.b351979601ed").c_str());
     }
-    if (!kIsLiteEdition) {
+    if (canConvertOffice) {
         AppendMenuW(menu.get(), MF_STRING, kCmdConvertOffice,
                     localization::Text(L"ui.directory_list.f1b464c0e53e").c_str());
     }
@@ -502,6 +515,21 @@ static bool ShowDirectoryListContextMenu(HWND list, LPARAM lParam) {
     const UINT cmd = menu.TrackCommand(owner, screenPt,
                                        TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY);
     menu.Close();
+    if (cmd == kCmdPinSession && !isLectureList) {
+        const bool sameContext = NormalizePathKeyForList(sourceWorkspace) == NormalizePathKeyForList(g_workspaceRoot) &&
+            NormalizePathKeyForList(sourceLecture) == NormalizePathKeyForList(
+                pinnedLecture.empty() ? g_currentLecturePath : pinnedLecture);
+        const bool succeeded = sameContext && (pinnedLecture.empty() ? PinSessionPath(root.wstring())
+                                                                    : UnpinSessionPath(root.wstring()));
+        if (succeeded) {
+            const bool refreshed = RefreshWorkspaceList(g_hSessionList);
+            (void)refreshed;
+        }
+        ShowSoftNotice(owner, localization::Text(!succeeded ? L"workspace.pin.session_failed"
+            : pinnedLecture.empty() ? L"workspace.pin.session_added" : L"workspace.pin.session_removed"),
+            succeeded ? SoftNoticeKind::Info : SoftNoticeKind::Warning);
+        return true;
+    }
     if (cmd == kCmdPriority && isLectureList) {
         ShowLectureOrderWindow(owner, root.wstring());
         return true;
@@ -558,7 +586,7 @@ static bool ShowDirectoryListContextMenu(HWND list, LPARAM lParam) {
     if (cmd == kCmdShowHierarchy) {
         return ShowDirectoryHierarchyPopup(owner, root, label, screenPt);
     }
-    if (cmd == kCmdConvertOffice) {
+    if (cmd == kCmdConvertOffice && canConvertOffice) {
         return ConvertMissingOfficeFilesUnderDirectory(owner, root);
     }
     if (cmd == kCmdCloseLecture && canCloseLecture) {
@@ -571,13 +599,13 @@ static bool ShowDirectoryListContextMenu(HWND list, LPARAM lParam) {
         if (isLectureList) {
             return RenameLectureDirectoryFromContext(owner, root, label);
         }
-        return RenameSessionDirectoryFromContext(owner, root, g_currentLecturePath, label);
+        return RenameSessionDirectoryFromContext(owner, root, sourceLecture, label);
     }
     if (cmd == kCmdDelete && canDelete) {
         if (isLectureList) {
             return DeleteLectureDirectoryFromContext(owner, index, root, label);
         }
-        return DeleteSessionDirectoryFromContext(owner, index, root, g_currentLecturePath);
+        return DeleteSessionDirectoryFromContext(owner, index, root, sourceLecture);
     }
     return cmd != 0;
 }

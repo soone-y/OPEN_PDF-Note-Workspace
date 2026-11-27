@@ -48,6 +48,17 @@ Write-Output "RELEASE_SET_PATH=fixture_$Locale"
         for relative in ("scripts/build/build_workspace.ps1", "scripts/build/build_readonly_viewer.ps1"):
             self.write_script(relative, stub)
         self.write_script("scripts/release/pack_release.ps1", "param($OutBaseDir,$NamePrefix,$Locale,[switch]$NoChecksums,[switch]$TestOnly)\n")
+        # release.ps1 runs the read-only source preflight before version selection.
+        preflight = self.root / "tools/release_checks/prepared_release_packages.py"
+        preflight.parent.mkdir(parents=True, exist_ok=True)
+        preflight.write_text(
+            "import sys\nfrom pathlib import Path\n"
+            "root = Path(__file__).resolve().parents[2]\n"
+            "with (root / 'preflight_calls.txt').open('a', encoding='utf-8') as fp:\n"
+            "    fp.write(' '.join(sys.argv[1:2]) + '\\n')\n"
+            "if (root / 'fail_preflight').exists():\n"
+            "    print('injected preflight failure', file=sys.stderr)\n"
+            "    raise SystemExit(3)\n", encoding="utf-8")
 
     def write_script(self, relative, content):
         target = self.root / relative
@@ -215,7 +226,7 @@ try { Get-ValidationResult $PSScriptRoot; throw 'Unexpected validation success' 
 catch { if($_.Exception.Message -cne $Expected) { throw } }
 ''')
         tools = self.root / "tools/release_checks"
-        tools.mkdir(parents=True)
+        tools.mkdir(parents=True, exist_ok=True)
         (tools / "release_set_integrity_gate.py").write_text("raise SystemExit(0)\n", encoding="utf-8")
         gate = tools / "release_locale_content_gate.py"
         gate.write_text("raise SystemExit(17)\n", encoding="utf-8")
@@ -285,6 +296,18 @@ Add-Content (Join-Path $root 'build_calls.txt') $Locale
         self.assertIn(str(final_log), lines[-1], output)
         self.assertGreater(final_log.stat().st_size, 0)
         return final_log
+
+    def test_source_preflight_failure_stops_before_version_and_build(self):
+        (self.root / "fail_preflight").touch()
+        original = self.version.read_bytes()
+        code, output = self.invoke()
+        self.assertNotEqual(code, 0, output)
+        self.assertIn("injected preflight failure", output)
+        self.assertEqual((self.root / "preflight_calls.txt").read_text(encoding="utf-8").split(), ["preflight"])
+        self.assertEqual(self.version.read_bytes(), original)
+        self.assertFalse((self.root / "calls.txt").exists(), output)
+        self.assertFalse((self.root / "out/release_version.lock").exists())
+        self.assert_log_is_last(output, self.root / "out/logs/release")
 
     def test_release_failure_retains_error_and_repeats_primary_log_last(self):
         (self.root / "fail_build").touch()

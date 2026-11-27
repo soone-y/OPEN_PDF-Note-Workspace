@@ -1,12 +1,12 @@
 # PDF Note Workspace (English)
 
-This directory contains the guides for using the English release. Begin with [Getting Started](Getting_Started.md) when installing the application; after that, choose a guide by the task you want to perform.
+This directory contains the guides for using the English release. Begin with [Setup, Updates, and Uninstall](Getting_Started.md) when installing the application; after that, choose a guide by the task you want to perform.
 
 - Start: `pdf_note_workspace.exe`
 - Read-only viewer: `readonly_viewer.exe`
 - Documentation and licenses: this `docs/` directory and the release `licenses/` directory
 
-Package folders differ slightly by edition: Full groups LibreOffice components under `lo/`; Lite keeps only the bundled fonts under `libreoffice/`. [Getting Started](Getting_Started.md#full-and-lite-editions) explains how this layout reduces extraction-path length problems and where to extract the package.
+Package folders differ slightly by edition: Full groups LibreOffice components under `lo/`; Lite keeps only the bundled fonts under `libreoffice/`. [Setup, Updates, and Uninstall](Getting_Started.md#1-choose-full-or-lite) explains how this layout reduces extraction-path length problems and where to extract the package.
 
 [Using the Application](Using_the_App.md) is the everyday starting point: open a PDF, add notes or annotations, then save or export your work. Guides for formats, recovery, and troubleshooting are for the point at which you need them.
 
@@ -14,6 +14,7 @@ Package folders differ slightly by edition: Full groups LibreOffice components u
 
 | Guide | Role |
 | --- | --- |
+| [Setup, Updates, and Uninstall](Getting_Started.md) | Extract the ZIP, choose an edition, update to a new version, and uninstall |
 | [Using the Application](Using_the_App.md) | Follow a complete first task from workspace preparation to sharing |
 | [Help Reference](Help_Reference.md) | Look up a feature's location, prerequisites, steps, results, settings and limits |
 | [Note writing guide](Note_Writing_Guide.md) | Copy syntax examples and understand their combinations |

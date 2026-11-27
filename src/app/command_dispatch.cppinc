@@ -723,7 +723,6 @@ static bool IsMenuCommandAllowedDuringSave(int id) {
 }
 
 static void OnCommand(HWND hWnd, int id, UINT code, HWND from) {
-    if (recovery::HasActiveStageRecovery()) return;
     if (IsSaveTransactionRunning()) {
         if (id == ID_FILE_SAVE_ALL) {
             SaveAllManual(hWnd);

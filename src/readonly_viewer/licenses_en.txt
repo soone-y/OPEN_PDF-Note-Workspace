@@ -17,6 +17,14 @@ Markdown parsing: MD4C / MIT License
   md4c/LICENSE.md
   MD4C is compiled into the executable; its original license is still bundled.
 
+Math rendering: MicroTeX / MIT License
+  microtex/LICENSE.txt
+  MicroTeX is compiled into the executable; the license matches the main application.
+
+Math font: XITS Math / SIL Open Font License 1.1
+  xits/OFL.txt, xits/FONTLOG.txt, xits/README.txt
+  resources/math/xits/XITSMath-Regular.clm2 is shared with the main application.
+
 C++ runtime: MinGW-w64 / GCC runtime
   libstdc++-6.dll and libgcc_s_seh-1.dll:
     mingw-w64/gcc/COPYING3.txt
@@ -25,8 +33,9 @@ C++ runtime: MinGW-w64 / GCC runtime
     mingw-w64/winpthreads/COPYING.txt
   The GCC Runtime Library Exception is included verbatim.
 
-This standalone viewer build does not bundle LibreOffice, zlib1.dll, or extra font files.
-It uses Windows components and installed fonts.
+This standalone viewer build does not bundle LibreOffice or zlib1.dll.
+Apart from XITS Math for formulas, it uses Windows components and installed fonts.
+Images are decoded by the Windows Imaging Component (WIC).
 User documents and images remain subject to their respective rights holders' terms.
 
 Keep LICENSE.md and the licenses folder together with the executable and four DLLs.

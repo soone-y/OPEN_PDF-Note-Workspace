@@ -2,26 +2,73 @@
 // NOTE: This file is intentionally included by `src/pdf_view/pdf_view.cpp` to keep the build as a
 // single translation unit while physically splitting responsibilities.
 
-static void RenderPdf(HWND hwnd, HDC hdc, const RECT& client, const RECT& paintRequest) {
-    RECT paint{};
-    if (!IntersectRect(&paint, &client, &paintRequest)) return;
+// Off-screen buffer reused across paints of the PDF view. Creating a
+// client-sized bitmap on every scroll/zoom frame was the largest per-paint
+// allocation. The buffer always matches the client size and is recreated when
+// the size or the owning window changes.
+class PdfPaintBackBuffer final {
+public:
+    ~PdfPaintBackBuffer() { Release(); }
 
-    int cw = paint.right - paint.left;
-    int ch = paint.bottom - paint.top;
-    if (cw <= 0 || ch <= 0) return;
+    [[nodiscard]] HDC Acquire(HWND owner, HDC target, int width, int height) {
+        if (dc_ && owner_ == owner && width_ == width && height_ == height) return dc_;
+        Release();
+        HDC dc = CreateCompatibleDC(target);
+        if (!dc) return nullptr;
+        ui::ScopedBitmap bitmap(CreateCompatibleBitmap(target, width, height));
+        HGDIOBJ original = bitmap ? SelectObject(dc, bitmap.get()) : nullptr;
+        if (!original || original == HGDI_ERROR) {
+            DeleteDC(dc);
+            return nullptr;
+        }
+        dc_ = dc;
+        bitmap_ = std::move(bitmap);
+        original_ = original;
+        owner_ = owner;
+        width_ = width;
+        height_ = height;
+        return dc_;
+    }
 
-    HDC memDC = CreateCompatibleDC(hdc);
-    HBITMAP memBmp = CreateCompatibleBitmap(hdc, cw, ch);
-    HGDIOBJ oldBmp = SelectObject(memDC, memBmp);
-    POINT oldViewport{};
-    SetViewportOrgEx(memDC, -paint.left, -paint.top, &oldViewport);
+    void Release() noexcept {
+        if (dc_) {
+            if (original_) SelectObject(dc_, original_);
+            DeleteDC(dc_);
+        }
+        bitmap_.Reset();
+        dc_ = nullptr;
+        original_ = nullptr;
+        owner_ = nullptr;
+        width_ = height_ = 0;
+    }
 
-    HBRUSH pdfBg = CreateSolidBrush(g_theme.pdfBg);
-    FillRect(memDC, &paint, pdfBg);
-    DeleteObject(pdfBg);
+private:
+    HWND owner_ = nullptr;
+    HDC dc_ = nullptr;
+    ui::ScopedBitmap bitmap_;
+    HGDIOBJ original_ = nullptr;
+    int width_ = 0;
+    int height_ = 0;
+};
+
+static PdfPaintBackBuffer g_pdfPaintBackBuffer;
+
+static void ReleasePdfPaintBackBuffer() { g_pdfPaintBackBuffer.Release(); }
+
+// Paints the whole PDF view scene into `memDC` in client coordinates. Drawing
+// is clipped to `paint`; pixels outside it are never shown by the caller.
+static void PaintPdfScene(HWND hwnd, HDC memDC, const RECT& client, const RECT& paint) {
+    ui::FillSolidRect(memDC, paint, g_theme.pdfBg);
+    if (g_pdfHostBackgroundPainter) g_pdfHostBackgroundPainter(memDC, client);
 
     const int currentPage = PageAtCurrentView();
-    if (ShouldShowEmptyViewGuide()) {
+    // A host guide describes that host's state; the main app's shortcuts and
+    // page/zoom readout mean nothing there while no document is shown.
+    const bool hostGuide = g_pdfEmptyGuideProvider && g_pdf.pages.empty();
+    if (hostGuide) {
+        empty_view_guide::Paint(hwnd, memDC, client, g_pdfEmptyGuideProvider(),
+                                g_hUIFont, g_theme);
+    } else if (!g_pdfEmptyGuideProvider && ShouldShowEmptyViewGuide()) {
         empty_view_guide::Paint(hwnd, memDC, client,
             shortcut_help::Build(g_config.emptyViewGuideMode, AnnotToolShortcutBindings(), g_shapeDrawMode),
             g_hUIFont, g_theme);
@@ -45,9 +92,7 @@ static void RenderPdf(HWND hwnd, HDC hdc, const RECT& client, const RECT& paintR
             RECT visiblePage{};
             if (!IntersectRect(&visiblePage, &pageRect, &paint)) continue;
 
-            HBRUSH pageBg = CreateSolidBrush(g_theme.pdfPageBg);
-            FillRect(memDC, &pageRect, pageBg);
-            DeleteObject(pageBg);
+            ui::FillSolidRect(memDC, pageRect, g_theme.pdfPageBg);
             const bool hasDrawableBitmap =
                 !page.pixels.empty() &&
                 srcW > 0 && srcH > 0;
@@ -81,28 +126,16 @@ static void RenderPdf(HWND hwnd, HDC hdc, const RECT& client, const RECT& paintR
                     SetStretchBltMode(memDC, oldMode);
                 }
             }
-            HPEN pagePen = CreatePen(PS_SOLID, 1, g_theme.splitterLine);
-            HGDIOBJ oldPen = SelectObject(memDC, pagePen);
-            HGDIOBJ oldBrush = SelectObject(memDC, GetStockObject(HOLLOW_BRUSH));
-            Rectangle(memDC, pageRect.left, pageRect.top, pageRect.right, pageRect.bottom);
-            SelectObject(memDC, oldBrush);
-            SelectObject(memDC, oldPen);
-            DeleteObject(pagePen);
+            ui::FrameSolidRect(memDC, pageRect, 1, g_theme.splitterLine);
 
             if (static_cast<int>(i) == currentPage) {
-                RECT frameRect = {
+                const RECT frameRect = {
                     pageRect.left - 2,
                     pageRect.top - 2,
                     pageRect.right + 2,
                     pageRect.bottom + 2
                 };
-                HPEN currentPen = CreatePen(PS_SOLID, 3, g_theme.accent);
-                HGDIOBJ oldCurrentPen = SelectObject(memDC, currentPen);
-                HGDIOBJ oldCurrentBrush = SelectObject(memDC, GetStockObject(HOLLOW_BRUSH));
-                Rectangle(memDC, frameRect.left, frameRect.top, frameRect.right, frameRect.bottom);
-                SelectObject(memDC, oldCurrentBrush);
-                SelectObject(memDC, oldCurrentPen);
-                DeleteObject(currentPen);
+                ui::FrameSolidRect(memDC, frameRect, 3, g_theme.accent);
             }
         }
 
@@ -120,28 +153,52 @@ static void RenderPdf(HWND hwnd, HDC hdc, const RECT& client, const RECT& paintR
 
     const auto& ui = GetUiText();
     std::wstring status;
-    if (g_config.showPdfPageOverlay) {
+    if (g_config.showPdfPageOverlay && !hostGuide) {
         status = ui.statusPageLabel + L" " + std::to_wstring(currentPage + 1) + L"/" +
                  std::to_wstring(std::max(1, g_pdf.pageCount));
     }
-    if (g_config.showPdfZoomOverlay) {
+    if (g_config.showPdfZoomOverlay && !hostGuide) {
         if (!status.empty()) status += L"  ";
         status += ui.statusZoomLabel + L" " +
-                  std::to_wstring(static_cast<int>(g_pdf.scale * 100)) + L"%";
+                  std::to_wstring(static_cast<int>(std::lround(g_pdf.scale * 100.0))) + L"%";
     }
     SetBkMode(memDC, TRANSPARENT);
     SetTextColor(memDC, g_theme.panelText);
     if (!status.empty()) {
+        // A memory DC starts with the legacy system font; use the UI font so
+        // the readout follows the app's typeface and DPI.
+        ui::ScopedSelectObject statusFont(memDC, g_hUIFont);
         TextOutW(memDC, 8, 8, status.c_str(), static_cast<int>(status.size()));
     }
 
     DrawTextBoxHoverCaret(memDC, paint);
-    SetViewportOrgEx(memDC, oldViewport.x, oldViewport.y, nullptr);
-    BitBlt(hdc, paint.left, paint.top, cw, ch, memDC, 0, 0, SRCCOPY);
+}
 
-    SelectObject(memDC, oldBmp);
-    DeleteObject(memBmp);
-    DeleteDC(memDC);
+static void RenderPdf(HWND hwnd, HDC hdc, const RECT& client, const RECT& paintRequest) {
+    RECT paint{};
+    if (!IntersectRect(&paint, &client, &paintRequest)) return;
+    const int cw = paint.right - paint.left;
+    const int ch = paint.bottom - paint.top;
+    if (cw <= 0 || ch <= 0) return;
+
+    const int clientW = client.right - client.left;
+    const int clientH = client.bottom - client.top;
+    HDC memDC = g_pdfPaintBackBuffer.Acquire(hwnd, hdc, clientW, clientH);
+    if (!memDC) {
+        // Without a buffer, paint directly: it may flicker but never shows an
+        // undrawn bitmap.
+        const int saved = SaveDC(hdc);
+        IntersectClipRect(hdc, paint.left, paint.top, paint.right, paint.bottom);
+        PaintPdfScene(hwnd, hdc, client, paint);
+        if (saved) RestoreDC(hdc, saved);
+        return;
+    }
+    // Every paint starts from the DC's pristine state, as a new DC would.
+    const int saved = SaveDC(memDC);
+    IntersectClipRect(memDC, paint.left, paint.top, paint.right, paint.bottom);
+    PaintPdfScene(hwnd, memDC, client, paint);
+    if (saved) RestoreDC(memDC, saved);
+    BitBlt(hdc, paint.left, paint.top, cw, ch, memDC, paint.left, paint.top, SRCCOPY);
 }
 
 struct PdfScrollbarTrackState {

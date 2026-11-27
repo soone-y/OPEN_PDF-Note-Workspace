@@ -41,9 +41,8 @@ static bool LoadStartupLastOpenTarget(StartupLastOpenTarget* out) {
     std::filesystem::path preferredTmp;
     std::filesystem::path quarantineDir;
     if (!g_workspaceRoot.empty()) {
-        std::filesystem::path resource = std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__";
-        preferredTmp = resource / L"__tmp__";
-        quarantineDir = resource / L"__escape__";
+        preferredTmp = workspace_layout::Tmp(std::filesystem::path(g_workspaceRoot));
+        quarantineDir = workspace_layout::Failed(std::filesystem::path(g_workspaceRoot));
         const auto localQuarantine = identity_path_scope::LocalPath(quarantineDir.wstring());
         if (!localQuarantine || !identity_path_scope::NoReparseAncestors(*localQuarantine)) return false;
     }

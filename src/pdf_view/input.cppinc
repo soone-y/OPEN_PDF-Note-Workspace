@@ -33,6 +33,39 @@ static bool IsCtrlPaneNavCharPdf(WPARAM ch) {
     return ch == L'\b' || ch == L'\n' || ch == 0x0B || ch == 0x0C;
 }
 
+// Single-key commands of the PDF pane's operation state. h/j/k/l scroll on
+// WM_KEYDOWN; these act on the translated character so they follow the
+// keyboard layout. Commands go through the menu dispatcher, which already
+// applies document and save-time availability.
+static bool g_pdfPendingG = false;
+
+static bool HandlePdfOperationChar(HWND hwnd, wchar_t ch) {
+    const bool pendingG = g_pdfPendingG;
+    g_pdfPendingG = false;
+    HWND owner = GetParent(hwnd);
+    if (!owner) return false;
+    int command = 0;
+    switch (ch) {
+    case L'/': command = ID_SEARCH; break;
+    case L'J': command = ID_VIEW_NEXT_PAGE; break;
+    case L'K': command = ID_VIEW_PREV_PAGE; break;
+    case L'G': command = ID_VIEW_LAST_PAGE; break;
+    case L'0': command = ID_VIEW_FIT_PAGE; break;
+    case L'g':
+        if (!pendingG) {
+            g_pdfPendingG = true;
+            return true;
+        }
+        command = ID_VIEW_FIRST_PAGE;
+        break;
+    default:
+        return false;
+    }
+    if (command != ID_SEARCH && (g_pdf.kind == DocKind::None || g_pdf.pageCount <= 0)) return true;
+    SendMessageW(owner, WM_COMMAND, MAKEWPARAM(command, 0), 0);
+    return true;
+}
+
 enum class PdfScrollbarHoldAction {
     Step,
     Ignore,
@@ -886,6 +919,7 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     if (msg == WM_DESTROY) {
         if (g_pdfBitmapRetentionTimerHwnd == hwnd) StopPdfBitmapRetentionTimer();
         EndPdfTextInputAccessibility(hwnd);
+        ReleasePdfPaintBackBuffer();
     }
     // Keyup can be blocked by a save transaction, so cancellation precedes that gate.
     if (msg == WM_KEYUP && pdf_keyboard_scroll::Motion::KeyIndex(static_cast<unsigned>(wParam)) >= 0) {
@@ -2324,7 +2358,8 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
         bool altDown = (GetKeyState(VK_MENU) & 0x8000) != 0;
         bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-        if (movementKey && !g_pdf.editingText && !ctrlDown && !altDown &&
+        // Shift+J/K are page commands (WM_CHAR), not held scrolling.
+        if (movementKey && g_noteVimModeEnabled && !g_pdf.editingText && !ctrlDown && !altDown && !shiftDown &&
             GetFocus() == hwnd && g_pdf.kind != DocKind::None && g_pdf.pageCount > 0) {
             const bool repeat = (lParam & (1LL << 30)) != 0;
             if (!repeat) {
@@ -2533,11 +2568,21 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 const bool enlarge = wParam == VK_OEM_PLUS || wParam == VK_ADD;
                 const bool shrink = wParam == VK_OEM_MINUS || wParam == VK_SUBTRACT;
                 if (enlarge || shrink) {
-                    if (!g_pdf.imeComposing && !g_pdfTextEditViewFollow.Following(GetTickCount64())) {
-                        RECT rc{};
-                        GetClientRect(hwnd, &rc);
+                    // Resize the text only while the whole edit box is on screen, so the
+                    // change is visible; otherwise the shortcut zooms the PDF and keeps
+                    // doing so until editing resumes, so a zoom-out sequence never
+                    // switches to resizing the text midway. IME composition keeps the
+                    // text target to avoid moving the candidates.
+                    RECT box{}, view{};
+                    GetClientRect(hwnd, &view);
+                    const bool boxFullyVisible = EditingBoxClientRect(box) &&
+                        box.left >= view.left && box.top >= view.top &&
+                        box.right <= view.right && box.bottom <= view.bottom;
+                    if (!g_pdf.imeComposing &&
+                        (g_pdfTextEditViewFollow.PdfZoomLatched() || !boxFullyVisible)) {
+                        g_pdfTextEditViewFollow.LatchPdfZoom();
                         SetPdfScale(hwnd, ZoomInputBaseScale() * (enlarge ? 1.15 : 1.0 / 1.15),
-                                    POINT{rc.right / 2, rc.bottom / 2});
+                                    POINT{view.right / 2, view.bottom / 2});
                     } else if (enlarge) EnlargeEditingTextBoxFont(hwnd);
                     else ShrinkEditingTextBoxFont(hwnd);
                     return 0;
@@ -2597,11 +2642,10 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             }
             if (wParam == VK_ESCAPE) {
                 CommitTextEditing(hwnd, true);
-                // After exiting textbox editing, return keyboard focus to the main window so shortcuts
-                // and IME candidate suppression behave consistently outside text-edit mode.
-                if (g_hMainWnd) {
-                    PostMessageW(g_hMainWnd, kMsgEnterNoteNormalMode, 0, 0);
-                }
+                // Esc returns to the PDF pane's operation state and keeps the pane.
+                // The message loop applies the non-editing IME policy to the
+                // focused PDF view, so no focus transition is needed here.
+                if (!g_pdf.editingText && GetFocus() != hwnd) SetFocus(hwnd);
                 return 0;
             }
             if (wParam == VK_RETURN && (GetKeyState(VK_CONTROL) & 0x8000)) {
@@ -2795,14 +2839,6 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             SetPdfScale(hwnd, ZoomInputBaseScale() / 1.15, pt);
             break;
         }
-        case '0': {
-            if (!ctrlDown) break;
-            RECT rc{};
-            GetClientRect(hwnd, &rc);
-            POINT pt{ (rc.right - rc.left) / 2, (rc.bottom - rc.top) / 2 };
-            SetPdfScale(hwnd, 1.0, pt);
-            break;
-        }
         default: break;
         }
         return 0;
@@ -2914,6 +2950,11 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         if (!g_pdf.editingText && (GetKeyState(VK_CONTROL) & 0x8000) != 0 && IsCtrlPaneNavCharPdf(wParam)) {
             return 0;
         }
+        if (g_noteVimModeEnabled && !g_pdf.editingText && (GetKeyState(VK_CONTROL) & 0x8000) == 0 &&
+            (GetKeyState(VK_MENU) & 0x8000) == 0 && GetFocus() == hwnd &&
+            HandlePdfOperationChar(hwnd, static_cast<wchar_t>(wParam))) {
+            return 0;
+        }
         if (IsPdfPreviewReadOnlyActive()) {
             return 0;
         }
@@ -2986,41 +3027,8 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             return 0;
         }
 
-        // Keyboard software scroll/pan keys when the PDF view has focus.
-        // (This window proc receives input only while the PDF view is focused.)
-        wchar_t ch = static_cast<wchar_t>(wParam);
-        switch (ch) {
-        case L'h':
-        case L'H':
-        case L'j':
-        case L'J':
-        case L'k':
-        case L'K':
-        case L'l':
-        case L'L': {
-            if (g_pdf.pages.empty()) return 0;
-            const double step = kScrollStepPx;
-            if (ch == L'h' || ch == L'H') {
-                ScrollPdfByKeyboard(hwnd, -step, 0.0);
-                return 0;
-            }
-            if (ch == L'l' || ch == L'L') {
-                ScrollPdfByKeyboard(hwnd, step, 0.0);
-                return 0;
-            }
-            if (ch == L'j' || ch == L'J') {
-                ScrollPdfByKeyboard(hwnd, 0.0, step);
-                return 0;
-            }
-            if (ch == L'k' || ch == L'K') {
-                ScrollPdfByKeyboard(hwnd, 0.0, -step);
-                return 0;
-            }
-            break;
-        }
-        default:
-            break;
-        }
+        // h/j/k/l scroll smoothly on WM_KEYDOWN; their characters need no
+        // second fixed step here.
         return 0;
     }
     case WM_IME_STARTCOMPOSITION: {
@@ -3159,8 +3167,10 @@ LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         ApplyPdfVirtualRenderResults(nullptr);
         // Keep heavyweight page resources inside the virtualized visible/near-visible window.
         UpdatePdfVirtualScrollCaches(hwnd, PdfVirtualUpdateMode::Paint);
+        BeginPdfPaintFailureTracking();
         RenderPdf(hwnd, hdc, rc, paintRc);
         EndPaint(hwnd, &ps);
+        FlushPdfPaintFailureNotices(hwnd);
         return 0;
     }
     }

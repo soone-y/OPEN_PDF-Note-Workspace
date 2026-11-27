@@ -210,6 +210,60 @@ static double PageClientTop(int pageIndex) {
     return DocToClientY(PageDocTop(pageIndex));
 }
 
+// Maps PDF points of one page to client pixels for painting. The page origin
+// is rounded exactly like the page bitmap in RenderPdf (and the magnifier's
+// page placement), so overlays land on the same device pixels as the rendered
+// page content even when the scroll offset is fractional.
+struct PdfPagePaintMap {
+    double left = 0.0;
+    double top = 0.0;
+    double heightPt = 0.0;
+    double pxPerPt = 0.0;
+
+    [[nodiscard]] double X(double xPt) const { return left + xPt * pxPerPt; }
+    [[nodiscard]] double Y(double yPt) const { return top + (heightPt - yPt) * pxPerPt; }
+    [[nodiscard]] double Length(double pt) const { return pt * pxPerPt; }
+    [[nodiscard]] POINT Point(double xPt, double yPt) const {
+        return {static_cast<LONG>(std::round(X(xPt))), static_cast<LONG>(std::round(Y(yPt)))};
+    }
+    // Normalized rectangle from two PDF corners, in either order.
+    [[nodiscard]] RECT Rect(double x1Pt, double y1Pt, double x2Pt, double y2Pt) const {
+        const double x1 = X(x1Pt), x2 = X(x2Pt), y1 = Y(y1Pt), y2 = Y(y2Pt);
+        return {static_cast<LONG>(std::round(std::min(x1, x2))),
+                static_cast<LONG>(std::round(std::min(y1, y2))),
+                static_cast<LONG>(std::round(std::max(x1, x2))),
+                static_cast<LONG>(std::round(std::max(y1, y2)))};
+    }
+};
+
+// `clientLeft` / `clientTop` are the page's unrounded client origin (already
+// magnified when painting into the magnifier lens); `viewScale` includes zoom.
+// Leave the origin unrounded only when a world transform scales the output
+// afterwards: rounding before that transform would multiply the error.
+static PdfPagePaintMap MakePdfPagePaintMap(const PageCache& page, double clientLeft,
+                                           double clientTop, double viewScale,
+                                           bool roundOrigin = true) {
+    return {roundOrigin ? std::round(clientLeft) : clientLeft,
+            roundOrigin ? std::round(clientTop) : clientTop, page.heightPt,
+            kDpi / 72.0 * viewScale};
+}
+
+static PdfPagePaintMap PdfPagePaintMapFor(int pageIndex, bool roundOrigin = true) {
+    const auto& page = g_pdf.pages[static_cast<size_t>(pageIndex)];
+    return MakePdfPagePaintMap(page, PageClientLeft(pageIndex), PageClientTop(pageIndex), g_pdf.scale,
+                               roundOrigin);
+}
+
+// True when `hdc` has a non-identity world transform (the magnifier lens
+// paints some overlays in unmagnified coordinates through one).
+static bool PdfPaintDcHasWorldTransform(HDC hdc) {
+    if (!hdc || GetGraphicsMode(hdc) != GM_ADVANCED) return false;
+    XFORM transform{};
+    if (!GetWorldTransform(hdc, &transform)) return false;
+    return transform.eM11 != 1.0f || transform.eM12 != 0.0f || transform.eM21 != 0.0f ||
+        transform.eM22 != 1.0f || transform.eDx != 0.0f || transform.eDy != 0.0f;
+}
+
 static double PdfPtToDocX(int pageIndex, double xPt) {
     if (pageIndex < 0 || pageIndex >= static_cast<int>(g_pdf.pages.size())) return 0.0;
     return PageDocLeft(pageIndex) + xPt * kDpi / 72.0 * g_pdf.scale;

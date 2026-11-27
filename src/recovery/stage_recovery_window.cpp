@@ -4,6 +4,7 @@
 #include "core/ui_notify.h"
 #include "pdf_view/pdf_view.h"
 #include "recovery/annotation_transfer.h"
+#include "recovery/recovery_visual.h"
 #include "recovery/stage_recovery.h"
 #include "ui/noop_nav_guard.h"
 #include "ui/window_corners.h"
@@ -15,6 +16,7 @@
 #include <windowsx.h>
 
 namespace recovery {
+void PaintReviewBand(HWND window); // defined after the window procedure
 namespace {
 enum {
   Sources = 7101,
@@ -52,6 +54,9 @@ struct WindowState {
   bool noteReady = true;
 };
 WindowState *ui = nullptr;
+// Banner (mode and standing warning) plus the flow of what saving needs.
+constexpr int kReviewBannerHeight = 80;
+constexpr int kReviewBand = kReviewBannerHeight + 96;
 std::wstring T(const wchar_t *id) {
   return localization::Text(std::wstring(L"recovery.app.") + id);
 }
@@ -166,27 +171,28 @@ bool Protect() {
 void Layout() {
   RECT r{};
   GetClientRect(ui->view, &r);
-  const int w = r.right, h = r.bottom;
+  const int w = r.right, h = r.bottom - kReviewBand;
+  const int t = kReviewBand;
   auto move = [](HWND window, int x, int y, int width, int height) {
     MoveWindow(window, x, y, std::max(1, width), std::max(1, height), TRUE);
   };
   const bool note = ui->review.isNote;
   if (note) {
     const int split = w * 3 / 5;
-    move(ui->previewTitle, 12, 12, split - 24, 30);
-    move(ui->editor, 12, 48, split - 24, h - 60);
-    move(ui->sourceTitle, split + 8, 12, w - split - 20, 30);
-    move(ui->picker, split + 8, 48, w - split - 20, 300);
-    move(ui->reference, split + 8, 84, w - split - 20, h - 96);
+    move(ui->previewTitle, 12, t + 12, split - 24, 30);
+    move(ui->editor, 12, t + 48, split - 24, h - 60);
+    move(ui->sourceTitle, split + 8, t + 12, w - split - 20, 30);
+    move(ui->picker, split + 8, t + 48, w - split - 20, 300);
+    move(ui->reference, split + 8, t + 84, w - split - 20, h - 96);
   } else {
     const int left = std::clamp(w / 5, 210, 300),
               right = std::clamp(w / 5, 210, 280);
-    move(ui->sourceTitle, 12, 12, left - 24, 30);
-    move(ui->tree, 12, 48, left - 24, h - 60);
-    move(ui->previewTitle, left + 8, 12, w - left - right - 16, 30);
-    move(g_hPdfView, left, 48, w - left - right, h - 48);
-    move(ui->finalTitle, w - right + 12, 12, right - 24, 30);
-    move(ui->list, w - right + 12, 48, right - 24, h - 60);
+    move(ui->sourceTitle, 12, t + 12, left - 24, 30);
+    move(ui->tree, 12, t + 48, left - 24, h - 60);
+    move(ui->previewTitle, left + 8, t + 12, w - left - right - 16, 30);
+    move(g_hPdfView, left, t + 48, w - left - right, h - 48);
+    move(ui->finalTitle, w - right + 12, t + 12, right - 24, 30);
+    move(ui->list, w - right + 12, t + 48, right - 24, h - 60);
   }
   for (HWND window : {ui->tree, ui->list, ui->finalTitle, g_hPdfView})
     ShowWindow(window, note ? SW_HIDE : SW_SHOW);
@@ -557,6 +563,20 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wp, LPARAM lp) {
     case WM_CLOSE:
       RequestClose();
       return 0;
+    case WM_PAINT:
+      if (ui && window == ui->view) {
+        PaintReviewBand(window);
+        return 0;
+      }
+      break;
+    case WM_ERASEBKGND:
+      if (ui && window == ui->view)
+        return 1;
+      break;
+    case WM_CTLCOLORSTATIC:
+      // Headings and labels on white, not the gray dialog face.
+      SetBkColor(reinterpret_cast<HDC>(wp), GetSysColor(COLOR_WINDOW));
+      return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
     case WM_QUERYENDSESSION:
       return Protect() ? TRUE : FALSE;
     case WM_ENDSESSION:
@@ -617,6 +637,8 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wp, LPARAM lp) {
       } else if (LOWORD(wp) == NoteEditor && HIWORD(wp) == EN_CHANGE &&
                  !ui->updating && ui->review.isNote && !ui->candidate.saved) {
         (void)Protect();
+        RECT band{0, 0, 32767, kReviewBand};
+        InvalidateRect(ui->view, &band, FALSE);
       } else if (LOWORD(wp) == Save)
         (void)SaveCandidate();
       else if (LOWORD(wp) == SaveAs)
@@ -645,6 +667,147 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wp, LPARAM lp) {
 }
 } // namespace
 
+// The steps saving needs, each marked done, missing or to decide. The banner
+// names whatever is missing, so the user sees what blocks saving at a glance.
+std::vector<recovery_visual::Node> ReviewNodes() {
+  using recovery_visual::Mark;
+  std::vector<recovery_visual::Node> nodes;
+  const auto F = [](const wchar_t *id,
+                    const std::vector<std::pair<std::wstring_view, std::wstring>> &values) {
+    return localization::Format(std::wstring(L"recovery.app.node.") + id, values);
+  };
+  const size_t failed = ui->review.sources.empty() ? 0 : ui->review.sources.size() - 1;
+  nodes.push_back({T(L"node.stage"),
+                   F(ui->review.incomplete ? L"stage_partial" : L"stage_detail",
+                     {{L"COUNT", std::to_wstring(failed)}}),
+                   ui->review.incomplete ? Mark::Warn : Mark::Ok});
+  if (ui->review.isNote) {
+    const bool exists = ui->candidate.destinationExists;
+    nodes.push_back({T(L"node.note"),
+                     exists ? ui->review.originalTarget.filename().wstring()
+                            : T(L"node.note_missing"),
+                     exists ? Mark::Ok : Mark::Bad});
+    const auto chars = UTF8ToWide(ui->candidate.note).size();
+    // sources[0] is the original; sources[1] the newest version that failed to
+    // save. A final text equal to neither side has been merged by the user.
+    const bool differsFromNewest =
+        ui->review.sources.size() > 1 && ui->candidate.note != ui->review.sources[1].note &&
+        ui->candidate.note == ui->review.sources[0].note;
+    nodes.push_back({T(L"node.final_text"),
+                     chars == 0 ? T(L"node.final_empty")
+                     : differsFromNewest
+                         ? F(L"final_differs", {{L"COUNT", std::to_wstring(chars)}})
+                         : F(L"final_chars", {{L"COUNT", std::to_wstring(chars)}}),
+                     chars == 0 || differsFromNewest ? Mark::Warn : Mark::Ok});
+    nodes.push_back({T(L"node.dest"),
+                     T(ui->candidate.targetConfirmed ? L"node.dest_original_note"
+                                                     : L"node.dest_save_as"),
+                     ui->candidate.targetConfirmed ? Mark::Ok : Mark::Warn});
+  } else {
+    const bool chosen = !ui->candidate.pdf.empty();
+    nodes.push_back({T(L"node.pdf"),
+                     chosen ? ui->candidate.pdf.filename().wstring() : T(L"node.pdf_unset"),
+                     chosen ? Mark::Ok : Mark::Bad});
+    const auto count = ui->candidate.annotations.size();
+    nodes.push_back({T(L"node.final_annotations"),
+                     F(L"final_count", {{L"COUNT", std::to_wstring(count)}}),
+                     count == 0 ? Mark::Warn : Mark::Ok});
+    nodes.push_back({T(L"node.dest"),
+                     T(ui->candidate.targetConfirmed ? L"node.dest_original_clrop"
+                       : chosen ? L"node.dest_save_as" : L"node.dest_needs_pdf"),
+                     ui->candidate.targetConfirmed ? Mark::Ok
+                       : chosen ? Mark::Warn : Mark::Bad});
+  }
+  return nodes;
+}
+
+std::wstring ReviewWatermark() { return T(L"band.watermark"); }
+
+void PaintReviewBand(HWND window) {
+  PAINTSTRUCT ps{};
+  HDC dc = BeginPaint(window, &ps);
+  RECT rc{};
+  GetClientRect(window, &rc);
+  const auto nodes = ReviewNodes();
+  std::wstring missing, check;
+  for (const auto &node : nodes) {
+    std::wstring &list = node.mark == recovery_visual::Mark::Bad    ? missing
+                         : node.mark == recovery_visual::Mark::Warn ? check
+                                                                    : missing;
+    if (node.mark != recovery_visual::Mark::Bad && node.mark != recovery_visual::Mark::Warn)
+      continue;
+    list += (list.empty() ? std::wstring() : std::wstring(L"\u3001")) + node.title;
+  }
+  // Missing items block saving; items to check do not, but deserve a look.
+  const std::wstring summary =
+      !missing.empty() ? localization::Format(L"recovery.app.band.missing", {{L"ITEMS", missing}})
+      : !check.empty() ? localization::Format(L"recovery.app.band.check", {{L"ITEMS", check}})
+                       : T(L"band.ready");
+  RECT banner{0, 0, rc.right, kReviewBannerHeight};
+  recovery_visual::PaintBanner(dc, banner, g_hUIFont, GetSysColor(COLOR_WINDOW), T(L"band.title"),
+                               T(L"band.warning"), summary);
+  RECT flow{0, kReviewBannerHeight, rc.right, kReviewBand};
+  recovery_visual::PaintFlow(dc, flow, g_hUIFont, GetSysColor(COLOR_WINDOW), nodes);
+  RECT rest{0, kReviewBand, rc.right, rc.bottom};
+  const COLORREF back = GetSysColor(COLOR_WINDOW);
+  HBRUSH brush = CreateSolidBrush(back);
+  FillRect(dc, &rest, brush);
+  DeleteObject(brush);
+  recovery_visual::PaintWatermark(dc, rest, g_hUIFont, back, ReviewWatermark());
+  EndPaint(window, &ps);
+}
+
+// The preview sits on white like the rest of the review; pages keep their own
+// page color, so they still stand out from the surface.
+void PaintPreviewWatermark(HDC dc, const RECT &area) {
+  const COLORREF back = GetSysColor(COLOR_WINDOW);
+  HBRUSH brush = CreateSolidBrush(back);
+  FillRect(dc, &area, brush);
+  DeleteObject(brush);
+  recovery_visual::PaintWatermark(dc, area, g_hUIFont, back, ReviewWatermark());
+}
+
+// Shown in the preview while no PDF is loaded: what this review holds now
+// and how to finish it. The main app's shortcut guide does not apply here.
+empty_view_guide::Content RecoveryPreviewGuide() {
+  empty_view_guide::Content content;
+  if (!ui)
+    return content;
+  const auto text = [](const wchar_t *id) { return T(id); };
+  const bool originalExists =
+      !ui->review.originalTarget.empty() &&
+      GetFileAttributesW(
+          ToExtendedWin32PathIfAbsoluteLocal(ui->review.originalTarget).c_str()) !=
+          INVALID_FILE_ATTRIBUTES;
+  content.title = text(L"preview.title");
+  content.usage = text(originalExists ? L"preview.usage_unloaded"
+                                      : L"preview.usage_missing");
+  content.generalTitle = text(L"preview.state_title");
+  content.general.push_back(
+      localization::Format(L"recovery.app.preview.state_original",
+                           {{L"STATE", text(originalExists ? L"preview.present"
+                                                           : L"preview.missing")}}));
+  if (!ui->review.originalTarget.empty()) {
+    // The column is narrow: name there, the full path across the page.
+    auto original = ui->review.originalTarget;
+    original.make_preferred();
+    content.general.push_back(original.filename().wstring());
+    content.usage += L"\n" + original.wstring();
+  }
+  content.general.push_back(localization::Format(
+      L"recovery.app.preview.state_final",
+      {{L"COUNT", std::to_wstring(ui->candidate.annotations.size())}}));
+  const size_t failed = ui->review.sources.empty() ? 0 : ui->review.sources.size() - 1;
+  content.general.push_back(localization::Format(
+      L"recovery.app.preview.state_failed", {{L"COUNT", std::to_wstring(failed)}}));
+  content.annotationTitle = text(L"preview.steps_title");
+  for (const wchar_t *id : {L"preview.step_choose", L"preview.step_drag",
+                            L"preview.step_save", L"preview.step_defer"})
+    content.annotation.push_back(text(id));
+  content.scrollHint = text(L"preview.scroll");
+  return content;
+}
+
 ReviewExit RunStageRecoveryWindow(Review &review, HWND parent) {
   WindowState state{review, review.candidate};
   ui = &state;
@@ -652,9 +815,13 @@ ReviewExit RunStageRecoveryWindow(Review &review, HWND parent) {
     ~Reset() {
       ClearPdfState();
       g_annots.clear();
+      g_pdfEmptyGuideProvider = nullptr;
+      g_pdfHostBackgroundPainter = nullptr;
       ui = nullptr;
     }
   } reset;
+  g_pdfEmptyGuideProvider = RecoveryPreviewGuide;
+  g_pdfHostBackgroundPainter = PaintPreviewWatermark;
   INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_WIN95_CLASSES};
   InitCommonControlsEx(&controls);
   HMODULE rich =

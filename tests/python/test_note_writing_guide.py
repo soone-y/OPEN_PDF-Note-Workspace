@@ -14,22 +14,29 @@ SPEC.loader.exec_module(portal)
 
 
 class WritingGuideTests(unittest.TestCase):
+    def test_microtex_vocabulary_matches_the_pinned_engine(self):
+        spec = importlib.util.spec_from_file_location(
+            "microtex_syntax_support", ROOT / "tools/dev/update_microtex_syntax_support.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        expected = module.generate()
+        self.assertEqual(expected, module.OUTPUT.read_text(encoding="utf-8"))
+        for command in ("hbar", "int", "oint", "right", "overbrace"):
+            self.assertIn(f'L"{command}"', expected)
+        self.assertNotIn('L"includegraphics"', expected)
+
     def guides(self):
         for locale in ("ja", "en"):
             yield locale, (ROOT / "docs" / locale / "Note_Writing_Guide.md").read_text(encoding="utf-8")
 
-    def test_all_custom_style_aliases_and_math_symbols_are_documented(self):
+    def test_all_custom_style_aliases_and_core_math_forms_are_documented(self):
         parser = (ROOT / "src/note/note_parser.cpp").read_text(encoding="utf-8")
         style = parser.split("bool ParseStyleOpenTag(", 1)[1].split("void AppendStyleSpan(", 1)[0]
         aliases = set(re.findall(r'lowered == L"([a-z]+)"', style))
-        math = (ROOT / "src/math/math_render.cpp").read_text(encoding="utf-8")
-        mapping = math.split("const wchar_t* MapLatexCommand(", 1)[1].split("bool ConsumeLatexCommand(", 1)[0]
-        symbols = set(re.findall(r'name == L"([A-Za-z]+)"', mapping))
         self.assertGreater(len(aliases), 15)
-        self.assertGreater(len(symbols), 70)
         for locale, guide in self.guides():
             with self.subTest(locale=locale):
-                for word in aliases | symbols:
+                for word in aliases:
                     self.assertRegex(guide, r"\b" + re.escape(word) + r"\b", word)
                 for form in ("\\frac", "\\dfrac", "\\tfrac", "\\sqrt", "\\binom", "\\left", "\\right",
                              "\\bar", "\\overline", "\\hat", "\\widehat", "\\vec", "\\dot", "\\ddot",

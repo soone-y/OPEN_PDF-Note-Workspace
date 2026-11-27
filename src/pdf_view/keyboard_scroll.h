@@ -15,11 +15,12 @@ struct Delta {
 class Motion {
 public:
     [[nodiscard]] static int KeyIndex(unsigned key) {
+        // h/j/k/l, matching the note and list panes. Index order: up, left, down, right.
         switch (key) {
-        case 'W': return 0;
-        case 'A': return 1;
-        case 'S': return 2;
-        case 'D': return 3;
+        case 'K': return 0;
+        case 'H': return 1;
+        case 'J': return 2;
+        case 'L': return 3;
         default: return -1;
         }
     }

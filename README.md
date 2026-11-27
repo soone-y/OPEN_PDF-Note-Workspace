@@ -89,11 +89,11 @@ Choose Full to convert Office documents such as `.docx` and `.pptx` to PDF insid
 
 Choose Lite if you already have PDFs or want a smaller package. It includes PDF viewing, annotation, and text-file editing without Office-to-PDF conversion.
 
-### 更新 / Updates
+### 更新とアンインストール / Updates and uninstalling
 
-アプリは、新しい版の確認、ダウンロード、インストールを自動では行いません。更新する場合は、利用者自身で [GitHub Releases](https://github.com/soone-y/OPEN_PDF-Note-Workspace/releases) を開き、新しい ZIP を入手して別の新規フォルダーへ展開します。起動を確認してから、必要に応じて新しい版へ移行してください。
+アプリは、新しい版の確認、ダウンロード、インストールを自動では行いません。更新する場合は、利用者自身で [GitHub Releases](https://github.com/soone-y/OPEN_PDF-Note-Workspace/releases) から新しい ZIP を入手します。展開したフォルダーにファイルを置いて使うだけの構成なので、更新はファイルの入れ替えで済みます。新しい版を別のフォルダーへ展開する方法と、EXE だけを置き換える方法があります。アンインストールは、保存されていない作業がないことと、ワークスペースが配布フォルダーの外にあることを確認してから、配布フォルダーを削除します。手順と削除後に残るものは、[日本語の導入・更新・アンインストール](docs/ja/Getting_Started.md#6-更新する)にあります。
 
-The application does not automatically check for, download, or install updates. To update, open [GitHub Releases](https://github.com/soone-y/OPEN_PDF-Note-Workspace/releases), download a new ZIP yourself, and extract it into a separate new folder. Confirm that it starts before moving to the new version as needed.
+The application does not automatically check for, download, or install updates. To update, download a new ZIP yourself from [GitHub Releases](https://github.com/soone-y/OPEN_PDF-Note-Workspace/releases). The application simply runs from the files in its extracted folder, so updating only means replacing files: extract the new version into a separate folder, or replace just the EXEs. To uninstall, confirm that no unsaved work remains and that your workspace is outside the distribution folder, then delete the distribution folder. The [English Setup, Updates, and Uninstall guide](docs/en/Getting_Started.md#6-update-the-application) gives the steps and lists what remains afterwards.
 
 ## 使い始める / Get started
 
@@ -159,9 +159,9 @@ This section describes the files in the Windows x64 packages. Keep the following
 
 These DLLs are loaded at startup even when no PDF is opened. The read-only viewer can start without the main EXE, but still needs its four DLLs listed above. This table identifies startup DLL dependencies; it is not a list of files to keep while deleting the rest of the package.
 
-Windows標準のDLLとUCRTはOS側から読み込みます。閲覧専用ソフトの書式付き文字表示には、Windowsの `Msftedit.dll`（RichEdit）を使います。OSのDLLを配布フォルダーへコピーする必要はありません。Markdown解析用のMD4Cは両EXEに組み込み済みで、別の `md4c.dll` は使いません。
+Windows標準のDLLとUCRTはOS側から読み込みます。閲覧専用ソフトの書式付き文字表示には、Windowsの `Msftedit.dll`（RichEdit）を使います。OSのDLLを配布フォルダーへコピーする必要はありません。Markdown解析用のMD4Cと数式組版用のMicroTeXは両EXEに組み込み済みで、別のDLLは使いません。
 
-Windows system DLLs and the Universal C Runtime (UCRT) are loaded from the OS. The viewer uses Windows `Msftedit.dll` (RichEdit) for formatted text display; do not copy system DLLs into the package. The MD4C Markdown parser is compiled into both EXEs, with no separate `md4c.dll`.
+Windows system DLLs and the Universal C Runtime (UCRT) are loaded from the OS. The viewer uses Windows `Msftedit.dll` (RichEdit) for formatted text display; do not copy system DLLs into the package. The MD4C Markdown parser and the MicroTeX math renderer are compiled into both EXEs, with no separate DLLs.
 
 ### 特定の機能で使う同梱ファイル / Files used by specific features
 
@@ -169,6 +169,7 @@ Windows system DLLs and the Universal C Runtime (UCRT) are loaded from the OS. T
 | --- | --- |
 | `lo/` | 通常版のメインソフトがOffice文書をPDFへ変換するときに使うLibreOffice一式。入口は `lo/program/soffice.com`。その1ファイルだけでなく、`lo/` 内のDLL・設定・共有データも必要です。Lite版には含めず、閲覧専用ソフトは使用しません。 / Full-edition Office conversion runtime, entered through `lo/program/soffice.com`. Keep the entire `lo/` tree, including its DLLs, configuration, and shared data. Not included in Lite or used by the read-only viewer. |
 | 通常版 / Full: `lo/image/Fonts/`、Lite: `libreoffice/image/Fonts/` | メインソフトが読み込む同梱フォント。通常版は変換runtimeと同じ `lo/` 配下、Lite版はフォント専用の `libreoffice/` 配下に置きます。 / Bundled fonts loaded by the main app. Full keeps them under `lo/` alongside the conversion runtime; Lite uses the font-only `libreoffice/` tree. |
+| `resources/math/xits/` | メインソフトと閲覧専用ソフトが数式の表示に使う XITS Math フォント（`XITSMath-Regular.clm2`）。通常版・Lite版の両方に含めます。 / XITS Math font (`XITSMath-Regular.clm2`) used by both the main app and the viewer to display formulas. Included in both Full and Lite. |
 | `docs/`、`LICENSE.md`、`licenses/` | 操作説明、プロジェクトと依存物のライセンス文書。起動用DLLではありませんが、説明やライセンスの閲覧・再配布のために配布物と一緒に保管します。 / User guides and project/component licenses. Not startup DLLs, but keep them with the package for reading the documentation, checking licenses, and redistribution. |
 
 ### 設定と作業ファイル / Configuration and working files
@@ -177,7 +178,7 @@ Windows system DLLs and the Universal C Runtime (UCRT) are loaded from the OS. T
 | --- | --- |
 | `pdf_note_workspace_setup.json` | EXEと同じフォルダーにある配布用設定。メインソフトで開く作業フォルダーなどの参照先を記録します。閲覧専用ソフトも共通の閲覧状態を読む場合に参照します。 / Distributed configuration beside the EXEs, recording the main app's working-folder location and other references. The viewer also reads it when restoring shared viewing state. |
 | `readonly_setup.json` | 閲覧専用ソフトの設定・閲覧状態を保存するファイル。保存の操作や設定に応じて、EXEと同じフォルダーへ作成・更新します。DLLとは異なり、配布時から必ず存在するファイルではありません。 / Viewer preferences and session state, created or updated beside the EXE according to save operations and settings. Unlike a startup DLL, it need not exist in a fresh package. |
-| `__pdf_note_workspace__/` | 利用者が選んだ作業フォルダー内の管理データ。編集中の一時保存やバックアップなどを置きます。アプリの動作中は、このフォルダーや中のファイルを削除しないでください。 / Managed data inside the selected working folder, including editing checkpoints and backups. Do not delete this folder or its contents while the app is running. |
+| `__pdf_note_workspace__/` | 利用者が選んだ作業フォルダー内の管理データ。編集中の一時保存やバックアップなどを置きます。アプリの動作中は、このフォルダーや中のファイルを削除しないでください。削除してよいフォルダーは中の `DELETE_OR_KEEP.txt` に書いています。 / Managed data inside the selected working folder, including editing checkpoints and backups. Do not delete this folder or its contents while the app is running. `DELETE_OR_KEEP.txt` inside it lists which folders may be deleted. |
 
 削除する場合は、この作業フォルダーを使うアプリをすべて終了してください。終了後に削除された管理フォルダーは、次回利用時に書き込み可能であれば再作成します。削除されたバックアップや未保存の変更を復元するには、復元用データが必要です。
 

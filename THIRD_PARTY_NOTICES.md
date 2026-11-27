@@ -9,11 +9,13 @@ release パッケージ利用時は、まず `docs/THIRD_PARTY_NOTICES.md` と `
 
 | コンポーネント | 用途 | 同梱形態 | ライセンス参照 |
 | --- | --- | --- | --- |
-| PDFium package `159.0.8152.0` | PDF の読み込み、描画、テキスト抽出、書き出し | `third_party/pdfium/` を同梱。release では `pdfium.dll` と対応ライセンス文書を配布 | `third_party/pdfium/LICENSE`, `third_party/pdfium/licenses/` |
+| PDFium package `160.0.8179.0` | PDF の読み込み、描画、テキスト抽出、書き出し | `third_party/pdfium/` を同梱。release では `pdfium.dll` と対応ライセンス文書を配布 | `third_party/pdfium/LICENSE`, `third_party/pdfium/licenses/` |
 | MD4C | Markdown 解析 | `third_party/md4c/` をリポジトリへ配置。導入時は `md4c.c`, `md4c.h`, `LICENSE.md` を参照 | `third_party/md4c/LICENSE.md` |
-| LibreOffice custom runtime `26.2.6.3` / 比較用 image `26.2.3.2` | 同梱フォントのアプリ内 private font 利用。docx/pptx から PDF への headless 変換 | `image/` は比較・フォント・license 参照用。通信機能を除いた custom runtime を標準 release へ配置する | runtime および `third_party/libreoffice/image/` の `license.txt`, `LICENSE.html`, `NOTICE` |
+| LibreOffice custom runtime `26.2.7.3` / 比較用 image `26.2.3.2` | 同梱フォントのアプリ内 private font 利用。docx/pptx から PDF への headless 変換 | `image/` は比較・フォント・license 参照用。通信機能を除いた custom runtime を標準 release へ配置する | runtime および `third_party/libreoffice/image/` の `license.txt`, `LICENSE.html`, `NOTICE` |
 | MinGW-w64 runtime DLLs | `pdf_note_workspace.exe` と `readonly_viewer.exe` 実行に必要な C++/GCC runtime | `libstdc++-6.dll`, `libgcc_s_seh-1.dll`, `libwinpthread-1.dll` を `out/bin/` と release へコピー | `third_party/mingw_runtime_licenses/mingw-w64/` |
 | zlib runtime `1.4` | DOCX staging copy の ZIP 展開/検証 | `third_party/zlib/` の固定成果物から `zlib1.dll` を `out/bin/` と release へコピー | `third_party/zlib/LICENSE` |
+| MicroTeX openmath `086f4eb` | ノートと PDF 数式注釈の数式組版・描画 | `third_party/microtex/` の固定 source を改変して両 EXE に静的に組み込み。release では `licenses/microtex/LICENSE.txt` を配布 | `third_party/microtex/LICENSE` |
+| XITS Math | 数式用フォント（CLM2 形式へ変換済みの輪郭・metrics） | `third_party/microtex/res/xits/XITSMath-Regular.clm2` を release の `resources/math/xits/` へ配置し、`licenses/xits/` に OFL・FONTLOG・README を配布 | `third_party/microtex/res/xits/OFL.txt`, `FONTLOG.txt`, `README.txt` |
 
 ## 2. PDFium
 
@@ -26,8 +28,8 @@ release パッケージ利用時は、まず `docs/THIRD_PARTY_NOTICES.md` と `
   - `third_party/pdfium/bin/pdfium.dll`
   - release では `pdfium.dll`
 - バージョン:
-  - `third_party/pdfium/VERSION`: `159.0.8152.0`
-  - `third_party/pdfium/PDFiumConfig.cmake`: `159.0.8152.0`
+  - `third_party/pdfium/VERSION`: `160.0.8179.0`
+  - `third_party/pdfium/PDFiumConfig.cmake`: `160.0.8179.0`
 
 ### 2.2 ライセンス文書
 
@@ -222,3 +224,9 @@ release パッケージ利用時は、まず `docs/THIRD_PARTY_NOTICES.md` と `
 ### 6.2 リポジトリ同梱素材
 
 本リポジトリのうち、別個の第三者ライセンス文書が付いていない同梱素材は、現行文書ではプロジェクト素材として `LICENSE.md` の対象に含めています。外部由来素材を追加する場合は、その時点で出所と条件を明記してください。
+
+## 7. MicroTeX と XITS Math
+
+数式組版には MicroTeX の openmath 系統、固定コミット `086f4eb740270b28bd0c61a0a359aea9300d61ae` を改変して組み込みます。MIT ライセンスの原文と著作権表示を `licenses/microtex/LICENSE.txt` に同梱します。変更内容と出典はソースの `third_party/microtex/README.md` に記録します。
+
+数式フォントは XITS Math のアウトラインとメトリクスを含む `resources/math/xits/XITSMath-Regular.clm2` です。SIL Open Font License 1.1 の原文、著作権表示、予約名、FONTLOG、README を `licenses/xits/` に保持します。フォント単独での販売を行わず、フォントの派生物には OFL を維持します。アプリ本体のライセンスは変更されません。Windows の日本語フォントは端末上のものを利用し、フォントファイルを再配布しません。

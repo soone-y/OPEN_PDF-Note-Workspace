@@ -422,16 +422,16 @@ static void InspectSettingsAssetEntries(SettingsAssetsCtx* ctx, const std::files
     // Capacity categories follow the existing presence rows.
     const std::vector<SettingsAssetEntry> usageRows = {
         { localization::Text(L"settings.assets.usage_logs"), resource.empty() ? std::filesystem::path{} : resource / L"__log__", false, false, true },
-        { localization::Text(L"settings.assets.usage_temporary"), resource.empty() ? std::filesystem::path{} : resource / L"__tmp__", false, false, true },
-        { localization::Text(L"settings.assets.usage_recovery"), resource.empty() ? std::filesystem::path{} : resource / L"__escape__", false, false, true },
-        { localization::Text(L"settings.assets.usage_backups"), resource.empty() ? std::filesystem::path{} : resource / L"__escape__" / L"backup", false, false, true },
-        { localization::Text(L"settings.assets.usage_operations"), resource.empty() ? std::filesystem::path{} : resource / L"__escape__" / L"operation_transactions", false, false, true },
+        { localization::Text(L"settings.assets.usage_temporary"), workspace_layout::Tmp(root), false, false, true },
+        { localization::Text(L"settings.assets.usage_unsaved"), workspace_layout::Unsaved(root), false, false, true },
+        { localization::Text(L"settings.assets.usage_backups"), workspace_layout::Backup(root), false, false, true },
+        { localization::Text(L"settings.assets.usage_operations"), workspace_layout::Operations(root), false, false, true },
     };
     ctx->entries.insert(ctx->entries.end(), usageRows.begin(), usageRows.end());
     if (!resource.empty()) {
         const std::array<std::filesystem::path, artifact_usage::kAreaCount> usagePaths = {resource,
-            resource / L"__log__", resource / L"__tmp__", resource / L"__escape__",
-            resource / L"__escape__" / L"backup", resource / L"__escape__" / L"operation_transactions",
+            resource / L"__log__", workspace_layout::Tmp(root), workspace_layout::Unsaved(root),
+            workspace_layout::Backup(root), workspace_layout::Operations(root),
             resource / L"__memo__" / L"backups"};
         for (auto& entry : ctx->entries) for (size_t i = 0; i < usagePaths.size(); ++i)
             if (SameSettingsAssetPath(entry.path, usagePaths[i])) entry.usageArea = static_cast<int>(i);

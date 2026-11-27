@@ -887,10 +887,10 @@ static bool RunUiAutomationPdfKeyboardScrollScenario(HWND owner, std::wstring* o
     using pdf_keyboard_scroll::Motion;
     // Fixed time inputs check speed independently of the machine's timer cadence.
     Motion straight, diagonal, partitioned;
-    straight.SetKey('S', true);
-    diagonal.SetKey('S', true);
-    diagonal.SetKey('D', true);
-    partitioned.SetKey('S', true);
+    straight.SetKey('J', true);
+    diagonal.SetKey('J', true);
+    diagonal.SetKey('L', true);
+    partitioned.SetKey('J', true);
     const auto one = straight.Advance(0.032);
     const auto two = diagonal.Advance(0.032);
     const auto part1 = partitioned.Advance(0.016);
@@ -898,15 +898,15 @@ static bool RunUiAutomationPdfKeyboardScrollScenario(HWND owner, std::wstring* o
     bool valid = one.y > 0.0 && one.y < 600.0 * 0.032 && one.x == 0.0 &&
         std::abs(std::hypot(two.x, two.y) - one.y) < 0.00001 &&
         std::abs(part1.y + part2.y - one.y) < 0.00001;
-    straight.SetKey('S', false);
+    straight.SetKey('J', false);
     const auto released = straight.Advance(0.016);
     valid = valid && !straight.HasKeys() && released.x == 0.0 && released.y == 0.0;
-    diagonal.SetKey('A', true);
-    diagonal.SetKey('W', true);
+    diagonal.SetKey('H', true);
+    diagonal.SetKey('K', true);
     const auto opposite = diagonal.Advance(0.016);
     valid = valid && opposite.x == 0.0 && opposite.y == 0.0;
     partitioned.Reset();
-    partitioned.SetKey('D', true);
+    partitioned.SetKey('L', true);
     const auto delayed = partitioned.Advance(10.0);
     valid = valid && delayed.x > 0.0 && delayed.x <= 600.0 * 0.05 && delayed.y == 0.0;
     if (!valid || !g_hPdfView || g_pdf.pages.empty() || g_pdf.editingText) {
@@ -926,8 +926,10 @@ static bool RunUiAutomationPdfKeyboardScrollScenario(HWND owner, std::wstring* o
         double scale, x, y;
         HWND focus;
         std::array<BYTE, 256> keys;
+        bool singleKeys;
         ~RestoreView() {
-            for (unsigned key : {'W', 'A', 'S', 'D'}) SendMessageW(g_hPdfView, WM_KEYUP, key, 0);
+            for (unsigned key : {'K', 'H', 'J', 'L'}) SendMessageW(g_hPdfView, WM_KEYUP, key, 0);
+            g_noteVimModeEnabled = singleKeys;
             g_pdf.editingText = false;
             SetKeyboardState(keys.data());
             g_config.pdfSinglePageMode = single;
@@ -937,7 +939,8 @@ static bool RunUiAutomationPdfKeyboardScrollScenario(HWND owner, std::wstring* o
             g_pdf.scrollY = y;
             if (focus && IsWindow(focus)) SetFocus(focus);
         }
-    } restore{savedFlow, savedSingle, savedScale, savedX, savedY, savedFocus, savedKeys};
+    } restore{savedFlow, savedSingle, savedScale, savedX, savedY, savedFocus, savedKeys, g_noteVimModeEnabled};
+    g_noteVimModeEnabled = true;
     auto keys = savedKeys;
     keys[VK_CONTROL] = keys[VK_LCONTROL] = keys[VK_RCONTROL] = 0;
     keys[VK_MENU] = keys[VK_LMENU] = keys[VK_RMENU] = 0;
@@ -952,7 +955,7 @@ static bool RunUiAutomationPdfKeyboardScrollScenario(HWND owner, std::wstring* o
         Sleep(20);
         SendMessageW(g_hPdfView, WM_TIMER, kPdfKeyboardScrollTimerId, 0);
     };
-    for (unsigned key : {'W', 'A', 'S', 'D'}) {
+    for (unsigned key : {'K', 'H', 'J', 'L'}) {
         g_pdf.scrollX = centerX;
         g_pdf.scrollY = centerY;
         SendMessageW(g_hPdfView, WM_KEYDOWN, key, 1);
@@ -960,8 +963,8 @@ static bool RunUiAutomationPdfKeyboardScrollScenario(HWND owner, std::wstring* o
         valid = valid && g_pdf.scrollX == centerX && g_pdf.scrollY == centerY;
         tick();
         const double dx = g_pdf.scrollX - centerX, dy = g_pdf.scrollY - centerY;
-        const bool correctDirection = key == 'W' ? dy < 0.0 && dx == 0.0 :
-            key == 'S' ? dy > 0.0 && dx == 0.0 : key == 'A' ? dx < 0.0 && dy == 0.0 : dx > 0.0 && dy == 0.0;
+        const bool correctDirection = key == 'K' ? dy < 0.0 && dx == 0.0 :
+            key == 'J' ? dy > 0.0 && dx == 0.0 : key == 'H' ? dx < 0.0 && dy == 0.0 : dx > 0.0 && dy == 0.0;
         valid = valid && correctDirection && std::hypot(dx, dy) < kScrollStepPx;
         SendMessageW(g_hPdfView, WM_KEYUP, key, 0xC0000001);
         tick();
@@ -971,32 +974,32 @@ static bool RunUiAutomationPdfKeyboardScrollScenario(HWND owner, std::wstring* o
     g_pdf.scrollY = centerY;
     SendMessageW(g_hPdfView, WM_KEYDOWN, VK_DOWN, 1);
     valid = valid && std::abs(g_pdf.scrollY - centerY - kScrollStepPx) < 0.001;
-    SendMessageW(g_hPdfView, WM_KEYDOWN, 'S', 1);
+    SendMessageW(g_hPdfView, WM_KEYDOWN, 'J', 1);
     SetFocus(owner);
     const double focusX = g_pdf.scrollX, focusY = g_pdf.scrollY;
     tick();
     SetFocus(g_hPdfView);
-    SendMessageW(g_hPdfView, WM_KEYDOWN, 'S', 0x40000001);
+    SendMessageW(g_hPdfView, WM_KEYDOWN, 'J', 0x40000001);
     tick();
     valid = valid && g_pdf.scrollX == focusX && g_pdf.scrollY == focusY;
-    SendMessageW(g_hPdfView, WM_KEYUP, 'S', 0);
+    SendMessageW(g_hPdfView, WM_KEYUP, 'J', 0);
 
     // Existing editing and modifier routes must never arm the motion timer.
-    SendMessageW(g_hPdfView, WM_KEYDOWN, 'S', 1);
+    SendMessageW(g_hPdfView, WM_KEYDOWN, 'J', 1);
     g_pdf.editingText = true;
-    SendMessageW(g_hPdfView, WM_KEYDOWN, 'D', 1);
+    SendMessageW(g_hPdfView, WM_KEYDOWN, 'L', 1);
     tick();
-    SendMessageW(g_hPdfView, WM_KEYUP, 'D', 0);
+    SendMessageW(g_hPdfView, WM_KEYUP, 'L', 0);
     g_pdf.editingText = false;
     keys[VK_CONTROL] = 0x80;
     if (!SetKeyboardState(keys.data())) return false;
-    SendMessageW(g_hPdfView, WM_KEYDOWN, 'D', 1);
+    SendMessageW(g_hPdfView, WM_KEYDOWN, 'L', 1);
     tick();
     valid = valid && g_pdf.scrollX == focusX && g_pdf.scrollY == focusY;
     keys[VK_CONTROL] = 0;
     keys[VK_MENU] = 0x80;
     if (!SetKeyboardState(keys.data())) return false;
-    SendMessageW(g_hPdfView, WM_SYSKEYDOWN, 'D', 1);
+    SendMessageW(g_hPdfView, WM_SYSKEYDOWN, 'L', 1);
     tick();
     valid = valid && g_pdf.scrollX == focusX && g_pdf.scrollY == focusY;
     keys[VK_MENU] = 0;
@@ -1006,14 +1009,41 @@ static bool RunUiAutomationPdfKeyboardScrollScenario(HWND owner, std::wstring* o
     ApplyPdfDisplayMode(g_hPdfView);
     JumpToPage(g_hPdfView, 0);
     SendMessageW(g_hPdfView, WM_VSCROLL, SB_BOTTOM, 0);
-    SendMessageW(g_hPdfView, WM_KEYDOWN, 'S', 1);
+    SendMessageW(g_hPdfView, WM_KEYDOWN, 'J', 1);
     tick();
     valid = valid && g_pdf.singlePageIndex == 0;
     for (int frame = 0; frame < 20 && g_pdf.singlePageIndex == 0; ++frame) tick();
     valid = valid && (g_pdf.pageCount == 1 || g_pdf.singlePageIndex == 1);
-    SendMessageW(g_hPdfView, WM_KEYUP, 'S', 0);
+    SendMessageW(g_hPdfView, WM_KEYUP, 'J', 0);
+    // Operation-state characters: Shift+J/K turn pages, gg/G jump to the ends,
+    // and the plain j character adds no second fixed step after held scrolling.
+    if (g_pdf.pageCount >= 2) {
+        JumpToPage(g_hPdfView, 0);
+        SendMessageW(g_hPdfView, WM_CHAR, L'J', 1);
+        valid = valid && PageAtCurrentView() == 1;
+        SendMessageW(g_hPdfView, WM_CHAR, L'K', 1);
+        valid = valid && PageAtCurrentView() == 0;
+        SendMessageW(g_hPdfView, WM_CHAR, L'G', 1);
+        valid = valid && PageAtCurrentView() == g_pdf.pageCount - 1;
+        SendMessageW(g_hPdfView, WM_CHAR, L'g', 1);
+        valid = valid && PageAtCurrentView() == g_pdf.pageCount - 1;
+        SendMessageW(g_hPdfView, WM_CHAR, L'g', 1);
+        valid = valid && PageAtCurrentView() == 0;
+    }
+    const double charX = g_pdf.scrollX, charY = g_pdf.scrollY;
+    SendMessageW(g_hPdfView, WM_CHAR, L'j', 1);
+    valid = valid && g_pdf.scrollX == charX && g_pdf.scrollY == charY;
+    // With single-key controls off, PDF letters neither scroll nor turn pages.
+    g_noteVimModeEnabled = false;
+    const int offPage = PageAtCurrentView();
+    SendMessageW(g_hPdfView, WM_KEYDOWN, 'J', 1);
+    tick();
+    SendMessageW(g_hPdfView, WM_KEYUP, 'J', 0);
+    SendMessageW(g_hPdfView, WM_CHAR, L'G', 1);
+    valid = valid && g_pdf.scrollX == charX && g_pdf.scrollY == charY && PageAtCurrentView() == offPage;
+    g_noteVimModeEnabled = true;
     AppendUiAutomationTrace(L"pdf_keyboard_scroll:directions_repeat_release_focus_edit_ctrl valid=" + std::to_wstring(valid));
-    if (!valid && outError) *outError = L"PDF WASD movement/release/focus/edit/modifier or arrow regression failed.";
+    if (!valid && outError) *outError = L"PDF h/j/k/l movement, page keys, release/focus/edit/modifier or arrow regression failed.";
     return valid;
 }
 
@@ -1470,8 +1500,7 @@ static bool RunUiAutomationOutputExportScenario(HWND owner, std::wstring* outErr
         return false;
     }
 
-    const std::filesystem::path outputDir = std::filesystem::path(g_workspaceRoot) /
-        L"__pdf_note_workspace__" / L"__tmp__" / L"ui_automation_output";
+    const std::filesystem::path outputDir = workspace_layout::Test(std::filesystem::path(g_workspaceRoot)) / L"ui_automation_output";
     std::error_code ec;
     std::filesystem::create_directories(outputDir, ec);
     if (ec) {
@@ -2429,6 +2458,7 @@ static bool RunUiAutomationDeferredNoteInitialInputScenario(HWND owner, std::wst
     const bool previousRenderEnabled = g_noteRenderEnabled;
     const bool previousRawOnly = g_noteRawOnly;
     const bool previousNoteNormalMode = g_noteNormalMode;
+    const bool previousSingleKeys = g_noteVimModeEnabled;
 
     const std::wstring previousNewNoteExtension = g_config.newNoteExtension;
 
@@ -2437,6 +2467,7 @@ static bool RunUiAutomationDeferredNoteInitialInputScenario(HWND owner, std::wst
         g_config.newNoteExtension = previousNewNoteExtension;
         g_noteRenderEnabled = previousRenderEnabled;
         g_noteRawOnly = previousRawOnly;
+        g_noteVimModeEnabled = previousSingleKeys;
         g_noteNormalMode = previousNoteNormalMode;
         if (!previousNotePath.empty()) {
             LoadNoteFile(owner, previousNotePath);
@@ -2448,6 +2479,11 @@ static bool RunUiAutomationDeferredNoteInitialInputScenario(HWND owner, std::wst
         }
         RefreshMainWindowUiState(owner);
     };
+
+    // The typed 'x' below is text input; with single-key controls on, a
+    // Normal-mode 'x' would delete instead of editing the note.
+    g_noteVimModeEnabled = false;
+    g_noteNormalMode = false;
 
     // Exercise the real create/delete/save boundaries with the active editor's
     // source protection held, including the user's edit-then-clear sequence.
@@ -2815,7 +2851,7 @@ static bool RunUiAutomationPdfTextboxReeditFontScenario(HWND owner, std::wstring
     AppendUiAutomationTrace(trace);
     if (!linePlacementValid) return false;
     trace.clear();
-    const auto output = std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__" / L"__tmp__" / L"rotation_probe";
+    const auto output = workspace_layout::Test(std::filesystem::path(g_workspaceRoot)) / L"rotation_probe";
     const bool rotationValid = RunPdfPageRotationProbe(owner, output.wstring(), &trace, outError);
     AppendUiAutomationTrace(trace);
     if (!rotationValid) return false;
@@ -3017,25 +3053,19 @@ static bool RunUiAutomationPdfTextboxEscCommitScenario(HWND owner, std::wstring*
     g_annotsDirty = false;
     g_annotsNeedsIntegrate = false;
 
+    const bool noteNormalBeforeEsc = g_noteNormalMode;
     SendMessageW(g_hPdfView, WM_KEYDOWN, VK_ESCAPE, 0);
     if (g_pdf.editingText) {
         if (outError) *outError = L"Esc did not end PDF textbox editing.";
         return false;
     }
-    // Esc posts the focus transition. Complete and verify it here, just as
-    // the message loop does before a user can start the next operation.
+    // Esc returns to the PDF pane's operation state: the PDF keeps the focus
+    // and the note mode is untouched, with no queued pane transition.
     MSG focusTransition{};
-    if (!PeekMessageW(&focusTransition, owner, kMsgEnterNoteNormalMode,
-                      kMsgEnterNoteNormalMode, PM_REMOVE)) {
-        if (outError) *outError = L"Esc did not queue the note focus transition.";
-        return false;
-    }
-    DispatchMessageW(&focusTransition);
-    const HWND expectedFocus = g_noteVimModeEnabled ? g_hNoteEdit : owner;
-    if (g_noteNormalMode != g_noteVimModeEnabled || GetFocus() != expectedFocus ||
+    if (GetFocus() != g_hPdfView || g_noteNormalMode != noteNormalBeforeEsc ||
         PeekMessageW(&focusTransition, owner, kMsgEnterNoteNormalMode,
                      kMsgEnterNoteNormalMode, PM_NOREMOVE)) {
-        if (outError) *outError = L"Esc did not complete exactly one note focus transition.";
+        if (outError) *outError = L"Esc did not keep the PDF pane after textbox editing.";
         return false;
     }
 
@@ -8063,7 +8093,7 @@ static bool UiAutomationSettingsBytesEqual(const std::map<std::wstring, std::opt
 static bool SettingsImportBackupExistsForAutomation() {
     if (g_workspaceRoot.empty()) return false;
     const std::filesystem::path escapeDir =
-        std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__" / L"__escape__";
+        workspace_layout::Backup(std::filesystem::path(g_workspaceRoot));
     std::error_code ec;
     if (!std::filesystem::is_directory(escapeDir, ec) || ec) return false;
     for (const auto& entry : std::filesystem::directory_iterator(escapeDir, ec)) {
@@ -8141,13 +8171,13 @@ static bool RunUiAutomationSettingsBundleScenario(HWND owner, std::wstring* outE
 
     const std::filesystem::path root(g_workspaceRoot);
     const std::filesystem::path settings = root / L"__pdf_note_workspace__" / L"__settings__";
-    const std::filesystem::path bundle = root / L"__pdf_note_workspace__" / L"__tmp__" / L"settings_bundle_test.pnssettings";
-    const std::filesystem::path malformed = root / L"__pdf_note_workspace__" / L"__tmp__" / L"settings_bundle_bad.pnssettings";
-    const std::filesystem::path duplicate = root / L"__pdf_note_workspace__" / L"__tmp__" / L"settings_bundle_duplicate.pnssettings";
-    const std::filesystem::path unknown = root / L"__pdf_note_workspace__" / L"__tmp__" / L"settings_bundle_unknown.pnssettings";
-    const std::filesystem::path oversized = root / L"__pdf_note_workspace__" / L"__tmp__" / L"settings_bundle_oversized.pnssettings";
-    const std::filesystem::path invalidStock = root / L"__pdf_note_workspace__" / L"__tmp__" / L"settings_bundle_invalid_stock.pnssettings";
-    const std::filesystem::path invalidPaletteSets = root / L"__pdf_note_workspace__" / L"__tmp__" / L"settings_bundle_invalid_palette_sets.pnssettings";
+    const std::filesystem::path bundle = workspace_layout::Tmp(root) / L"settings_bundle_test.pnssettings";
+    const std::filesystem::path malformed = workspace_layout::Tmp(root) / L"settings_bundle_bad.pnssettings";
+    const std::filesystem::path duplicate = workspace_layout::Tmp(root) / L"settings_bundle_duplicate.pnssettings";
+    const std::filesystem::path unknown = workspace_layout::Tmp(root) / L"settings_bundle_unknown.pnssettings";
+    const std::filesystem::path oversized = workspace_layout::Tmp(root) / L"settings_bundle_oversized.pnssettings";
+    const std::filesystem::path invalidStock = workspace_layout::Tmp(root) / L"settings_bundle_invalid_stock.pnssettings";
+    const std::filesystem::path invalidPaletteSets = workspace_layout::Tmp(root) / L"settings_bundle_invalid_palette_sets.pnssettings";
 
     g_config.language = L"en";
     g_config.pointerOffsetX = 17;
@@ -8226,7 +8256,7 @@ static bool RunUiAutomationSettingsBundleScenario(HWND owner, std::wstring* outE
                 mismatch += L" presence:" + kv.first;
             } else if (kv.second && it->second && *kv.second != *it->second) {
                 mismatch += L" bytes:" + kv.first;
-                WriteUiAutomationTextFile(root / L"__pdf_note_workspace__" / L"__tmp__" / (kv.first + L".actual_after_import"),
+                WriteUiAutomationTextFile(workspace_layout::Tmp(root) / (kv.first + L".actual_after_import"),
                                           *it->second,
                                           nullptr);
             }
@@ -8250,7 +8280,7 @@ static bool RunUiAutomationSettingsBundleScenario(HWND owner, std::wstring* outE
         legacyBytes += WideToUTF8(kv.first) + "\t" + std::to_string(kv.second->size()) + "\n" + *kv.second + "\n";
     }
     legacyBytes += "END\n";
-    const auto legacy = root / L"__pdf_note_workspace__" / L"__tmp__" / L"settings_bundle_legacy_without_palette_sets.pnssettings";
+    const auto legacy = workspace_layout::Tmp(root) / L"settings_bundle_legacy_without_palette_sets.pnssettings";
     if (!WriteUiAutomationTextFile(legacy, legacyBytes, outError) || !ImportSettingsPresetFromFile(legacy, &err) ||
         !CaptureUiAutomationSettingsBytes(&importedBytes) || !UiAutomationSettingsBytesEqual(exportedBytes, importedBytes)) {
         restoreConfig();
@@ -8410,7 +8440,7 @@ static bool RunUiAutomationSettingsBundleScenario(HWND owner, std::wstring* outE
         const bool afterPalette = wcscmp(point, L"settings_import_after_palette_presets_write") == 0;
         std::string backupBytes, backupManifest;
         const bool exactBackup = !recoveryBackup.empty() && recoveryBackup != previousFaultBackup &&
-            recoveryBackup.parent_path() == root / L"__pdf_note_workspace__" / L"__escape__" &&
+            recoveryBackup.parent_path() == workspace_layout::Backup(root) &&
             ReadUiAutomationFileBytes(recoveryBackup / L"palette_presets.json", &backupBytes) && backupBytes == mutatedSetsJson &&
             ReadUiAutomationFileBytes(recoveryBackup / L"manifest.txt", &backupManifest) &&
             backupManifest.find("palette_presets.json\t") != std::string::npos;
@@ -8475,7 +8505,7 @@ static bool RunUiAutomationWorkspaceConfigRecoveryScenario(std::wstring* outErro
     }
     const std::filesystem::path root(g_workspaceRoot);
     const std::filesystem::path configPath = root / L"workspace.json";
-    const std::filesystem::path escapeDir = root / L"__pdf_note_workspace__" / L"__escape__";
+    const std::filesystem::path escapeDir = workspace_layout::Failed(root);
     std::error_code ec;
     if (std::filesystem::exists(configPath, ec) || ec) {
         if (outError) *outError = L"Corrupt workspace.json was not removed from the active workspace root.";
@@ -8483,7 +8513,7 @@ static bool RunUiAutomationWorkspaceConfigRecoveryScenario(std::wstring* outErro
     }
     ec.clear();
     if (!std::filesystem::is_directory(escapeDir, ec) || ec) {
-        if (outError) *outError = L"Corrupt workspace.json was not quarantined into __escape__.";
+        if (outError) *outError = L"Corrupt workspace.json was not quarantined into __failed__.";
         return false;
     }
     for (const auto& entry : std::filesystem::directory_iterator(escapeDir, ec)) {
@@ -8541,6 +8571,11 @@ static bool RunUiAutomationToolbarChildFontScenario(std::wstring* outError) {
 static bool RunUiAutomationScenarios(HWND owner, std::wstring* outError) {
     ClearFaultInjectionPointForAutomation();
     AppendUiAutomationTrace(L"automation:start");
+    // Scenarios type note text with WM_CHAR, written for standard input.
+    // New workspaces default to single-key controls, so pin the baseline;
+    // scenarios that exercise single keys enable them and restore this state.
+    g_noteVimModeEnabled = false;
+    g_noteNormalMode = false;
     std::wstring configOnlyValue;
     const bool configOnly = ReadMainEnvVar(L"PDF_NOTE_SMALL_UI_AUTOMATION_CONFIG_ONLY", &configOnlyValue) &&
                             (configOnlyValue == L"1" || configOnlyValue == L"true");

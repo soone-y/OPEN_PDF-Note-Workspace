@@ -60,6 +60,8 @@ try {
         $binaryDir = Split-Path -Parent $binarySource
         $ownedAppName = 'pdf_note_memo_' + [IO.Path]::GetFileName($fixture) + '.exe'
         Copy-Item -LiteralPath $binarySource -Destination (Join-Path $appDir $ownedAppName)
+        . (Join-Path $repoRoot "scripts/build/sync_microtex_assets.ps1")
+        Sync-MicrotexAssets -SourceRoot $repoRoot -DestinationRoot $appDir | Out-Null
         Get-ChildItem -LiteralPath $binaryDir -Filter "*.dll" -File | ForEach-Object {
             Copy-Item -LiteralPath $_.FullName -Destination $appDir
         }

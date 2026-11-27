@@ -43,7 +43,7 @@ Structured display can scroll past the end. Typing, inserting a newline, or movi
 
 ## CLRO syntax settings
 
-**Settings → Note → CLRO syntax** groups ASCII-only tags, implicit list continuation, and quote continuation without `>`. All three default to OFF. The lower-right status assist pane uses the same labels and lets you toggle each setting by clicking. These preferences apply to display, search, and export for open and subsequently opened `.clro` notes.
+**Settings → Note → CLRO syntax** groups ASCII-only tags, implicit list continuation, list text alignment, and quote continuation without `>`. All four default to OFF. The lower-right status assist pane uses the same labels and lets you toggle each setting by clicking. The syntax preferences apply to display, search, and export for open and subsequently opened `.clro` notes; alignment affects display only.
 
 ## Fullwidth punctuation (.clro)
 
@@ -116,6 +116,8 @@ In `.clro`, lists apply by default to lines with an explicit `-`, `*`, `+`, or n
 In `.clro`, quote continuation without `>` defaults to OFF. Enable “Allow quote continuation without >” in Note settings to accept unmarked paragraph continuation lines. You can also toggle it in the lower-right status assist. These continuation settings apply to `.clro` display, search, and export. `.md` uses Markdown quote and list continuation rules.
 
 Use `-`, `*`, or `+` for bullets and `1.` or `1)` for numbering, followed by a space. Indent nested content to the parent's content position. Set task status in the source with `[ ]`, `[x]`, or `[X]`. Quotes may contain headings and lists.
+
+**Align following lines with list text** defaults to OFF. When ON, following lines without markers or leading whitespace align visually with the preceding list text. A blank line, heading, code block, table, display math, or another container ends alignment. Explicit spaces, tabs and indentation tags take precedence. Source text, saved content and exported list structure remain unchanged. This option and **Allow implicit list continuation** are mutually exclusive: enabling either disables the other. With both OFF, list indentation does not carry to following lines. Change them in **Settings → Note → CLRO syntax** or the status assist pane.
 
 ### Inline formatting `M`
 
@@ -328,11 +330,11 @@ The math tag, attribute names, and display values ignore case. Unclosed or neste
 | Sum, product, integral, limit | `\sum_{i=1}^{n}i`, `\prod_i x_i`, `\int_0^1 x\,dx`, `\oint f`, `\lim_{x\to 0}f(x)` |
 | Script placement | `\limits`, `\nolimits` |
 | Text groups | `\text{description}`, `\operatorname{rank}` |
-| Spacing | `\,`, `\;`, `\:`, `\quad`, `\qquad` (simplified spaces) |
+| Spacing | `\,`, `\;`, `\:`, `\quad`, `\qquad` |
 
-`\!` adds no space. `\displaystyle`, `\textstyle`, `\mathrm`, `\mathbf`, `\mathit`, `\mathsf`, `\mathtt`, `\mathbb`, `\mathcal`, and `\textrm` are accepted without guaranteeing a TeX system's fonts or typesetting.
+Math uses MicroTeX and XITS Math. `\!` is a negative thin space. `\displaystyle`, `\textstyle`, `\mathrm`, `\mathbf`, `\mathit`, `\mathsf`, `\mathtt`, `\mathbb`, `\mathcal`, and `\textrm` are supported. Complete TeX documents and additional packages are not executed. `\newcommand`, `\renewcommand`, and custom environment definitions are unsupported. Input that cannot be typeset remains editable and savable as source. The former superscript/subscript proportion setting is retired; the renderer controls script placement.
 
-For matrices, cases, and aligned equations, separate columns with `&` and rows with `\\`. Supported environments are `matrix`, `pmatrix`, `bmatrix`, `Bmatrix`, `vmatrix`, `Vmatrix`, `cases`, `aligned`, and `align`.
+For matrices, cases, and aligned equations, separate columns with `&` and rows with `\\`. Use `\\[8pt]` to add row spacing. Supported environments are `matrix`, `pmatrix`, `bmatrix`, `Bmatrix`, `vmatrix`, `Vmatrix`, `cases`, `aligned`, and `align`.
 
 ```text
 $$

@@ -73,6 +73,9 @@
 #include "note/note_workspace_service.h"
 #include "file_output/note_snapshot.h"
 #include "math/math_render.h"
+#include "note/note_math_render_cache.h"
+#include "math/math_source.h"
+#include "note_view/note_math_preview.h"
 #include "app/main_close_policy.h"
 #include "core/setup_json_policy.h"
 #include "core/cache_dir_policy.h"
@@ -444,19 +447,13 @@ bool HasError(const note::MathInputAnalysis& analysis, std::wstring_view code) {
     return false;
 }
 
-bool ContainsMathNodeType(const mathrender::Node* node, mathrender::Node::Type type) {
-    if (!node) return false;
-    if (node->type == type) return true;
-    if (ContainsMathNodeType(node->a.get(), type)) return true;
-    if (ContainsMathNodeType(node->b.get(), type)) return true;
-    if (ContainsMathNodeType(node->super.get(), type)) return true;
-    if (ContainsMathNodeType(node->sub.get(), type)) return true;
-    for (const auto& row : node->rows) {
-        for (const auto& cell : row) {
-            if (ContainsMathNodeType(cell.get(), type)) return true;
-        }
-    }
-    return false;
+mathrender::Layout MeasureTestMath(const mathrender::Formula* formula) {
+    if (!formula) return {};
+    HDC dc = CreateCompatibleDC(nullptr);
+    if (!dc) return {};
+    const auto layout = mathrender::Measure(*formula, dc, 24, mathrender::RenderStyle::Display);
+    DeleteDC(dc);
+    return layout;
 }
 
 note::NoteDocument ParseMd4c(std::wstring text) {
@@ -4540,6 +4537,7 @@ int main() {
         gdiInput.owner_input.editor_text_core_current = true;
         gdiInput.owner_input.visible_lines = {{0}, {gdiWrappedCore.logical_line_count()}};
         note::NoteRenderFinalGdiMeasurementProvider gdiProvider(gdiMeasurementDc);
+        Expect(note_list_continuation_test::RunAlignment(gdiMeasurementDc), "CLRO list alignment has exact geometry, exclusive policies and preserved source/history");
         Expect(note_list_marker_test::Run(gdiMeasurementDc), "ordered list markers fit the measured gutter and preserve body spacing across fonts, sizes, nesting and wrapping");
         Expect(note_empty_container_test::Run(gdiMeasurementDc, UTF8ToWide), "empty list/quote markers retain structured frames with only the editing row raw, including the distribution sample");
         Expect(note_markdown_shortcut_test::Run(), "Ctrl+B toggles parsed asterisk bold, unifies mixed selections and preserves single-step history");
@@ -5253,6 +5251,46 @@ int main() {
                 note::NotePresentationLineOwner::CommittedPlacement &&
             gdiTablePublication->owner_plan()->owner_ranges().front().lines.first.value == 0 &&
             gdiTablePublication->owner_plan()->owner_ranges().front().lines.last_exclusive.value == 3;
+        const bool gdiTableMathRowsAvoidBorders = [&]() {
+            // A row whose height comes from inline math must not align its
+            // text or formula onto the row's one-pixel top/bottom borders.
+            for (const auto alignment : {note::NoteRenderInlineMathVerticalAlignment::Top,
+                    note::NoteRenderInlineMathVerticalAlignment::Center,
+                    note::NoteRenderInlineMathVerticalAlignment::Bottom}) {
+                note::NoteTextCore core;
+                core.Reset(note::NoteId{1002}, note::NoteMetadata{L"gdi-table-math.md", L""},
+                    L"| use | source | shown |\n| --- | --- | --- |\n"
+                    L"| sub | `x_i^2` | $\\frac{a}{b}$ |\n| plain | `y_j` | text |", 426, 3);
+                auto input = gdiInput;
+                input.layout_key = {640, 96, 96, 7, 4, 8, true};
+                input.owner_input.visible_lines = {{0}, {core.logical_line_count()}};
+                note::NoteRenderFinalGdiMeasurementOptions options;
+                options.inline_math_vertical_alignment = alignment;
+                note::NoteRenderFinalGdiMeasurementProvider provider(gdiMeasurementDc, options);
+                std::shared_ptr<const note::NoteRenderFinalPublication> publication;
+                note::NoteRenderAtomicGroupPlacement group;
+                if (note::NoteRenderFinalTransaction::BuildComplete(core, input, provider, &publication) !=
+                        note::NoteRenderFinalCompleteBuildResult::Built ||
+                    !publication->placement()->ResolveAtomicGroupContaining({2}, &group) ||
+                    group.table_rows.size() != 4) return false;
+                for (const size_t line : {size_t{2}, size_t{3}}) {
+                    const uint32_t rowHeight = group.table_rows[line].height_px;
+                    note::NoteRenderLinePlacement placement;
+                    if (rowHeight < 3 || !publication->placement()->ResolveLine({line}, &placement)) return false;
+                    size_t visible = 0;
+                    for (const auto& run : placement.runs) {
+                        for (const auto& fragment : run.fragments) {
+                            if (fragment.width_px <= 0) continue;
+                            ++visible;
+                            if (fragment.top_offset_px < 1 ||
+                                fragment.top_offset_px + fragment.height_px > rowHeight - 1) return false;
+                        }
+                    }
+                    if (visible < 3) return false;
+                }
+            }
+            return true;
+        }();
         note::NoteTextCore gdiContainerCore;
         const std::wstring containerSource =
             L"before\n::: note\nplain body\n::: inner\n# Heading\n`chip` $x$\n:::\n"
@@ -6939,6 +6977,8 @@ int main() {
                "the GDI provider measures one explicit transient raw line without a temporary whole-document TextCore");
         Expect(gdiTableAllCommitted,
                "the structured table publication gives every table row one committed owner");
+        Expect(gdiTableMathRowsAvoidBorders,
+               "table cells in inline-math rows keep text and formulas inside the row borders for every alignment");
         Expect(gdiPainterClipKind != ERROR && gdiPainterClip.bottom > gdiPainterClip.top,
                "the GDI painter receives a nonempty memory-DC client clip");
         Expect(gdiStructuredPaintResult && gdiStructuredPaintPixel != CLR_INVALID,
@@ -8133,7 +8173,7 @@ int main() {
     {
         const note::NoteDocument doc = ParseMd4c(
             L"\\[\n"
-            L"\\begin{array}{cc} 1 & 2 \\end{array}\n"
+            L"\\begin{UnknownMathEnvironment} 1 & 2 \\end{UnknownMathEnvironment}\n"
             L"\\]");
         const note::Diagnostic* diag = FindDiagnostic(doc, L"NOTE-W-MATH-UNSUPPORTED");
         Expect(diag != nullptr, "unsupported math environment emits warning");
@@ -8146,13 +8186,25 @@ int main() {
     }
 
     {
-        const note::NoteDocument doc = ParseMd4c(L"$\\overbrace{x}$");
+        const note::NoteDocument doc = ParseMd4c(L"$\\UnknownMathCommand{x}$");
         const note::Diagnostic* diag = FindDiagnostic(doc, L"NOTE-W-MATH-UNSUPPORTED");
         Expect(diag != nullptr, "unsupported math command emits warning");
         if (diag) {
             Expect(diag->severity == note::DiagnosticSeverity::Warning,
                    "unsupported math command diagnostic is a warning");
         }
+    }
+
+    {
+        const note::NoteDocument doc = ParseMd4c(
+            L"$\\overbrace{x}+\\hbar+\\Bigl(\\frac{a}{b}\\Bigr)$\n\n"
+            L"\\[\\begin{array}{cc}1&2\\\\[8pt]3&4\\end{array}\\]");
+        Expect(doc.math_spans.size() == 2 &&
+                   !FindDiagnostic(doc, L"NOTE-W-MATH-UNSUPPORTED"),
+               "note support diagnostics use MicroTeX commands and environments instead of the retired engine's list");
+        const note::NoteDocument definitions = ParseMd4c(L"$\\newcommand{\\user}{x}$");
+        Expect(FindDiagnostic(definitions, L"NOTE-W-MATH-UNSUPPORTED") != nullptr,
+               "embedded-disabled custom macro definitions remain unsupported in note diagnostics");
     }
 
     {
@@ -8280,9 +8332,9 @@ int main() {
         const auto texDoc = note::ParseTeXMathDocument(texModel);
         Expect(texDoc.math_spans.size() == 1 && texDoc.math_spans[0].delimiter == note::MathDelimiter::Dollar,
                "TeX source continues to interpret TeX delimiters only, not note-specific wrappers");
-        const auto unsupported = ParseMd4c(L"text <math>\\overbrace{x}</math>");
+        const auto unsupported = ParseMd4c(L"text <math>\\UnknownMathCommand{x}</math>");
         Expect(unsupported.math_spans.size() == 1 && FindDiagnostic(unsupported, L"NOTE-W-MATH-UNSUPPORTED"),
-               "tag math retains the existing unsupported-TeX diagnostic policy");
+               "tag math reports commands absent from the adopted engine vocabulary");
         std::wstring repeated;
         for (size_t index = 0; index < 4096; ++index) repeated += L"<math>";
         const auto malformed = ParseMd4c(repeated);
@@ -8633,6 +8685,32 @@ int main() {
     }
 
     {
+        const std::wstring source =
+            L"| 記法 | 用途 | 例 |\n"
+            L"| :--- | :---: | ---: |\n"
+            L"| `-` | 箇条書き | `- 項目` |\n"
+            L"| `` ` `` | インラインコード | `value` |\n";
+        const note::NoteDocument doc = ParseMd4c(source);
+        auto codeText = [&doc, &source](size_t index) -> std::wstring {
+            const note::InlineNode* code = FindInline(doc, note::InlineKind::Code, index);
+            if (!code || code->span.end.value > source.size() ||
+                code->span.end.value < code->span.start.value) {
+                return L"<missing>";
+            }
+            return source.substr(code->span.start.value,
+                                 code->span.end.value - code->span.start.value);
+        };
+        const note::InlineNode* backtickCode = FindInline(doc, note::InlineKind::Code, 2);
+        const size_t innerBacktick = source.find(L"`` ` ``") + 3;
+        const bool backtickCodeAtInnerBacktick = backtickCode &&
+            backtickCode->span.start.value == innerBacktick &&
+            backtickCode->span.end.value == innerBacktick + 1;
+        Expect(codeText(0) == L"-" && codeText(1) == L"- 項目" && backtickCodeAtInnerBacktick &&
+                   codeText(3) == L"value",
+               "a double-backtick table code span keeps its inner single backtick as code content");
+    }
+
+    {
         const note::NoteDocument doc = ParseMd4c(L"- [x] done\n- [ ] todo\n");
         const note::BlockNode* firstItem = FindBlock(doc, note::BlockKind::ListItem, 0);
         const note::BlockNode* secondItem = FindBlock(doc, note::BlockKind::ListItem, 1);
@@ -8737,8 +8815,99 @@ int main() {
 
     {
         auto node = mathrender::Parse(L"q = \\dfrac{a+b}{c}");
-        Expect(ContainsMathNodeType(node.get(), mathrender::Node::Type::Fraction),
-               "math renderer parses \\dfrac as a fraction node");
+        Expect(MeasureTestMath(node.get()).height > 24,
+               "math renderer lays out a display fraction with its full vertical extent");
+    }
+
+    {
+        auto plain = mathrender::Parse(L"\\begin{matrix}a&b\\\\c&d\\end{matrix}");
+        auto spaced = mathrender::Parse(L"\\begin{matrix}a&b\\\\[8pt]c&d\\end{matrix}");
+        const auto plainLayout = MeasureTestMath(plain.get());
+        const auto spacedLayout = MeasureTestMath(spaced.get());
+        Expect(plainLayout.height > 0 && spacedLayout.height > plainLayout.height &&
+                   spacedLayout.width == plainLayout.width,
+               "matrix row spacing increases height without adding literal bracket text");
+        auto quantum = mathrender::Parse(L"i\\hbar\\frac{\\partial}{\\partial t}\\psi=H\\psi");
+        Expect(MeasureTestMath(quantum.get()).height > 0,
+               "shared renderer accepts hbar and quantum derivatives");
+        Expect(!mathrender::Parse(L"\\frac{1}{") && !mathrender::Parse(L"\\frac{1}") &&
+                   !mathrender::Parse(L"\\NotAKnownMathCommand{x}"),
+               "unclosed groups, missing arguments and unknown commands fail without publishing partial formulas");
+        std::shared_ptr<const mathrender::Formula> retained;
+        {
+            note::NoteMathRenderCache cache;
+            retained = cache.Find(L"x^2+y^2");
+            const auto same = cache.Find(L"x^2+y^2");
+            Expect(retained && retained == same, "view math cache reuses the same parsed formula");
+            cache.Clear();
+        }
+        Expect(MeasureTestMath(retained.get()).width > 0,
+               "a retained math formula remains usable after cache clear and view cache destruction");
+        const std::wstring matrixSource = L"\\begin{pmatrix}a&b\\\\\r\nc&d\\end{pmatrix}";
+        Expect(mathrender::NormalizeMarkupSource(matrixSource) == matrixSource &&
+                   mathrender::NormalizeMarkupSource(L"a\\\r\n+b") == L"a+b" &&
+                   mathrender::NormalizeMarkupSource(L"\uff41\u304b\u3089\uff42") == L"a\u2192b",
+               "shared legacy normalization preserves TeX rows while converting shorthand and single source joins");
+        MathDisplay preview;
+        bool latex = false;
+        Expect(BuildMathInputPreview(matrixSource, &preview, &latex) && latex && preview.formula &&
+                   preview.body.find(L"\\\\\n") != std::wstring::npos,
+               "bare multiline TeX preview preserves matrix row separators instead of falling back to markup source");
+        Expect(BuildMathInputPreview(L"<math>" + matrixSource + L"</math>", &preview, &latex) &&
+                   !latex && preview.formula,
+               "tagged TeX environments use the same complete formula in the preview");
+        Expect(BuildMathInputPreview(L"<math>unclosed", &preview, &latex) && !preview.formula &&
+                   preview.body == L"<math>unclosed",
+               "invalid preview wrappers retain their complete editable source");
+        Expect(!mathrender::Parse(L"\\newcommand{\\WorkspaceMacro}{x}\\WorkspaceMacro") &&
+                   !mathrender::Parse(L"\\WorkspaceMacro") &&
+                   !mathrender::Parse(L"\\addfont{outside.clm2}{outside.otf}") &&
+                   !mathrender::Parse(L"\\includegraphics{outside.png}"),
+               "embedded math cannot mutate process-wide macros or load user-selected font files");
+        std::wstring nested;
+        for (int i = 0; i < 200; ++i) nested += L"\\sqrt ";
+        nested += L"x";
+        Expect(!mathrender::Parse(nested), "excessive unbraced math nesting fails within a bounded call depth");
+    }
+
+    {
+        note_font_test::Surface surface;
+        auto formula = mathrender::Parse(L"x^2+\\frac{a}{b}");
+        bool drawn = surface.valid() && bool(formula);
+        const RECT bounds{20, 10, 85, 35};
+        surface.clear();
+        if (drawn) drawn = mathrender::DrawInBox(*formula, surface.dc, bounds, 36, RGB(0, 0, 0));
+        GdiFlush();
+        std::vector<DWORD> reference(static_cast<DWORD*>(surface.pixels),
+            static_cast<DWORD*>(surface.pixels) + surface.width * surface.height);
+        bool ink = false, contained = true;
+        for (int y = 0; y < surface.height; ++y) for (int x = 0; x < surface.width; ++x) {
+            if ((reference[y * surface.width + x] & 0xffffff) == 0xffffff) continue;
+            ink = true;
+            contained = contained && x >= bounds.left && x < bounds.right &&
+                y >= bounds.top && y < bounds.bottom;
+        }
+        for (int i = 0; drawn && i < 30; ++i) {
+            surface.clear();
+            drawn = mathrender::DrawInBox(*formula, surface.dc, bounds, 36, RGB(0, 0, 0));
+        }
+        GdiFlush();
+        Expect(drawn && ink && contained &&
+                   std::equal(reference.begin(), reference.end(), static_cast<DWORD*>(surface.pixels)),
+               "annotation fitting clips to its box and repeated repaint preserves identical pixels");
+        const int saved = SaveDC(surface.dc);
+        SetGraphicsMode(surface.dc, GM_ADVANCED);
+        const XFORM transform{2, 0, 0, 2, 30, 20};
+        SetWorldTransform(surface.dc, &transform);
+        const auto selectedFont = GetCurrentObject(surface.dc, OBJ_FONT);
+        const bool transformed = formula &&
+            mathrender::DrawInBox(*formula, surface.dc, bounds, 36, RGB(0, 0, 0));
+        XFORM after{};
+        const bool restored = GetWorldTransform(surface.dc, &after) &&
+            std::memcmp(&transform, &after, sizeof(transform)) == 0 &&
+            GetCurrentObject(surface.dc, OBJ_FONT) == selectedFont;
+        RestoreDC(surface.dc, saved);
+        Expect(transformed && restored, "math drawing composes PDF zoom and restores the caller's GDI state");
     }
 
     {
@@ -8754,8 +8923,8 @@ int main() {
 
     {
         auto node = mathrender::Parse(L"\\vec{x} + \\bar{y} + \\hat{z}");
-        Expect(ContainsMathNodeType(node.get(), mathrender::Node::Type::Accent),
-               "math renderer parses common accent commands as accent nodes");
+        Expect(MeasureTestMath(node.get()).width > 0,
+               "math renderer prepares common accent commands through the shared engine");
     }
 
     {

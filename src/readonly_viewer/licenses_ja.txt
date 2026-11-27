@@ -17,6 +17,14 @@ Markdown解析: MD4C / MIT License
   md4c/LICENSE.md
   MD4Cはexeへ組み込まれています。独立したDLLでなくても原文を同梱します。
 
+数式表示: MicroTeX / MIT License
+  microtex/LICENSE.txt
+  MicroTeXはexeへ組み込まれています。メインソフトと同じ原文です。
+
+数式フォント: XITS Math / SIL Open Font License 1.1
+  xits/OFL.txt、xits/FONTLOG.txt、xits/README.txt
+  resources/math/xits/XITSMath-Regular.clm2 をメインソフトと共有します。
+
 C++実行環境: MinGW-w64 / GCC runtime
   libstdc++-6.dll、libgcc_s_seh-1.dll:
     mingw-w64/gcc/COPYING3.txt
@@ -25,8 +33,9 @@ C++実行環境: MinGW-w64 / GCC runtime
     mingw-w64/winpthreads/COPYING.txt
   GCCの実行ライブラリ例外も原文のまま同梱します。
 
-このビューア単体のビルドはLibreOffice、zlib1.dll、追加フォントファイルを同梱しません。
-Windowsの標準機能・インストール済みフォントを使用します。
+このビューア単体のビルドはLibreOfficeとzlib1.dllを同梱しません。
+数式用のXITS Math以外は、Windowsの標準機能・インストール済みフォントを使用します。
+画像の表示にはWindows標準の画像部品（WIC）を使用します。
 文書・画像として表示する利用者のファイルは、それぞれの権利者の条件に従います。
 
 実行用のexeと4 DLLに加え、LICENSE.mdとlicensesフォルダーを一緒に保持してください。

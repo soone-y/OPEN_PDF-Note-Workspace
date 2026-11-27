@@ -14,7 +14,7 @@ BOOL WINAPI StageTestWriteFile(HANDLE file, LPCVOID bytes, DWORD count,
     const DWORD targetLength = GetFinalPathNameByHandleW(file, target, 32768, FILE_NAME_NORMALIZED);
     if (!targetLength || targetLength >= 32768) return result;
     const std::wstring path(target, targetLength);
-    if (path.find(L"\\__stage__\\clrop_journal\\") == std::wstring::npos ||
+    if (path.find(L"\\__unsaved__\\clrop_journal\\") == std::wstring::npos ||
         path.size() < 4 || path.substr(path.size()-4) != L".tmp") return result;
     const HANDLE marker = CreateFileW(signal, GENERIC_WRITE, FILE_SHARE_READ, nullptr,
         CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);

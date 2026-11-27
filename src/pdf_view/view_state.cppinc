@@ -14,12 +14,12 @@ static bool g_restorePdfOpeningAnchor = true;
 
 static std::filesystem::path LastPdfViewFilePath() {
     if (g_workspaceRoot.empty()) return {};
-    return std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__" / L"__tmp__" / L"pdf_view_positions.txt";
+    return workspace_layout::Recent(std::filesystem::path(g_workspaceRoot)) / L"pdf_view_positions.txt";
 }
 
 static std::filesystem::path WorkspaceEscapeDir() {
     if (g_workspaceRoot.empty()) return {};
-    return std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__" / L"__escape__";
+    return workspace_layout::Failed(std::filesystem::path(g_workspaceRoot));
 }
 
 static std::wstring NormalizePathKey(const std::filesystem::path& p) {
@@ -33,6 +33,7 @@ static std::wstring NormalizePathKey(const std::filesystem::path& p) {
 
 // file: pdf_view/view_state.cppinc
 #include "core/preview_trace.h"
+#include "core/workspace_relocation.h"
 
 void UpdateScrollDirectionMenuChecks(); // settings.cpp; avoid settings.h from pdf_view TU
 
@@ -78,7 +79,13 @@ static std::unordered_map<std::wstring, PdfViewRestorePoint> LoadPdfViewRecordMa
             xpt = 0.0;
             ypt = first;
         }
-        std::wstring key = NormalizePathKey(UTF8ToWide(pathUtf8));
+        // Workspace PDFs are stored relative to the workspace so positions
+        // survive renaming or moving the workspace folder; older records and
+        // external PDFs stay absolute.
+        const auto recordedPath =
+            workspace_relocation::FromRecordPath(UTF8ToWide(pathUtf8), g_workspaceRoot);
+        if (!recordedPath) continue;
+        std::wstring key = NormalizePathKey(*recordedPath);
         if (key.empty()) { valid = false; continue; }
         PdfViewRestorePoint rec;
         rec.path = key;
@@ -128,7 +135,9 @@ static bool WritePdfViewRecordMap(const std::unordered_map<std::wstring, PdfView
     for (const auto& kv : ordered) {
         const auto& rec = kv.second;
         std::wstring flow = rec.flowMode.empty() ? NormalizeFlowModeString(g_config.pdfFlowMode) : rec.flowMode;
-        oss << std::quoted(WideToUTF8(kv.first)) << "\t" << rec.pageIndex << "\t"
+        oss << std::quoted(WideToUTF8(workspace_relocation::ToRecordPath(
+                   std::filesystem::path(kv.first), std::filesystem::path(g_workspaceRoot))))
+            << "\t" << rec.pageIndex << "\t"
             << std::setprecision(17) << rec.xPt << "\t" << rec.yPt;
         if (!flow.empty()) {
             oss << "\t" << WideToUTF8(flow);

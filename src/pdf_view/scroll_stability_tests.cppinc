@@ -62,7 +62,8 @@ static bool ProbePdfTextEditViewFollow(HWND hwnd, const wchar_t* flow, int& case
         const double oldScale = g_pdf.scale;
         SendMessageW(hwnd, WM_KEYDOWN, VK_ADD, 1);
         check(g_pdf.scale > oldScale && g_pdf.editFontPt == font && g_pdf.editText == text &&
-              g_pdf.editingText && GetFocus() == hwnd, condition, L"ctrl_plus_pdf_zoom");
+              g_pdf.editingText && GetFocus() == hwnd &&
+              g_pdfTextEditViewFollow.PdfZoomLatched(), condition, L"ctrl_plus_pdf_zoom");
         const double zx = g_pdf.scrollX, zy = g_pdf.scrollY;
         SendMessageW(hwnd, WM_TIMER, kZoomTimerId, 0);
         check(zx == g_pdf.scrollX && zy == g_pdf.scrollY, condition, L"zoom_settle");
@@ -83,6 +84,17 @@ static bool ProbePdfTextEditViewFollow(HWND hwnd, const wchar_t* flow, int& case
         if (!SetKeyboardState(keys.data())) return false;
         SendMessageW(hwnd, WM_KEYDOWN, VK_ADD, 1);
         check(g_pdf.scale == resumedScale && g_pdf.editFontPt > font, condition, L"active_font_shortcut");
+        // Paused following alone does not hand the shortcut to the PDF: a box
+        // that is fully on screen keeps receiving text-size changes.
+        g_pdfTextEditViewFollow.Input(GetTickCount64() - 10000);
+        RECT visible{};
+        GetClientRect(hwnd, &rc);
+        const bool boxOnScreen = EditingBoxClientRect(visible) && visible.left >= 0 && visible.top >= 0 &&
+                                 visible.right <= rc.right && visible.bottom <= rc.bottom;
+        const double enlargedFont = g_pdf.editFontPt;
+        SendMessageW(hwnd, WM_KEYDOWN, VK_SUBTRACT, 1);
+        check(boxOnScreen && g_pdf.scale == resumedScale && g_pdf.editFontPt < enlargedFont,
+              condition, L"visible_box_font_shortcut");
         keys[VK_CONTROL] = 0;
         if (!SetKeyboardState(keys.data())) return false;
     }

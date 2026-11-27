@@ -594,6 +594,7 @@ function Invoke-PublicHistoryScans([string]$WorkingDirectory) {
         throw "Public history still contains prohibited archive/blob names.`n$($blobHits | ForEach-Object { $_.Line } | Out-String)"
     }
 
+    Assert-LicenseHistoryIsSingleRevision -WorkingDirectory $WorkingDirectory -RelativePath "LICENSE"
     Assert-LicenseHistoryIsSingleRevision -WorkingDirectory $WorkingDirectory -RelativePath "LICENSE.md"
     Assert-LicenseHistoryIsSingleRevision -WorkingDirectory $WorkingDirectory -RelativePath "LICENSES_INDEX.md"
     Assert-LicenseHistoryIsSingleRevision -WorkingDirectory $WorkingDirectory -RelativePath "THIRD_PARTY_NOTICES.md"
@@ -643,7 +644,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $allowlistEntries = Read-AllowlistEntries -AllowlistPath $allowlistPath
-$licenseDocs = @("LICENSE.md", "LICENSES_INDEX.md", "THIRD_PARTY_NOTICES.md")
+$licenseDocs = @("LICENSE", "LICENSE.md", "LICENSES_INDEX.md", "THIRD_PARTY_NOTICES.md")
 
 $pathFilterArgs = New-Object System.Collections.Generic.List[string]
 foreach ($entry in $allowlistEntries) {
@@ -787,7 +788,7 @@ try {
             Write-Info ("[dry-run] copy latest reviewed license doc: {0}" -f $licenseDoc)
         }
         Write-Info ("[dry-run] git branch -M {0}" -f $PublicBranch)
-        Write-Info "[dry-run] git add .gitignore LICENSE.md LICENSES_INDEX.md THIRD_PARTY_NOTICES.md"
+        Write-Info "[dry-run] git add .gitignore LICENSE LICENSE.md LICENSES_INDEX.md THIRD_PARTY_NOTICES.md"
         Write-Info "[dry-run] git commit -m `"Add public repository metadata snapshots`""
         Write-Info "[dry-run] run public-history scans"
         Write-Info ("[dry-run] move disposable clone to output: {0}" -f $outputRepoPath)
@@ -802,7 +803,7 @@ try {
     Invoke-GitCommand -WorkingDirectory $tempRepoPath -Arguments @("branch", "-M", $PublicBranch)
     Invoke-GitCommand -WorkingDirectory $tempRepoPath -Arguments @("config", "user.name", $PublicAuthorName)
     Invoke-GitCommand -WorkingDirectory $tempRepoPath -Arguments @("config", "user.email", $PublicAuthorEmail)
-    Invoke-GitCommand -WorkingDirectory $tempRepoPath -Arguments @("add", ".gitignore", "LICENSE.md", "LICENSES_INDEX.md", "THIRD_PARTY_NOTICES.md")
+    Invoke-GitCommand -WorkingDirectory $tempRepoPath -Arguments @("add", ".gitignore", "LICENSE", "LICENSE.md", "LICENSES_INDEX.md", "THIRD_PARTY_NOTICES.md")
     Invoke-GitCommitWithOptionalBucketedNow -WorkingDirectory $tempRepoPath -Arguments @("commit", "-m", "Add public repository metadata snapshots")
 
     Write-Info "Running public-history verification scans."

@@ -19,7 +19,7 @@ function Run-Host([string]$mode) {
     $info.WorkingDirectory=$runRoot;$info.UseShellExecute=$false;$info.CreateNoWindow=$true
     $info.RedirectStandardOutput=$true;$info.RedirectStandardError=$true
     foreach($key in @($info.Environment.Keys)){if($key.StartsWith('PDF_NOTE_',[StringComparison]::OrdinalIgnoreCase)){$null=$info.Environment.Remove($key)}}
-    $profile=Join-Path $runRoot 'workspace/__pdf_note_workspace__/__tmp__/test_process'
+    $profile=Join-Path $runRoot 'workspace/__pdf_note_workspace__/__test__/test_process'
     $null=New-Item -ItemType Directory -Force -Path $profile
     foreach($key in @('TEMP','TMP','APPDATA','LOCALAPPDATA','USERPROFILE','HOME')){$info.Environment[$key]=$profile}
     $child=[System.Diagnostics.Process]::Start($info)
@@ -62,13 +62,15 @@ try {
     & $compiler ('@'+$response) *> (Join-Path $runRoot 'link.log')
     if($LASTEXITCODE -ne 0){throw "Recovery test link failed: $runRoot/link.log"}
     foreach($name in @('pdfium.dll','libstdc++-6.dll','libgcc_s_seh-1.dll','libwinpthread-1.dll','zlib1.dll')){Copy-Item -LiteralPath (Join-Path $bin $name) -Destination (Join-Path $runRoot $name)}
+    . (Join-Path $repoRoot 'scripts/build/sync_microtex_assets.ps1')
+    Sync-MicrotexAssets -SourceRoot $repoRoot -DestinationRoot $runRoot | Out-Null
     Copy-Item -LiteralPath tests/fixtures/ui_automation_session/sample.pdf -Destination (Join-Path $runRoot 'fixture.pdf')
     [System.IO.File]::WriteAllText((Join-Path $runRoot 'owned.txt'),"pdf-note-recovery-demo-v1`n",$utf8)
     $null=Run-Host '--prepare';$log=Run-Host '--app-selftest'
     $required=@('annotation_conflict','note_conflict','annotation_changed','note_changed','truncated_journal','missing_journal','pdf_mismatch','write_locked','commit_failed','annotation_missing','note_missing','pdf_missing','note_external_conflict')
     $actual=@([regex]::Matches($log,'(?m)^PASS app-session (\w+)\r?$') | ForEach-Object {$_.Groups[1].Value})
     if($actual.Count -ne 13 -or (Compare-Object ($required | Sort-Object) ($actual | Sort-Object))){throw 'Required recovery session case set is incomplete.'}
-    $boundaries=@('commit-retry','commit-failed-rescue','published-pdf-stage','empty-pdf-rescue','unreadable-metadata','parent-note-write')
+    $boundaries=@('commit-retry','commit-failed-rescue','published-pdf-stage','empty-pdf-rescue','unreadable-metadata','standalone-note-write')
     foreach($boundary in $boundaries){if($log -notmatch ('(?m)^PASS app-boundary '+[regex]::Escape($boundary)+'\r?$')){throw "Required recovery boundary missing: $boundary"}}
     $after=@(Snapshot)
     if(($before | ConvertTo-Json -Compress) -cne ($after | ConvertTo-Json -Compress)){throw 'Recovery test inputs changed during verification; rerun.'}

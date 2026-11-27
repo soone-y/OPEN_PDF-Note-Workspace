@@ -645,6 +645,17 @@ int EnterSpan(MD_SPANTYPE type, void* detail, void* userdata) {
         if (image) {
             frame.target = AttributeToWString(&image->src);
         }
+    } else if (type == MD_SPAN_CODE) {
+        // Locate code text after the opening backtick run.  Otherwise content
+        // that itself contains a backtick, such as "`` ` ``", is matched
+        // against the opener and the code span points at the wrong source.
+        const std::wstring& raw = ctx->model->raw;
+        size_t pos = frame.open_cursor;
+        while (pos < raw.size() && (raw[pos] != L'`' || IsEscapedAt(raw, pos))) ++pos;
+        if (pos < raw.size()) {
+            while (pos < raw.size() && raw[pos] == L'`') ++pos;
+            ctx->cursor = pos;
+        }
     }
 
     ctx->span_stack.push_back(std::move(frame));
@@ -685,9 +696,19 @@ int LeaveSpan(MD_SPANTYPE, void*, void* userdata) {
     case MD_SPAN_IMG:
         PushInlineOverlay(ctx->out, InlineKind::Image, frame.parent_block, span, std::move(frame.target));
         break;
-    case MD_SPAN_CODE:
+    case MD_SPAN_CODE: {
         PushInlineOverlay(ctx->out, InlineKind::Code, frame.parent_block, span);
+        // Step past the closing run (and the one stripped space before it) so
+        // that a later code span does not mistake this closer for its opener.
+        const std::wstring& raw = ctx->model->raw;
+        size_t pos = std::min(ctx->cursor, raw.size());
+        while (pos < raw.size() && (raw[pos] == L' ' || raw[pos] == L'\t')) ++pos;
+        if (pos < raw.size() && raw[pos] == L'`') {
+            while (pos < raw.size() && raw[pos] == L'`') ++pos;
+            ctx->cursor = pos;
+        }
         break;
+    }
     case MD_SPAN_DEL:
         PushInlineOverlay(ctx->out, InlineKind::Strike, frame.parent_block, span);
         break;

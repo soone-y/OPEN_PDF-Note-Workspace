@@ -3,7 +3,9 @@
 #include <commctrl.h>
 #include "core/atomic_write.h"
 #include "core/command_ids.h"
+#include <algorithm>
 #include <array>
+#include <iterator>
 #include <iostream>
 #include <stdexcept>
 
@@ -58,6 +60,38 @@ static bool Equals(const fs::path& path, const std::string& expected) {
 static void Write(const fs::path& path, const std::string& bytes) {
     std::wstring error;
     Require(atomic_write::AtomicWriteUtf8(path, bytes, path.parent_path(), &error), "write owned fixture");
+}
+// First edit after a clean load, then one real Ctrl+S through the child's
+// message loop and TranslateAccelerator (not a direct WM_COMMAND). Focus stays
+// in the editor, so no focus-loss stage rebuilds the menu first: the Save item
+// is still grayed, which made the accelerator drop the key before the fix.
+static void TypeThenCtrlS(HWND main, HWND editor, const fs::path& path, const std::string& expected) {
+    const DWORD thread = GetWindowThreadProcessId(editor, nullptr);
+    // Let startup/list activation finish moving focus before taking it.
+    HWND lastFocus = nullptr; ULONGLONG stableSince = GetTickCount64();
+    Require(Until([&] {
+        GUITHREADINFO info{}; info.cbSize = sizeof(info);
+        if (!GetGUIThreadInfo(thread, &info)) return false;
+        if (info.hwndFocus != lastFocus) { lastFocus = info.hwndFocus; stableSince = GetTickCount64(); }
+        return GetTickCount64() - stableSince >= 1000;
+    }), "child focus settles after opening");
+    Require(AttachThreadInput(GetCurrentThreadId(), thread, TRUE), "attach isolated child input queue");
+    struct Detach { DWORD thread; ~Detach() { AttachThreadInput(GetCurrentThreadId(), thread, FALSE); } } detach{thread};
+    SetFocus(editor);
+    Require(GetFocus() == editor, "note editor owns input focus");
+    Send(editor, EM_SETSEL, 13, 13);
+    Send(editor, WM_CHAR, L'x');
+    const UINT state = GetMenuState(GetMenu(main), ID_FILE_SAVE_ALL, MF_BYCOMMAND);
+    Require(state != static_cast<UINT>(-1) && (state & (MF_GRAYED | MF_DISABLED)) != 0,
+        "menu bar still shows the clean-load Save state after typing");
+    BYTE before[256]{}; Require(GetKeyboardState(before), "capture child key state");
+    struct Restore { BYTE* keys; ~Restore() { SetKeyboardState(keys); } } restore{before};
+    BYTE ctrl[256]{}; std::copy(std::begin(before), std::end(before), std::begin(ctrl));
+    ctrl[VK_CONTROL] = 0x80; ctrl[VK_MENU] = 0; ctrl[VK_SHIFT] = 0;
+    Require(SetKeyboardState(ctrl) && PostMessageW(editor, WM_KEYDOWN, L'S', 0), "post child Ctrl+S");
+    // Well under the 6 s minimum idle stage delay, so a later stage-driven
+    // menu refresh cannot make a dropped first key look like a save.
+    Require(Until([&] { return Equals(path, expected); }, 4000), "single Ctrl+S saves the first edit after a clean load");
 }
 static HWND OpenNote(HWND main, bool restoreStage = false, bool deferred = false) {
     HWND lists[4]{};
@@ -172,9 +206,13 @@ int main() {
                 continue;
             }
             Require(Send(editor, WM_GETTEXTLENGTH) == (scenario ? 13u : 0u), "original note loaded");
+            if (scenario == 1) TypeThenCtrlS(main, editor, note, "original notex");
             if (!scenario) Send(editor, WM_CHAR, L'x');
-            Send(editor, EM_SETSEL, 0, -1); Send(editor, WM_CLEAR);
-            Require(Send(editor, WM_GETTEXTLENGTH) == 0, "clear note through native editor");
+            // A background save may still hold the editor read-only briefly.
+            Require(Until([&] {
+                Send(editor, EM_SETSEL, 0, -1); Send(editor, WM_CLEAR);
+                return Send(editor, WM_GETTEXTLENGTH) == 0;
+            }), "clear note through native editor");
             if (scenario == 4) {
                 protectedNote = note;
                 Require(SetFileAttributesW(note.c_str(), FILE_ATTRIBUTE_READONLY), "deny replacement of owned original");

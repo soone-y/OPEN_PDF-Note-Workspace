@@ -14,6 +14,7 @@ const pages = [
   'site/github/en/index.html',
   path.join(portalRoot, 'docs/ja/Using_the_App.html'),
   path.join(portalRoot, 'docs/en/Using_the_App.html'),
+  'site/cloudflare/public/about/index.html',
 ];
 const storageKey = 'pdf-note-workspace-high-contrast';
 

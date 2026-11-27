@@ -126,21 +126,6 @@ static void ScheduleNoteOverlayRefresh(HWND hWnd, bool immediate, uint64_t targe
 }
 
 LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    if (recovery::HasActiveStageRecovery()) {
-        switch (msg) {
-        case WM_COMMAND: case WM_NOTIFY: case WM_TIMER: case WM_DROPFILES: case WM_COPYDATA:
-        case WM_CLOSE: case kMsgOpenStartupDocument: case kMsgSingleInstanceShutdownRequest:
-        case WM_SYSCOMMAND: case WM_HOTKEY: case WM_APPCOMMAND:
-        case kMsgReloadLectureList: case kMsgReloadSessionList: case kMsgNoteEnterInsertMode:
-        case kMsgNoteOverlayUpdate:
-            return 0;
-        case WM_ENDSESSION:
-            // The parent was checkpointed before recovery. The isolated
-            // process owns newer candidates; never stage the stale editor.
-            return 0;
-        default: break;
-        }
-    }
     // MainWndProc-local WM_APP messages. Values are listed in core/app_core.h.
     constexpr UINT kMsgInitLayout = WM_APP + 1;
     constexpr UINT kMsgRunUiAutomation = WM_APP + 210;
@@ -160,16 +145,26 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         kMsgDocumentSourceProtectionChanged,
     }));
     switch (msg) {
-    case kMsgDocumentSourceProtectionChanged:
+    case kMsgDocumentSourceProtectionChanged: {
+        const auto notice = document_source_protection::TakeProtectionNotice();
         RefreshStatusDisplay(hWnd);
-        if (document_source_protection::HasPendingProtection() || document_source_protection::HasRecoveryFailure()) {
-            ShowSoftNotice(hWnd, localization::Text(document_source_protection::HasRecoveryFailure()
-                ? L"workspace.source_recovery_unavailable" : L"workspace.source_protection_pending_notice"),
+        if (document_source_protection::HasRecoveryFailure()) {
+            ShowSoftNotice(hWnd, localization::Text(L"workspace.source_recovery_unavailable"),
                 SoftNoticeKind::Warning);
+        } else if (document_source_protection::HasPendingProtection()) {
+            // A vanished original needs a different answer than a busy one.
+            if (!ExplainMissingStagedOriginals(hWnd))
+                ShowSoftNotice(hWnd, localization::Text(L"workspace.source_protection_pending_notice"),
+                    SoftNoticeKind::Warning);
+        } else if (notice) {
+            ShowPassiveSoftNotice(hWnd, localization::Text(notice->hasStagedEdits
+                ? L"workspace.source_staged_edits_protected_notice"
+                : L"workspace.source_display_protected_notice"));
         }
         return 0;
+    }
     case kMsgStageRecovery:
-        recovery::HandleStageRecoveryRequest(hWnd);
+        HandOffStageRecoveryToTool(hWnd);
         return 0;
     case kMsgStartupWatchdogAbort:
         RecoverSelfMainWindowOrRequestClose();
@@ -532,8 +527,9 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
         bool altDown = (GetKeyState(VK_MENU) & 0x8000) != 0;
         bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-        if (g_noteVimModeEnabled && g_noteNormalMode && !IsNoteCmdlineActive() &&
-            ctrlDown && !altDown && !shiftDown) {
+        // Esc without Vim leaves the note for the main window; pane keys must
+        // still work from there so the keyboard can always reach every pane.
+        if (!IsNoteCmdlineActive() && ctrlDown && !altDown && !shiftDown) {
             if (HandlePaneDirectionalNavigation(hWnd, PaneNavContext::NotePane, g_hNoteEdit, wParam)) {
                 return 0;
             }
@@ -694,6 +690,10 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
         break;
     }
+    case WM_INITMENU:
+        // Sent by TranslateAccelerator before it checks the item state.
+        UpdateSaveAllMenuState(reinterpret_cast<HMENU>(wParam));
+        break;
     case WM_INITMENUPOPUP: {
         HMENU menu = reinterpret_cast<HMENU>(wParam);
         if (UpdateEditMenuUndoRedoState(menu)) {
@@ -983,6 +983,28 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             if (!IsSaveOperationInProgress()) {
                 KillTimer(hWnd, kExitRetryTimerId);
                 PostMessageW(hWnd, WM_CLOSE, 0, 0);
+            } else if (s_exitPending && !s_exitWaitPrompted &&
+                       GetTickCount64() - s_exitPendingSinceTick >= kExitSaveWaitPromptMs) {
+                // A save that does not finish must not leave a pending exit the
+                // user cannot withdraw. Exiting mid-write is never offered.
+                s_exitWaitPrompted = true;
+                // Stop the retry while the question is open: a save finishing
+                // underneath must not start exit from inside this dialog.
+                KillTimer(hWnd, kExitRetryTimerId);
+                SilentDialogOptions dialog;
+                dialog.title = localization::Text(L"ui.layout.exit_save_wait.title");
+                dialog.message = localization::Text(L"ui.layout.exit_save_wait.message");
+                dialog.kind = SoftNoticeKind::Warning;
+                dialog.buttons = SilentDialogButtons::YesNo;
+                dialog.yesLabel = localization::Text(L"ui.layout.exit_save_wait.keep_waiting");
+                dialog.noLabel = localization::Text(L"ui.layout.exit_save_wait.cancel_exit");
+                dialog.defaultResult = SilentDialogResult::Yes;
+                dialog.escapeResult = SilentDialogResult::Yes;
+                if (ShowSilentDialog(hWnd, dialog) == SilentDialogResult::No) {
+                    s_exitPending = false;
+                } else if (s_exitPending) {
+                    SetTimer(hWnd, kExitRetryTimerId, 200, nullptr);
+                }
             }
             return 0;
         }
@@ -1090,6 +1112,8 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         if (closeAction == main_close_policy::CloseRequestAction::WaitForActiveSave) {
             if (!s_exitPending) {
                 s_exitPending = true;
+                s_exitPendingSinceTick = GetTickCount64();
+                s_exitWaitPrompted = false;
                 ShowMainSoftNotice(hWnd,
                                    L"統合保存中です。\n統合保存が完了し次第、終了します。\n\n"
                                    L"（もし長時間続く場合は、保存先の空き容量や権限をご確認ください）",

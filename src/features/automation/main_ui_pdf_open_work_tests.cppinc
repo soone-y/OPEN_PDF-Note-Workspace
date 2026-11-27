@@ -194,8 +194,7 @@ static bool RunUiAutomationPdfInitialViewportScenario(HWND owner, std::wstring* 
     std::wstring root;
     if (!TryGetUiAutomationWorkspaceRoot(&root))
         return fail(L"PDF open work probe requires its isolated workspace.");
-    const std::filesystem::path directory = std::filesystem::path(root) /
-        L"__pdf_note_workspace__" / L"__tmp__" / L"open_work";
+    const std::filesystem::path directory = workspace_layout::Test(std::filesystem::path(root)) / L"open_work";
     const auto path = directory / L"pages.pdf";
     std::error_code ec;
     std::filesystem::create_directories(directory, ec);

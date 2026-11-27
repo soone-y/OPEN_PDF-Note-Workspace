@@ -2,6 +2,7 @@
 
 #include "core/app_core.h"
 #include "core/preview_trace.h"
+#include "core/workspace_layout.h"
 
 #include <filesystem>
 
@@ -36,15 +37,14 @@ bool IsPathUnderRoot(const std::filesystem::path& path, const std::filesystem::p
 
 } // namespace
 
-std::filesystem::path EscapeRootPath() {
-    if (g_workspaceRoot.empty()) return {};
-    return std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__" / L"__escape__";
+std::filesystem::path BackupRootPath() {
+    return workspace_layout::Backup(std::filesystem::path(g_workspaceRoot));
 }
 
 EscapeBackupPresence ScanEscapeBackupPresence() {
     const ULONGLONG startTick = preview_trace::TickNow();
     EscapeBackupPresence state;
-    auto escapeRoot = EscapeRootPath();
+    auto escapeRoot = BackupRootPath();
     if (escapeRoot.empty()) {
         preview_trace::Append(
             L"ScanEscapeBackupPresence",
@@ -73,7 +73,8 @@ EscapeBackupPresence ScanEscapeBackupPresence() {
         if (!state.hasSavedFileBackup &&
             name.size() >= 9 &&
             name.rfind(L".meta.txt") == name.size() - 9 &&
-            IsPathUnderRoot(it->path(), escapeRoot / L"backup")) {
+            (IsPathUnderRoot(it->path(), escapeRoot / L"note") ||
+             IsPathUnderRoot(it->path(), escapeRoot / L"clrop"))) {
             state.hasSavedFileBackup = true;
         }
         if (state.hasPdfPositionBackup &&

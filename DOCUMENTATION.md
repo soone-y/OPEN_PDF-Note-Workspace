@@ -100,11 +100,11 @@ Japanese version: user and developer documentation index
 
 パス / Path: `docs/ja/README.md`
 
-#### [日本語：導入 / Japanese: getting started](docs/ja/Getting_Started.md)
+#### [日本語：導入・更新・アンインストール / Japanese: setup, updates, and uninstall](docs/ja/Getting_Started.md)
 
-日本語版：ZIP展開、更新、削除、ワークスペースの準備
+日本語版：ZIP展開、更新、アンインストール、ワークスペースの準備
 
-Japanese version: setup, updates, removal, and workspace preparation
+Japanese version: setup, updates, uninstalling, and workspace preparation
 
 パス / Path: `docs/ja/Getting_Started.md`
 
@@ -222,11 +222,11 @@ English version: user and developer documentation index
 
 パス / Path: `docs/en/README.md`
 
-#### [英語：導入 / English: getting started](docs/en/Getting_Started.md)
+#### [英語：導入・更新・アンインストール / English: setup, updates, and uninstall](docs/en/Getting_Started.md)
 
-英語版：ZIP展開、更新、削除、ワークスペースの準備
+英語版：ZIP展開、更新、アンインストール、ワークスペースの準備
 
-English version: setup, updates, removal, and workspace preparation
+English version: setup, updates, uninstalling, and workspace preparation
 
 パス / Path: `docs/en/Getting_Started.md`
 

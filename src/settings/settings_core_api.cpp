@@ -71,7 +71,6 @@ void ApplyNoteSystem(HWND hWnd) {
     g_noteGridPitch = g_config.noteGridPitch;
     g_noteBgColor = g_config.noteBgColor;
     g_noteFgColor = g_config.noteFgColor;
-    mathrender::SetSupSubGapSupPercent(g_config.noteMathSupSubGapSupPercent);
     ApplyCurrentNoteViewConfiguration();
 }
 

@@ -167,6 +167,10 @@ static LRESULT CALLBACK BottomMathPreviewProc(HWND hWnd, UINT msg, WPARAM wParam
         ResetBottomMathPreviewDragState();
         RemoveWindowSubclass(hWnd, BottomMathPreviewProc, 1);
         break;
+    case WM_NCHITTEST:
+        // A STATIC control is transparent to hit testing by default, which
+        // would route presses to the parent and make the preview undraggable.
+        return HTCLIENT;
     case WM_LBUTTONDOWN:
         if (g_hBottomMathInput) SetFocus(g_hBottomMathInput);
         if (BuildBottomMathPreviewDisplay(ReadBottomMathInputText(), nullptr, nullptr)) {
@@ -306,7 +310,7 @@ static LRESULT CALLBACK BottomMathPreviewProc(HWND hWnd, UINT msg, WPARAM wParam
 
             SetTextColor(hdc, g_theme.panelText);
             DrawMathDisplayNoWrap(display, hdc, bodyRc, std::max<int>(static_cast<int>(tm.tmHeight) + 2, ScaleY(hWnd, 18)),
-                                  mathrender::RenderStyle::Display, 0, true);
+                                  mathrender::RenderStyle::Display, 0);
         }
 
         if (oldFont) SelectObject(hdc, oldFont);

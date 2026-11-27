@@ -1,4 +1,5 @@
 #include "note/note_identity_store.h"
+#include "core/workspace_layout.h"
 
 #include "core/atomic_write.h"
 #include "diagnostics/normal_operations.h"
@@ -188,9 +189,8 @@ bool PersistRuntimeStoreLocked(RuntimeStoreState& state, std::wstring* outError)
         if (outError) *outError = L"note identity catalog exceeds the readable size limit";
         return false;
     }
-    const std::filesystem::path resource = state.workspace_root / L"__pdf_note_workspace__";
-    const std::filesystem::path preferredTemp = resource / L"__tmp__";
-    const std::filesystem::path quarantine = resource / L"__escape__";
+    const std::filesystem::path preferredTemp = workspace_layout::Tmp(state.workspace_root);
+    const std::filesystem::path quarantine = workspace_layout::Failed(state.workspace_root);
     std::wstring err;
     if (!write_checks::ObservedWriteBytes(state.workspace_root, state.store_path,
                                         bytes.data(), bytes.size(),

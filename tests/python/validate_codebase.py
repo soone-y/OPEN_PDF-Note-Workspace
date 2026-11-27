@@ -1044,14 +1044,18 @@ def find_annotation_layer_regressions() -> list[str]:
     required_by_file = {
         "src/pdf_view/interaction_overlay.cppinc": {
             "} else if (ann.type == Annotation::Type::MarkerText)": "MarkerText annotations must have a distinct viewer drawing branch",
-            "FillTextMarker(hdc, qr, ann.color, aUse, displayMode)": "MarkerText quads must use the saved display choice without classifying background pixels",
-            "FillTextMarker(hdc, r, ann.color, aUse, displayMode)": "MarkerText fallback rectangles must use the same display choice",
+            "FillTextMarker(hdc, textRect(minX, minY, maxX, maxY), ann.color, aUse, displayMode)": "MarkerText quads and fallback rectangles must use the saved display choice without classifying background pixels",
             "ann.type == Annotation::Type::MarkerFree || ann.type == Annotation::Type::Freehand": "free marker drawing must stay separate from text marker drawing",
             "DarkenColor(ann.color, 0.85)": "free markers must keep their existing darkened viewer color policy",
             "DrawDashedArrowLinePx": "arrow annotations must preserve dash-aware antialiased viewer drawing",
             "DrawDashedLinePx": "line annotations must preserve dash-aware antialiased viewer drawing",
             "if (std::isfinite(partPt) && partPt > 0.0)": "viewer dash normalization must reject nonfinite/nonpositive render segments",
             "if (pattern.size() == 1) pattern.push_back(pattern.front());": "viewer must normalize a single dash in its temporary rendering pattern",
+        },
+        "src/core/annot_types.h": {
+            "inline void ForEachAnnotationTextRect(const Annotation& ann, Visit&& visit) {": "text annotation rectangles must come from one shared quad helper",
+            "visit(std::min(ann.x1, ann.x2), std::min(ann.y1, ann.y2),": "text annotation rectangles must fall back to the annotation box when no quads exist",
+            "for (size_t qi = 0; qi + 7 < q.size(); qi += 8) {": "text annotation rectangles must visit every complete quad",
         },
         "src/file_output/file_output.cpp": {
             "enum class AnnotationRenderMode": "export rendering must keep viewer-like and PDF-like annotation render modes explicit",
@@ -1103,8 +1107,7 @@ def find_annotation_layer_regressions() -> list[str]:
             for needle, message in {
                 "TintRectTextPixels(hdc, rectangle, ann.color": "TextColor must tint text pixels in the normal view",
                 "pdf_text_coverage::Paint(hdc, rectangle, ann.color": "TextColor must tint text pixels in the magnified view",
-                "tint(qr);": "TextColor selection quads must use the shared pixel tint",
-                "tint(r);": "TextColor fallback rectangles must use the shared pixel tint",
+                "tint(textRect(minX, minY, maxX, maxY));": "TextColor selection quads and fallback rectangles must use the shared pixel tint",
             }.items():
                 if needle not in tint_branch:
                     errors.append(f"{overlay_path}: {message}")

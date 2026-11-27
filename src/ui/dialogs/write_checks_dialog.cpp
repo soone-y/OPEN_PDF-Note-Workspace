@@ -1,4 +1,5 @@
 #include "ui/dialogs/write_checks_dialog.h"
+#include "core/workspace_layout.h"
 #include "diagnostics/write_checks.h"
 #include "diagnostics/normal_operations.h"
 #include "core/app_core.h"
@@ -78,8 +79,8 @@ void Snapshot(Context& ctx) {
     ctx.snapshotNote = g_currentNotePath;
     ctx.targets = {exe.empty() ? std::filesystem::path{} : exe / L"pdf_note_workspace_setup.json", exe,
         root, root, root.empty() ? std::filesystem::path{} : root / L"__pdf_note_workspace__" / L"__settings__",
-        root.empty() ? std::filesystem::path{} : root / L"__pdf_note_workspace__" / L"__tmp__",
-        root.empty() ? std::filesystem::path{} : root / L"__pdf_note_workspace__" / L"__escape__",
+        workspace_layout::Tmp(root),
+        workspace_layout::Failed(root),
         root.empty() ? std::filesystem::path{} : root / L"__pdf_note_workspace__" / L"__log__",
         CurrentPdfDirectory(), CurrentNoteDirectory(), std::filesystem::path(g_currentSessionPath), std::filesystem::path(g_currentSessionPath),
         root.empty() ? std::filesystem::path{} : office::work_paths::Root(root).parent_path(),

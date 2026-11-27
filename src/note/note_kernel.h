@@ -92,6 +92,7 @@ public:
     [[nodiscard]] bool SetClroAsciiOnly(bool value);
     [[nodiscard]] bool SetQuoteLazyContinuation(bool value);
     [[nodiscard]] bool SetClroListImplicitContinuation(bool value);
+    [[nodiscard]] bool SetClroListBodyAlignment(bool value);
     [[nodiscard]] bool UpdateFileMetadata(NoteMetadata metadata, NoteContentKind contentKind);
 
     bool valid() const { return text_core_.valid(); }

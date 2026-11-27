@@ -19,16 +19,17 @@ inline bool Run() {
     };
     const auto same = [](const WorkspaceConfig& a, const WorkspaceConfig& b) {
         return a.clroAsciiOnly == b.clroAsciiOnly && a.noteQuoteLazyContinuation == b.noteQuoteLazyContinuation &&
-            a.clroListImplicitContinuation == b.clroListImplicitContinuation;
+            a.clroListImplicitContinuation == b.clroListImplicitContinuation && a.clroListBodyAlignment == b.clroListBodyAlignment;
     };
     const std::wstring raw = L"<c=赤>COLOR</>\n\n- ITEM\nTAIL\n\n> QUOTE\nREST";
     note::NoteWorkspaceService service;
     const auto identity = note::BuildSnapshotIdentity({3301}, 1, 1, u8"<c=赤>COLOR</>\n\n- ITEM\nTAIL\n\n> QUOTE\nREST");
-    for (unsigned mask = 0; mask < 8; ++mask) {
+    for (unsigned mask = 0; mask < 16; ++mask) {
         WorkspaceConfig config;
         config.clroAsciiOnly = (mask & 1) != 0;
         config.noteQuoteLazyContinuation = (mask & 2) != 0;
         config.clroListImplicitContinuation = (mask & 4) != 0;
+        config.clroListBodyAlignment = (mask & 8) != 0 && !config.clroListImplicitContinuation;
         search::Writer wire;
         search::WriteNoteSyntaxPreferences(wire, config);
         wire.Put<uint32_t>(0x24681357);
@@ -36,7 +37,7 @@ inline bool Run() {
         search::Reader reader(wire.bytes);
         search::ReadNoteSyntaxPreferences(reader, received);
         check(same(config, received) && reader.Get<uint32_t>() == 0x24681357,
-              "all three child-process fields preserve order and following data", mask);
+              "all four child-process fields preserve order and following data", mask);
         reader.End();
         for (const auto* file : {L"syntax.clro", L"syntax.CLRO", L"syntax.md", L"syntax.markdown", L"syntax.txt", L"syntax.tex"}) {
             const auto metadata = BuildNoteTextMetadata(received, file);
@@ -44,7 +45,8 @@ inline bool Run() {
             check(metadata.file_name == file && metadata.title == L"syntax" &&
                   metadata.clro_ascii_only == (clro && config.clroAsciiOnly) &&
                   metadata.quote_lazy_continuation == (clro && config.noteQuoteLazyContinuation) &&
-                  metadata.clro_list_implicit_continuation == (clro && config.clroListImplicitContinuation),
+                  metadata.clro_list_implicit_continuation == (clro && config.clroListImplicitContinuation) &&
+                  metadata.clro_list_body_alignment == (clro && config.clroListBodyAlignment),
                   "shared metadata applies preferences only to CLRO", mask);
         }
         const auto metadata = BuildNoteTextMetadata(config, L"syntax.clro");
@@ -54,7 +56,8 @@ inline bool Run() {
             BuildNoteTextMetadata(received, L"syntax.clro"), raw, note::NoteContentKind::Markdown);
         check(index && index->valid && index->text_model.meta.clro_ascii_only == config.clroAsciiOnly &&
               index->text_model.meta.quote_lazy_continuation == config.noteQuoteLazyContinuation &&
-              index->text_model.meta.clro_list_implicit_continuation == config.clroListImplicitContinuation,
+              index->text_model.meta.clro_list_implicit_continuation == config.clroListImplicitContinuation &&
+              index->text_model.meta.clro_list_body_alignment == config.clroListBodyAlignment,
               "search index and cache use the received preference set", mask);
         if (!index || !index->valid) continue;
         const auto inBlock = [&](const note::NoteDocument& document, note::BlockKind kind, size_t offset) {
@@ -89,10 +92,21 @@ inline bool Run() {
         catch (const std::runtime_error&) { rejected = true; }
         check(rejected && same(config, previous), "malformed preferences cannot partially replace destination", 0);
     }
+    for (const std::string& invalid : {std::string(3, '\0'),
+        std::string("\2\0\0\0", 4), std::string("\0\2\0\0", 4),
+        std::string("\0\0\2\0", 4), std::string("\0\0\0\2", 4),
+        std::string("\0\0\1\1", 4)}) {
+        auto config = previous;
+        search::Reader reader(invalid);
+        bool rejected = false;
+        try { search::ReadNoteSyntaxPreferences(reader, config); }
+        catch (const std::runtime_error&) { rejected = true; }
+        check(rejected && same(config, previous), "four-field and conflicting policies reject atomically", 0);
+    }
     note::NoteTextCore core;
     core.Reset({3302}, BuildNoteTextMetadata(previous, L"plain.md"), L"unchanged", 4, 4);
     check(!core.SetClroAsciiOnly(true) && !core.SetQuoteLazyContinuation(true) &&
-          !core.SetClroListImplicitContinuation(true) && core.MatchesRaw(L"unchanged") && core.content_revision() == 4,
+          !core.SetClroListImplicitContinuation(true) && !core.SetClroListBodyAlignment(true) && core.MatchesRaw(L"unchanged") && core.content_revision() == 4,
           "CLRO preference updates are a no-op on other formats", 0);
     std::cout << "Note syntax preference checks=" << checks << " result=" << (ok ? "PASS" : "FAIL") << "\n";
     return ok;

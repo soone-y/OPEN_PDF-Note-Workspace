@@ -68,6 +68,27 @@ class LibreOfficeCustomPatchTests(unittest.TestCase):
         self.assertFalse(any(line.startswith("-") and "free(def->" in line for line in nested))
         self.assertNotIn("MD4C_USE_UTF16", "\n".join(nested))
 
+    def test_libxml2_http_patch_is_withdrawn_and_number_reserved(self):
+        # libxml2 2.15 removed its HTTP client; nanohttp.c only holds ABI stubs.
+        self.assertEqual(list(PATCH_DIR.glob("0017-*.patch")), [])
+        self.assertEqual(list(PATCH_DIR.glob("0042-*.patch")), [])
+        for patch in PATCH_DIR.glob("*.patch"):
+            self.assertNotIn("external/libxml2/ExternalProject_libxml2.mk", patch.read_text(encoding="utf-8"), patch.name)
+
+    def test_xmlsec_utf8_flag_targets_official_libxml_cflags(self):
+        patch = (PATCH_DIR / "0003-xmlsec-msvc-utf8.patch").read_text(encoding="utf-8")
+        self.assertIn('-\t\t\tcflags="$(SOLARINC) $(LIBXML_CFLAGS)" \\\n', patch)
+        self.assertIn('+\t\t\tcflags="/utf-8 $(SOLARINC) $(LIBXML_CFLAGS)" \\\n', patch)
+        self.assertNotIn("bin.msvc", patch)
+        self.assertEqual(sum(line.startswith(("+", "-")) and not line.startswith(("+++", "---")) for line in patch.splitlines()), 2)
+
+    def test_media_listener_guards_both_declaration_and_url_change(self):
+        patch = (PATCH_DIR / "0046-guard-media-listener-when-avmedia-disabled.patch").read_text(encoding="utf-8")
+        self.assertIn("@@ -491,7 +491,9 @@", patch)
+        self.assertEqual(patch.count("+#if HAVE_FEATURE_AVMEDIA\n"), 1)
+        self.assertEqual(patch.count("+#endif\n"), 1)
+        self.assertIn("+    rtl::Reference<avmedia::PlayerListener> m_xPlayerListener;\n", patch)
+
 
 if __name__ == "__main__":
     unittest.main()

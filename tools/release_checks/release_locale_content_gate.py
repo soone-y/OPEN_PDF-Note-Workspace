@@ -26,22 +26,26 @@ REQUIRED_SAMPLE_FILES = (
 TOP_LEVEL_DOCUMENTS = ("README.md", "LICENSE.md", "SECURITY.md")
 REQUIRED_LECTURE_SAMPLE_FILES = {
     "ja": (
-        "01_講義サンプル/COURSE_GUIDE.html",
+        "01_講義サンプル/フォルダ構成.md",
         "01_講義サンプル/第01回_基本操作/使い方_基本操作.pdf",
         "01_講義サンプル/第03回_最初期構想/PDF学習ワークスペース統合画面構成および基本仕様書.pdf",
+        "01_講義サンプル/第05回_数式表示/数式配置練習.pdf",
     ),
     "en": (
-        "01_Lecture_Samples/COURSE_GUIDE.html",
+        "01_Lecture_Samples/FOLDER_STRUCTURE.md",
         "01_Lecture_Samples/Session_01_Basics/basic_workflow_guide.pdf",
         "01_Lecture_Samples/Session_03_Early_Design/early_design_reference.pdf",
+        "01_Lecture_Samples/Session_05_Math_Display/math_placement_practice.pdf",
     ),
 }
 REQUIRED_COMPANION_SESSION_NOTES = {
     "ja": (
         "01_講義サンプル/第03回_最初期構想/ノート_最初期構想.clro",
+        "01_講義サンプル/第05回_数式表示/ノート_数式表示.clro",
     ),
     "en": (
         "01_Lecture_Samples/Session_03_Early_Design/early_design_notes.clro",
+        "01_Lecture_Samples/Session_05_Math_Display/math_display_notes.clro",
     ),
 }
 REQUIRED_FULL_COMPANION_SESSION_NOTES = {

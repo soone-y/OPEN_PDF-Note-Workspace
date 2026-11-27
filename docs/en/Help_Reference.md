@@ -16,6 +16,21 @@ Use this reference while working to check where a command is, what to select, an
 | Share results | [Output](#output) |
 | Change behavior | [Settings](#settings), [keyboard controls](#keyboard-controls) |
 | Investigate a failure | [Checks and help](#checks-and-help), [Troubleshooting](Troubleshooting.md) |
+| Check what a term means | [Terms](#terms) |
+
+## Terms
+
+These are the main terms used on screen, in Help, and in the bundled documents.
+
+| Term | Meaning |
+| --- | --- |
+| Workspace | The folder you choose to hold your materials and notes. Choose it with **File > Choose Workspace...**; the left column lists its contents. Earlier versions labeled it "Root Folder". |
+| Lecture and session | The two levels inside a workspace. A lecture is a large group of materials; a session below it holds the PDFs and notes used together. Generic terminology can label these as upper and lower items. |
+| Temporary paths and external folders | Registrations for materials outside the workspace, used without copying them. Edits are saved to the registered files themselves. |
+| Working data | The `__pdf_note_workspace__` folder directly under the workspace. It holds work protection and backups. When you move a workspace, move this folder with it. See [Management folder](#management-folder-__pdf_note_workspace__) for which folders inside may be deleted. |
+| Distribution folder | The extracted application folder that contains the EXE files. Keep your workspace outside it. |
+| Original | Your PDF, note, or `.clrop` file itself. |
+| Work protection and Save Work | Edits are protected automatically and are not written to the originals immediately. **Save > Save Work** (`Ctrl+S`) saves them to the originals. See [Saving and Recovery](Save_and_Recovery.md). |
 
 ## Choose the application and edition
 
@@ -33,7 +48,7 @@ Use the file list and outline on the left, tabs at the top, and the document pan
 
 ### Create a lecture and a session
 
-A workspace is the root folder you select for your materials. A lecture groups sessions, and a session contains the PDFs and notes used together. Choose **File > Create > Lecture**, enter a name and confirm. Select that lecture, then use **File > Create > Session**. Canceling creates nothing. For example, create “Statistics” and its “Session 01”, then put that day's PDF and notes there. Generic terminology can label these as upper and lower items.
+A workspace is the folder you choose for your materials. A lecture groups sessions, and a session contains the PDFs and notes used together. Choose **File > Create > Lecture**, enter a name and confirm. Select that lecture, then use **File > Create > Session**. Canceling creates nothing. For example, create “Statistics” and its “Session 01”, then put that day's PDF and notes there. Generic terminology can label these as upper and lower items.
 
 ### Import files or folders
 
@@ -54,6 +69,10 @@ Use `.clro` or `.md` for formatted notes, `.txt` or `.csv` for plain text. CSV h
 ### Rename, move, organize, or inspect files
 
 Right-click an item in the lecture, session, PDF or note list to show it directly in File Explorer. **Location and paths** lets you inspect the working path and copy the path or name. Copied file names include the extension and omit display labels such as **External:**. To manage a temporary file entry in the PDF or note list, open **Temporary Paths** from its context menu.
+
+Right-click a file in the PDF or note list and choose **Pin** to keep it in the list with a **[Pinned]** label. You can open that file from the list after switching lectures or sessions. Pins belong to each workspace. Choose **Unpin** to release one; pins are cleared when the application closes. Pinning and unpinning leave the source file unchanged. Pins from another session are excluded from that session's automatic file opening. File pins follow renames, moves and undo operations performed in the app.
+
+Sessions also offer **Pin**. Their labels show **[Pinned] Original lecture / Session**. Selecting one from another lecture navigates to its original lecture and session. Open it first before changing or deleting a session shown under another lecture. **Unpin** only releases the list pin and keeps the folder and its contents. Session pins belong to each workspace and are cleared when the application closes. Renaming a lecture or session in the app updates pins beneath it; deleting one releases those pins. Opening a pinned session that was moved or deleted externally is refused: unpin it and select the correct session again.
 
 When items in a list share a name, the app omits the folders they share at the start of their paths and shows the remaining parent path after the name. For example, `Materials\Spring\Math` and `Materials\Fall\Math` appear as `Math [Spring]` and `Math [Fall]`. `[.]` marks an item directly inside the shared folder.
 
@@ -79,6 +98,29 @@ Renaming or moving an open note updates the file selection and the editor's save
 
 Do not edit `.clrop` in a text editor. Keep it beside its same-named PDF when copying or sharing. See [File Formats](File_Formats.md) for format choices and [annotation data](CLROP_Annotation_Format.md) for safe handling.
 
+### Management folder (`__pdf_note_workspace__`)
+
+The `__pdf_note_workspace__` folder directly under the workspace holds the application's management data, split into folders by role. The same information is written to `__pdf_note_workspace__/DELETE_OR_KEEP.txt` (rewritten in the display language). When you move a workspace, move this folder with it. While you investigate a problem, do not delete any of these folders.
+
+| Folder | Delete | When deleted | Recreated |
+|---|---|---|---|
+| `__settings__` | No | Settings return to their defaults and note identity records are rebuilt (note text is kept) | At the next start; settings when you next change them |
+| `__theme__` | No | The default theme is used | At the next start |
+| `__memo__` | No | The memo text is lost | When you next save the memo |
+| `__unsaved__` | No | Edits not yet saved to the original files cannot be recovered | When edits are next protected automatically |
+| `__recovery__` | No | Edit-recovery progress and history are lost | When you next use recovery |
+| `__operations__` | No | An interrupted multi-file operation cannot be undone at the next start | At the next multi-file operation |
+| `__operations_set_aside__` | No | Operation records you excluded from recovery are lost | When you next exclude a record |
+| `__backup__` | No | Pre-save backups and copies of records and settings disappear from Restore | When you next save, reset or change settings |
+| `__deleted__` | No | Folders deleted in the app can no longer be taken out | When you next delete in the app |
+| `__failed__` | No | Content that could not be written and damaged, unreadable files are lost | At the next start |
+| `__recent__` | While the app is closed | The last opened files and PDF view positions and rotations | At the next start; recorded when you open a file |
+| `__log__` | While the app is closed | Logs for investigation | At the next start |
+| `__tmp__` | While the app is closed | Files being written and Office conversion work (originals are kept) | At the next start |
+| `__test__` | Yes | Output of automated tests; normal use does not create it | When automated tests run |
+
+Files and folders not in this list (such as `__escape__`) were left by an older version. The current version does not read, move or delete them. Do not delete them before checking their contents.
+
 
 ## Convert materials or create a blank PDF
 
@@ -103,7 +145,7 @@ Open a PDF from the current session's PDF list. Select the note separately to re
 
 ### Zoom, page navigation and reading direction
 
-Use **View > Page** for first, previous, next, last or a page number (`Ctrl+G`). Numbers start at 1. **View > Zoom** lets you enter a percentage, return to 100% (`Ctrl+0`), or fit the current page (`Ctrl+E`), which adjusts both zoom and position. Ctrl+wheel changes zoom. These affect viewing rather than PDF contents.
+Use **View > Page** for first, previous, next, last or a page number (`Ctrl+G`). Numbers start at 1. **View > Zoom** lets you enter a percentage, return to 100%, or fit the current page (`Ctrl+E`), which adjusts both zoom and position. Ctrl+wheel changes zoom. These affect viewing rather than PDF contents.
 
 Under **View > Scroll**, choose top-to-bottom, bottom-to-top, right-to-left or left-to-right page progression, and single/continuous page display. A single page helps concentrate on one sheet; continuous display lets you read across page boundaries. **View > Left column** frees space by hiding workspace lists. Readability is a display aid for low-contrast PDF text, not an edit to its original text.
 
@@ -115,7 +157,7 @@ Use **View → Rotate** to temporarily turn the current page, the current page t
 
 New text, math and shapes are upright on the current screen and stay attached to the paper as it rotates. Their positions and content orientations are saved in `.clrop`.
 
-Rotations use four clockwise quarter-turn states, stored in the workspace's `__pdf_note_workspace__/__tmp__/pdf_view_positions.txt`. Older records without rotations use zero additional rotation. Rotation data with a different page count is not applied. Read or write failures preserve the existing record and failed saves are reported.
+Rotations use four clockwise quarter-turn states, stored in the workspace's `__pdf_note_workspace__/__recent__/pdf_view_positions.txt`. Older records without rotations use zero additional rotation. Rotation data with a different page count is not applied. Read or write failures preserve the existing record and failed saves are reported.
 
 The PDF export dialog's **Keep page rotation** checkbox starts ON. It captures each page's view angle when the export setting is added; queued and merged exports retain those angles. Turn it OFF to export in the original PDF orientation. Width and height refer to the selected output orientation. Quick PDF also defaults to ON. Change this checkbox and select **Set as Quick PDF** to save its ON/OFF preference. The angles themselves are not saved; Quick PDF uses the view angles at the time of export. PNG retains the original PDF orientation.
 
@@ -123,13 +165,13 @@ The PDF export dialog's **Keep page rotation** checkbox starts ON. It captures e
 
 Scrolling immediately after zooming keeps the new position when rendering finishes. Scrollbars track the view position through the margins at the document edges. Starting a wheel or drag gesture stops tracking from an earlier scrollbar hold.
 
-While editing PDF text, ten seconds of inactivity, scrolling, or zooming pauses automatic following of the edit position. `Ctrl`+`+`/`-` then changes the PDF zoom. The text and editing session remain intact. Typing, pasting, IME input, or moving the text cursor resumes following and brings the box into view. During active editing, `Ctrl`+`+`/`-` continues to change the text size.
+While editing PDF text, ten seconds of inactivity, scrolling, or zooming pauses automatic following of the edit position. The text and editing session remain intact. Typing, pasting, IME input, or moving the text cursor resumes following and brings the box into view. While editing, `Ctrl`+`+`/`-` changes the text size when the whole edit box is within the view, and changes the PDF zoom when any part of it is outside. After it changes the PDF zoom once, it keeps changing the zoom, even when the box comes fully into view, until you resume typing or move the text cursor. During IME composition it changes the text size.
 
 Touchpad scrolling preserves fine input deltas. **Touchpad scroll stabilization** in Basic settings defaults to ON. In PDF and rendered note views it reduces small reversals during continuous scrolling. Sustained movement in the opposite direction takes effect. Turn it OFF to bypass this suppression. High-resolution wheels that send fine input deltas may also receive stabilization. The note's raw text editor uses standard Windows scrolling.
 
 The annotation, lecture, session, PDF and note lists, and the application's file picker, accumulate fine scroll input separately for each list and move to the nearest row. Movement starts after about half a row of input and follows the Windows wheel setting. Ordinary annotation-list updates retain your browsing position; an action that reveals a newly added annotation brings that item into view.
 
-For PDF scrolling, arrow keys move by a fixed amount. With the PDF focused, hold `W` for up, `A` for left, `S` for down, or `D` for right to scroll smoothly. Hold two keys to move diagonally; releasing the keys stops movement. These PDF controls work with Vim controls on or off. While editing PDF text, the keys enter text.
+For PDF scrolling, arrow keys move by a fixed amount. With the PDF focused, hold `h` for left, `j` for down, `k` for up, or `l` for right to scroll smoothly. Hold two keys to move diagonally; releasing the keys stops movement. `J` / `K` (with Shift) go to the next / previous page, `gg` / `G` to the first / last page, `0` fits the whole page (same as `Ctrl+E`), and `/` opens search. `+` / `-` zoom in and out. Letter keys require single-key controls (on by default in new workspaces; saved settings keep their value); arrow keys and `+` / `-` always work. While editing PDF text, the keys enter text.
 
 ## Annotation tools and colors
 
@@ -272,7 +314,7 @@ Search runs in the background with limited resource use and adds results in batc
 
 Scale figures describe the portion checked so far; they do not guarantee the final count or remaining time. Each search uses the conditions captured at its start. Unreadable items are counted and the window states that results cover the searchable portion. Press Enter or double-click an **Unsearched item** row to inspect its details. Files requiring an online download are not read. Reaching the result display memory limit stops the search, retains displayed results and asks you to narrow the scope or query. Splitting a large collection into several groups can make searches easier to manage.
 
-Groups are stored in `__pdf_note_workspace__/__settings__/search_groups.bin` inside the workspace. Previous saved contents are protected in `__pdf_note_workspace__/__escape__/search_groups_*.bin`. Storage failures and conflicting changes preserve existing groups and show an error. Search creates no index or management files in external source folders.
+Groups are stored in `__pdf_note_workspace__/__settings__/search_groups.bin` inside the workspace. Previous saved contents are protected in `__pdf_note_workspace__/__backup__/search_groups_*.bin`. Storage failures and conflicting changes preserve existing groups and show an error. Search creates no index or management files in external source folders.
 
 Choose **Hide options** to fold the search conditions and guidance away and enlarge the results area. Conditions stay selected; **Show options** restores them. The folded window can be made shorter. **Keep above main window** keeps search in front of this app's main window while leaving keyboard focus where you are working. These presentation choices last until the search window closes.
 
@@ -453,7 +495,7 @@ Changes saved or applied in the settings dialog are persistent settings. Items w
 
 Open **Settings → Annotation → Controls and shortcuts → Open shortcut overview and bindings** to review and edit bindings in one panel. Common fixed keys appear beside the editable list. Direct tool bindings are independent of annotation bar visibility, disabled state, and order, including hidden buttons. Image, read-only preview, and save-time editing restrictions remain in effect. Text entry takes priority.
 
-New defaults use `Ctrl+1–9` for Select, Pan, Magnifier, Text, Marker, Free marker, Pen, Line, and Shape. `Ctrl+0` stays reserved for 100% zoom. Existing custom settings are retained. Use **Add unassigned Ctrl+1–9**, review the list, and save to add only unused combinations.
+New defaults use `Ctrl+1–9` and `Ctrl+0` for Select, Pan, Magnifier, Text, Marker, Free marker, Pen, Line, Shape, and Eraser. Existing custom settings are retained. Use **Add unassigned Ctrl+0–9**, review the list, and save to add only unused combinations.
 
 Choose a main key and the Ctrl, Shift, and Alt checkboxes, then choose a tool. Top-row digits and numpad keys are separate choices. The composed chord, duplicate or reserved-key conflicts, and any overridden common action appear immediately. **Press keys to assign** records an actual combination while suppressing its original action. Esc cancels recording only.
 
@@ -486,7 +528,9 @@ Existing custom annotation bindings take priority on overlapping chords; the set
 
 With Vim controls enabled, press `Esc` or `Ctrl+[` to enter Normal mode while keeping keyboard focus in the note. Finish IME composition first. Normal disables the note's IME; pressing `i` returns to Insert and restores IME input. Use `h` for left, `j` for down, `k` for up, and `l` for right; arrow keys move in the same directions. Pressing `h` at the start of the note keeps input in the note.
 
-In Normal mode, `Esc` clears a selection or pending command and keeps Normal mode active. Press `i` to resume typing. To change panes, use `Ctrl+h` for the file list or `Ctrl+k` for the PDF.
+In Normal mode, `Esc` clears a selection or pending command and keeps Normal mode active. Press `i` to resume typing. To change panes from any pane, use `Ctrl+h` for the file list, `Ctrl+j` for the note, or `Ctrl+k` for the PDF. The key for the current pane keeps the focus where it is. While typing, `Ctrl+h/j/k/l` move the caret, so press `Esc` first.
+
+`Esc` in the PDF pane or a file list keeps the focus there. In the PDF it clears text and annotation selections; while editing a text box, it commits the text and stays in the PDF.
 
 From the PDF, `Ctrl+j` moves focus to the note at its current caret position. With Vim controls enabled, it enters Normal; press `i` to start typing. With Vim controls off, it uses standard input.
 

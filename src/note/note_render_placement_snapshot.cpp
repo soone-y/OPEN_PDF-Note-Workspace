@@ -88,6 +88,7 @@ struct StoredRunPlacement {
     int width_px = 0;
     std::vector<StoredPlacementBoundary> boundaries;
     std::vector<StoredRunPlacementFragment> fragments;
+    std::shared_ptr<const mathrender::Formula> math_formula;
 };
 
 struct StoredVisualDecoration {
@@ -568,6 +569,7 @@ bool NoteRenderPlacementStorage::MakeStoredLine(const NoteRenderLinePlacement& l
                 !MakeRelativeSpan(sourceLines, run.source_span, &stored.source_span)) return false;
             stored.x_px = run.x_px;
             stored.width_px = run.width_px;
+            stored.math_formula = run.math_formula;
             stored.boundaries.reserve(run.boundaries.size());
             for (const NoteRenderPlacementBoundary& boundary : run.boundaries) {
                 StoredPlacementBoundary storedBoundary;
@@ -623,6 +625,7 @@ bool NoteRenderPlacementStorage::ResolveStoredLine(const StoredLinePlacement& li
             if (!ResolveRelativeSpan(sourceLines, stored.source_span, &run.source_span)) return false;
             run.x_px = stored.x_px;
             run.width_px = stored.width_px;
+            run.math_formula = stored.math_formula;
             run.boundaries.reserve(stored.boundaries.size());
             for (const StoredPlacementBoundary& storedBoundary : stored.boundaries) {
                 NoteRenderPlacementBoundary boundary;

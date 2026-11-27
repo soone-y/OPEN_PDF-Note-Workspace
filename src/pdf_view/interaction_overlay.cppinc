@@ -215,21 +215,63 @@ static bool ReadablePathHasVisibleInk(const PageCache& page, const PageCache::Re
     return false;
 }
 
+// Sampling the page bitmap for every glyph and path on every paint dominated
+// scrolling with the readable overlay on. The decisions depend only on the
+// bitmap, the extracted lists and the scale, so they are memoized per page.
+static const PageCache::ReadableOverlayMemo& ReadableOverlayMemoFor(PageCache& page) {
+    using Memo = PageCache::ReadableOverlayMemo;
+    Memo& memo = page.readableOverlayMemo;
+    if (memo.pixels == page.pixels.data() && memo.pixelBytes == page.pixels.size() &&
+        memo.generation == page.pixelsGeneration && memo.bmpW == page.bmpW && memo.bmpH == page.bmpH &&
+        memo.coarse == page.bitmapCoarse && memo.scale == g_pdf.scale &&
+        memo.glyphs == page.readableGlyphs.data() && memo.glyphCount == page.readableGlyphs.size() &&
+        memo.paths == page.readablePaths.data() && memo.pathCount == page.readablePaths.size()) {
+        return memo;
+    }
+    memo = Memo{};
+    memo.glyphBackground.reserve(page.readableGlyphs.size());
+    for (const auto& glyph : page.readableGlyphs) {
+        COLORREF bg{};
+        const bool draw = !glyph.text.empty() && SampleReadableGlyphBackground(page, glyph, bg) &&
+            !ReadableGlyphHasVisibleInk(page, glyph, bg);
+        memo.glyphBackground.push_back(draw ? bg : Memo::kSkip);
+    }
+    memo.pathBackground.reserve(page.readablePaths.size());
+    for (const auto& path : page.readablePaths) {
+        COLORREF bg{};
+        const bool draw = !path.segments.empty() && SampleReadablePathBackground(page, path, bg) &&
+            !ReadablePathHasVisibleInk(page, path, bg);
+        memo.pathBackground.push_back(draw ? bg : Memo::kSkip);
+    }
+    memo.pixels = page.pixels.data();
+    memo.pixelBytes = page.pixels.size();
+    memo.generation = page.pixelsGeneration;
+    memo.bmpW = page.bmpW;
+    memo.bmpH = page.bmpH;
+    memo.coarse = page.bitmapCoarse;
+    memo.scale = g_pdf.scale;
+    memo.glyphs = page.readableGlyphs.data();
+    memo.glyphCount = page.readableGlyphs.size();
+    memo.paths = page.readablePaths.data();
+    memo.pathCount = page.readablePaths.size();
+    return memo;
+}
+
 static void DrawReadablePathOverlayForPage(HDC hdc, int pageIndex, double pageLeft, double pageTop) {
     if (!EnsurePdfPageReadablePaths(pageIndex)) return;
-    const auto& pageWithPaths = g_pdf.pages[static_cast<size_t>(pageIndex)];
+    auto& pageWithPaths = g_pdf.pages[static_cast<size_t>(pageIndex)];
     if (pageWithPaths.pixels.empty()) return;
     const double pxPerPt = kDpi / 72.0 * g_pdf.scale;
-    for (const auto& path : pageWithPaths.readablePaths) {
-        if (path.segments.empty()) continue;
-        COLORREF bg{};
-        if (!SampleReadablePathBackground(pageWithPaths, path, bg)) continue;
-        if (ReadablePathHasVisibleInk(pageWithPaths, path, bg)) continue;
+    const auto& memo = ReadableOverlayMemoFor(pageWithPaths);
+    for (size_t pathIndex = 0; pathIndex < pageWithPaths.readablePaths.size(); ++pathIndex) {
+        const auto& path = pageWithPaths.readablePaths[pathIndex];
+        const COLORREF bg = memo.pathBackground[pathIndex];
+        if (bg == PageCache::ReadableOverlayMemo::kSkip) continue;
         COLORREF color = ReadableOverlayColorForBackground(bg);
         int penW = std::max(1, static_cast<int>(std::lround(std::max(1.0f, path.widthPt) * pxPerPt)));
-        HPEN pen = CreatePen(PS_SOLID, penW, color);
+        ui::ScopedPen pen(CreatePen(PS_SOLID, penW, color));
         if (!pen) continue;
-        HGDIOBJ oldPen = SelectObject(hdc, pen);
+        ui::ScopedSelectObject penSelection(hdc, pen.get());
         for (const auto& seg : path.segments) {
             int x1 = static_cast<int>(std::lround(pageLeft + seg.x1 * pxPerPt));
             int y1 = static_cast<int>(std::lround(pageTop + (pageWithPaths.heightPt - seg.y1) * pxPerPt));
@@ -238,8 +280,6 @@ static void DrawReadablePathOverlayForPage(HDC hdc, int pageIndex, double pageLe
             MoveToEx(hdc, x1, y1, nullptr);
             LineTo(hdc, x2, y2);
         }
-        if (oldPen) SelectObject(hdc, oldPen);
-        DeleteObject(pen);
     }
 }
 
@@ -259,7 +299,7 @@ static void DrawReadableTextOverlay(HDC hdc, const RECT& client) {
         }
         const bool haveGlyphs = EnsurePdfPageReadableGlyphs(pageIndex);
         const bool havePaths = EnsurePdfPageReadablePaths(pageIndex);
-        const auto& pageWithGlyphs = g_pdf.pages[static_cast<size_t>(pageIndex)];
+        auto& pageWithGlyphs = g_pdf.pages[static_cast<size_t>(pageIndex)];
         if (pageWithGlyphs.pixels.empty() || (!haveGlyphs && !havePaths)) continue;
 
         int pageSaved = SaveDC(hdc);
@@ -271,11 +311,11 @@ static void DrawReadableTextOverlay(HDC hdc, const RECT& client) {
 
         DrawReadablePathOverlayForPage(hdc, pageIndex, pageLeft, pageTop);
 
-        for (const auto& glyph : pageWithGlyphs.readableGlyphs) {
-            if (glyph.text.empty()) continue;
-            COLORREF bg{};
-            if (!SampleReadableGlyphBackground(pageWithGlyphs, glyph, bg)) continue;
-            if (ReadableGlyphHasVisibleInk(pageWithGlyphs, glyph, bg)) continue;
+        const auto& memo = ReadableOverlayMemoFor(pageWithGlyphs);
+        for (size_t glyphIndex = 0; glyphIndex < pageWithGlyphs.readableGlyphs.size(); ++glyphIndex) {
+            const auto& glyph = pageWithGlyphs.readableGlyphs[glyphIndex];
+            const COLORREF bg = memo.glyphBackground[glyphIndex];
+            if (bg == PageCache::ReadableOverlayMemo::kSkip) continue;
 
             const double pxPerPt = kDpi / 72.0 * g_pdf.scale;
             // PDF font-size metadata can describe the untransformed font and
@@ -726,8 +766,110 @@ static void DrawDashedWaveLinePx(HDC hdc,
 static void DrawAnnotations(HDC hdc, const RECT& client, const pdf_magnifier::Transform& paint = {});
 static void DrawTextSelection(HDC hdc);
 
+// Painting only records display failures. The notice is shown after EndPaint,
+// once per failure episode, so WM_PAINT never creates or moves windows and a
+// persistent failure does not re-announce itself on every scroll frame.
+struct PdfPaintFailureNotices {
+    bool textColorFailedThisPaint = false;
+    bool textColorNoticeShown = false;
+};
+static PdfPaintFailureNotices g_pdfPaintFailureNotices;
+
+static void BeginPdfPaintFailureTracking() {
+    g_pdfPaintFailureNotices.textColorFailedThisPaint = false;
+}
+
+static void FlushPdfPaintFailureNotices(HWND hwnd) {
+    auto& notices = g_pdfPaintFailureNotices;
+    if (!notices.textColorFailedThisPaint) {
+        notices.textColorNoticeShown = false;
+        return;
+    }
+    if (notices.textColorNoticeShown) return;
+    notices.textColorNoticeShown = true;
+    ShowSoftNotice(hwnd, localization::Text(L"pdf.text_color.display_failed"), SoftNoticeKind::Warning);
+}
+
+// Recent lens renders, kept in page-relative pixels with a margin around the
+// lens. While the cursor moves a little, the lens content is the same page
+// raster shifted by whole pixels, so it is reused instead of asking PDFium to
+// render again under the shared engine lock on every mouse move.
+struct PdfMagnifierRenderCache {
+    struct Entry {
+        FPDF_DOCUMENT document = nullptr;
+        uint64_t generation = 0;
+        int pageIndex = -1;
+        int rotation = 0;
+        LONG pageW = 0, pageH = 0;
+        pdf_magnifier::Region region; // rect relative to the page's lens origin
+    };
+    static constexpr size_t kMaxEntries = 4;
+    std::vector<Entry> entries; // most recent last
+};
+static PdfMagnifierRenderCache g_pdfMagnifierRenderCache;
+
+// Returns the cached page raster covering the lens, rendering it if needed;
+// its rect is relative to `pageRect`'s origin. The pointer stays valid until
+// the next call.
+static const pdf_magnifier::Region* MagnifierPageRegion(int pageIndex, int rotation, const RECT& pageRect,
+                                                        const RECT& canvas) {
+    const LONG pageW = pageRect.right - pageRect.left;
+    const LONG pageH = pageRect.bottom - pageRect.top;
+    RECT needed{};
+    if (!IntersectRect(&needed, &pageRect, &canvas)) return nullptr;
+    OffsetRect(&needed, -pageRect.left, -pageRect.top);
+    auto& entries = g_pdfMagnifierRenderCache.entries;
+    for (auto it = entries.begin(); it != entries.end(); ++it) {
+        if (it->document != g_pdf.doc || it->generation != g_pdf.renderGeneration ||
+            it->pageIndex != pageIndex || it->rotation != rotation ||
+            it->pageW != pageW || it->pageH != pageH) continue;
+        RECT covered{};
+        if (!IntersectRect(&covered, &needed, &it->region.rect) || !EqualRect(&covered, &needed)) continue;
+        std::rotate(it, std::next(it), entries.end());
+        return &entries.back().region;
+    }
+    // Render the lens plus half a lens on each side, falling back to the
+    // exact lens when the larger buffer exceeds the renderer's size cap.
+    const LONG marginX = (canvas.right - canvas.left) / 2;
+    const LONG marginY = (canvas.bottom - canvas.top) / 2;
+    const RECT expanded{canvas.left - marginX, canvas.top - marginY,
+                        canvas.right + marginX, canvas.bottom + marginY};
+    pdf_magnifier::Region region;
+    bool rendered = false;
+    {
+        std::lock_guard<std::recursive_mutex> lock(g_pdfiumMutex);
+        rendered = pdf_magnifier::Render(g_pdf.doc, pageIndex, pageRect, expanded, rotation, region) ||
+                   pdf_magnifier::Render(g_pdf.doc, pageIndex, pageRect, canvas, rotation, region);
+    }
+    if (!rendered) return nullptr;
+    PdfMagnifierRenderCache::Entry entry;
+    entry.document = g_pdf.doc;
+    entry.generation = g_pdf.renderGeneration;
+    entry.pageIndex = pageIndex;
+    entry.rotation = rotation;
+    entry.pageW = pageW;
+    entry.pageH = pageH;
+    entry.region = std::move(region);
+    OffsetRect(&entry.region.rect, -pageRect.left, -pageRect.top);
+    if (entries.size() >= PdfMagnifierRenderCache::kMaxEntries) entries.erase(entries.begin());
+    entries.push_back(std::move(entry));
+    return &entries.back().region;
+}
+
+static void PaintMagnifierPageRegion(HDC dc, const pdf_magnifier::Region& region, const RECT& pageRect) {
+    const int width = region.rect.right - region.rect.left;
+    const int height = region.rect.bottom - region.rect.top;
+    BITMAPINFO info{};
+    info.bmiHeader = {sizeof(BITMAPINFOHEADER), width, -height, 1, 32, BI_RGB, 0, 0, 0, 0, 0};
+    StretchDIBits(dc, pageRect.left + region.rect.left, pageRect.top + region.rect.top, width, height,
+                  0, 0, width, height, region.pixels.data(), &info, DIB_RGB_COLORS, SRCCOPY);
+}
+
 static void DrawMagnifierLens(HDC hdc, const RECT& client) {
-    if (g_toolMode != ToolMode::Magnifier || !g_pdf.magnifierActive) return;
+    if (g_toolMode != ToolMode::Magnifier || !g_pdf.magnifierActive) {
+        g_pdfMagnifierRenderCache.entries.clear();
+        return;
+    }
     POINT center = g_pdf.magnifierPos;
     if (center.x < client.left || center.x > client.right ||
         center.y < client.top || center.y > client.bottom) {
@@ -774,9 +916,7 @@ static void DrawMagnifierLens(HDC hdc, const RECT& client) {
         StretchBlt(srcDC, 0, 0, lensW, lensH, hdc, srcX, srcY, srcW, srcH, SRCCOPY);
     } else {
         const RECT canvas{0, 0, lensW, lensH};
-        HBRUSH background = CreateSolidBrush(g_theme.pdfBg);
-        FillRect(srcDC, &canvas, background);
-        DeleteObject(background);
+        ui::FillSolidRect(srcDC, canvas, g_theme.pdfBg);
         const pdf_magnifier::Transform paint{zoom, center.x-lensW/(2.0*zoom), center.y-lensH/(2.0*zoom)};
         const RECT source{static_cast<LONG>(std::floor(paint.sourceX)), static_cast<LONG>(std::floor(paint.sourceY)),
             static_cast<LONG>(std::ceil(paint.sourceX+lensW/zoom)), static_cast<LONG>(std::ceil(paint.sourceY+lensH/zoom))};
@@ -786,13 +926,8 @@ static void DrawMagnifierLens(HDC hdc, const RECT& client) {
             const double top = PageClientTop(static_cast<int>(i));
             if (left+page.w < source.left || left > source.right || top+page.h < source.top || top > source.bottom) continue;
             const RECT pageRect = paint.Page(left, top, page.w, page.h);
-            pdf_magnifier::Region region;
-            bool rendered = false;
-            {
-                std::lock_guard<std::recursive_mutex> lock(g_pdfiumMutex);
-                rendered = pdf_magnifier::Render(g_pdf.doc, static_cast<int>(i), pageRect, canvas, page.viewRotation, region);
-            }
-            if (rendered) pdf_magnifier::Paint(srcDC, region);
+            const auto* region = MagnifierPageRegion(static_cast<int>(i), page.viewRotation, pageRect, canvas);
+            if (region) PaintMagnifierPageRegion(srcDC, *region, pageRect);
             else if (!page.pixels.empty() && page.bmpW > 0 && page.bmpH > 0) {
                 BITMAPINFO info{};
                 info.bmiHeader = {sizeof(BITMAPINFOHEADER), page.bmpW, -page.bmpH, 1, 32, BI_RGB, 0, 0, 0, 0, 0};
@@ -3144,9 +3279,9 @@ static void DrawTextSelection(HDC hdc) {
         underlineMarkerPreview = MarkerTextModeUsesUnderline(g_toolMode);
     }
 
-    HPEN pen = CreatePen(PS_NULL, 0, 0);
-    HGDIOBJ oldPen = SelectObject(hdc, pen);
-    HGDIOBJ oldBrush = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
+    ui::ScopedSelectObject penSelection(hdc, GetStockObject(NULL_PEN));
+    ui::ScopedSelectObject brushSelection(hdc, GetStockObject(HOLLOW_BRUSH));
+    const bool roundPageOrigin = !PdfPaintDcHasWorldTransform(hdc);
 
     for (int i = minPage; i <= maxPage; ++i) {
         if (g_pdf.selectionByText && (g_pdf.selectingText || i == startPage || i == endPage)) {
@@ -3155,10 +3290,9 @@ static void DrawTextSelection(HDC hdc) {
         const auto& page = g_pdf.pages[static_cast<size_t>(i)];
         if (page.charBoxes.empty()) continue;
 
-        double pageLeftClientD = PageClientLeft(i);
-        double pageTopClientD = PageClientTop(i);
-        int pageLeft = static_cast<int>(std::round(pageLeftClientD));
-        int pageTop = static_cast<int>(std::round(pageTopClientD));
+        const PdfPagePaintMap map = PdfPagePaintMapFor(i, roundPageOrigin);
+        const int pageLeft = static_cast<int>(std::round(map.left));
+        const int pageTop = static_cast<int>(std::round(map.top));
 
         if (g_pdf.selectionByText) {
             int sChar = -1, eChar = -1;
@@ -3175,15 +3309,7 @@ static void DrawTextSelection(HDC hdc) {
                                             horizontalPadPreview, lines);
                 for (const auto& ls : lines) {
                     if (ls.left > ls.right) continue;
-                    double x1 = pageLeftClientD + ls.left * kDpi / 72.0 * g_pdf.scale;
-                    double x2 = pageLeftClientD + ls.right * kDpi / 72.0 * g_pdf.scale;
-                    double y1 = pageTopClientD + (page.heightPt - ls.top) * kDpi / 72.0 * g_pdf.scale;
-                    double y2 = pageTopClientD + (page.heightPt - ls.bottom) * kDpi / 72.0 * g_pdf.scale;
-                    RECT r{};
-                    r.left = static_cast<LONG>(std::round(std::min(x1, x2)));
-                    r.right = static_cast<LONG>(std::round(std::max(x1, x2)));
-                    r.top = static_cast<LONG>(std::round(std::min(y1, y2)));
-                    r.bottom = static_cast<LONG>(std::round(std::max(y1, y2)));
+                    const RECT r = map.Rect(ls.left, ls.top, ls.right, ls.bottom);
                     if (textColorMarkerPreview) {
                         TintRectTextPixels(hdc, r, g_activeColor, page, pageLeft, pageTop);
                     } else {
@@ -3210,10 +3336,10 @@ static void DrawTextSelection(HDC hdc) {
                     padPt, underlineMarkerPreview, !textColorMarkerPreview, lines);
                 for (const auto& line : lines) {
                     const RECT area{
-                        static_cast<LONG>(std::round(pageLeftClientD + line.left * scale)),
-                        static_cast<LONG>(std::round(pageTopClientD + (page.heightPt-line.top) * scale)),
-                        static_cast<LONG>(std::round(pageLeftClientD + line.right * scale)),
-                        static_cast<LONG>(std::round(pageTopClientD + (page.heightPt-line.bottom) * scale))};
+                        static_cast<LONG>(std::round(map.X(line.left))),
+                        static_cast<LONG>(std::round(map.Y(line.top))),
+                        static_cast<LONG>(std::round(map.X(line.right))),
+                        static_cast<LONG>(std::round(map.Y(line.bottom)))};
                     if (textColorMarkerPreview) TintRectTextPixels(hdc, area, g_activeColor, page, pageLeft, pageTop);
                     else fillSelection(area);
                 }
@@ -3240,15 +3366,7 @@ static void DrawTextSelection(HDC hdc) {
                     leftPt = std::max(0.0, leftPt - kMarkerTextHorizontalPadPt);
                     rightPt = std::min(page.widthPt, rightPt + kMarkerTextHorizontalPadPt);
                 }
-                double x1 = pageLeftClientD + leftPt * kDpi / 72.0 * g_pdf.scale;
-                double x2 = pageLeftClientD + rightPt * kDpi / 72.0 * g_pdf.scale;
-                double y1 = pageTopClientD + (page.heightPt - (cb.top + padPt)) * kDpi / 72.0 * g_pdf.scale;
-                double y2 = pageTopClientD + (page.heightPt - (cb.bottom - padPt)) * kDpi / 72.0 * g_pdf.scale;
-                RECT r{};
-                r.left = static_cast<LONG>(std::round(std::min(x1, x2)));
-                r.right = static_cast<LONG>(std::round(std::max(x1, x2)));
-                r.top = static_cast<LONG>(std::round(std::min(y1, y2)));
-                r.bottom = static_cast<LONG>(std::round(std::max(y1, y2)));
+                const RECT r = map.Rect(leftPt, cb.top + padPt, rightPt, cb.bottom - padPt);
                 if (textColorMarkerPreview) {
                     TintRectTextPixels(hdc, r, g_activeColor, page, pageLeft, pageTop);
                 } else {
@@ -3262,24 +3380,12 @@ static void DrawTextSelection(HDC hdc) {
                     padPt, true, true, underlineLines);
                 for (const auto& ls : underlineLines) {
                     if (ls.left > ls.right) continue;
-                    double x1 = pageLeftClientD + ls.left * kDpi / 72.0 * g_pdf.scale;
-                    double x2 = pageLeftClientD + ls.right * kDpi / 72.0 * g_pdf.scale;
-                    double y1 = pageTopClientD + (page.heightPt - ls.top) * kDpi / 72.0 * g_pdf.scale;
-                    double y2 = pageTopClientD + (page.heightPt - ls.bottom) * kDpi / 72.0 * g_pdf.scale;
-                    RECT r{};
-                    r.left = static_cast<LONG>(std::round(std::min(x1, x2)));
-                    r.right = static_cast<LONG>(std::round(std::max(x1, x2)));
-                    r.top = static_cast<LONG>(std::round(std::min(y1, y2)));
-                    r.bottom = static_cast<LONG>(std::round(std::max(y1, y2)));
+                    const RECT r = map.Rect(ls.left, ls.top, ls.right, ls.bottom);
                     fillSelection(r);
                 }
             }
         }
     }
-
-    SelectObject(hdc, oldPen);
-    DeleteObject(pen);
-    SelectObject(hdc, oldBrush);
 }
 
 static void DrawTextBoxHoverCaretSegment(HDC hdc, const RECT& client, const RECT& outer,
@@ -3430,17 +3536,15 @@ static void DrawInProgress(HDC hdc, const RECT& client) {
     if (g_pdf.editingText && g_pdf.editPage >= 0) {
         RECT outer{};
         if (EditingBoxClientRect(outer, true)) {
-            RECT tinted = outer;
-            tinted.left = std::max(tinted.left, client.left);
-            tinted.right = std::min(tinted.right, client.right);
-            tinted.top = std::max(tinted.top, client.top);
-            tinted.bottom = std::min(tinted.bottom, client.bottom);
-            FillRectAlpha(hdc, tinted, DarkenColor(g_activeColor, 0.9), 32);
+            // Keep the box transparent; only the background assist (when on) fills it.
             HPEN framePen = CreatePen(PS_SOLID, 1, DarkenColor(g_activeColor, 0.7));
             HGDIOBJ oldPenFrame = nullptr;
             if (framePen) {
                 oldPenFrame = SelectObject(hdc, framePen);
+                // Frame only: the DC's default brush would paint the box opaque white.
+                HGDIOBJ oldFrameBrush = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
                 Rectangle(hdc, outer.left, outer.top, outer.right, outer.bottom);
+                if (oldFrameBrush) SelectObject(hdc, oldFrameBrush);
             }
 
             std::wstring displayText = BuildEditDisplayText(true);
@@ -3457,6 +3561,8 @@ static void DrawInProgress(HDC hdc, const RECT& client) {
                 tmp.fontName = g_pdf.editFontName.empty() ? g_textFontName : g_pdf.editFontName;
                 tmp.fontPt = g_pdf.editFontPt;
                 tmp.writingMode = g_pdf.editWritingMode;
+                // Preview the mode the commit will store, so the toolbar toggle applies while typing.
+                tmp.backgroundAssistMode = CurrentTextBoxBackgroundAssistMode();
                 tmp.textLines = LayoutResultToLines(g_pdf.editLayout, displayText);
 
                 HDC scratchDc = CreateCompatibleDC(hdc);
@@ -3759,6 +3865,20 @@ static void DrawInProgress(HDC hdc, const RECT& client) {
     }
 }
 
+// The renderer owns fitting; this UI path owns the readable source fallback.
+static void DrawMathAnnotationPreview(HDC dc, RECT content, const std::wstring& source,
+                                      int fontPx, COLORREF colour) {
+    const auto formula = mathrender::Parse(source);
+    if (formula && mathrender::DrawInBox(*formula, dc, content, fontPx, colour)) return;
+    const int saved = SaveDC(dc);
+    if (!saved) return;
+    SetTextColor(dc, colour);
+    SetBkMode(dc, TRANSPARENT);
+    IntersectClipRect(dc, content.left, content.top, content.right, content.bottom);
+    DrawTextW(dc, source.c_str(), -1, &content, DT_LEFT | DT_TOP | DT_NOPREFIX | DT_WORDBREAK);
+    RestoreDC(dc, saved);
+}
+
 static void DrawAnnotations(HDC hdc, const RECT& client, const pdf_magnifier::Transform& paint) {
     const double viewScale = g_pdf.scale * paint.zoom;
     if (!g_showAnnots) return;
@@ -3767,10 +3887,10 @@ static void DrawAnnotations(HDC hdc, const RECT& client, const pdf_magnifier::Tr
     for (const auto& stored : g_annots) {
         if (stored.pageIndex < 0 || stored.pageIndex >= static_cast<int>(g_pdf.pages.size())) continue;
         const auto& page = g_pdf.pages[static_cast<size_t>(stored.pageIndex)];
-        double pageLeftClientD = paint.X(PageClientLeft(stored.pageIndex));
-        double pageTopClientD = paint.Y(PageClientTop(stored.pageIndex));
-        double pageRightClientD = pageLeftClientD + page.w * paint.zoom;
-        double pageBottomClientD = pageTopClientD + page.h * paint.zoom;
+        const double pageLeftClientD = paint.X(PageClientLeft(stored.pageIndex));
+        const double pageTopClientD = paint.Y(PageClientTop(stored.pageIndex));
+        const double pageRightClientD = pageLeftClientD + page.w * paint.zoom;
+        const double pageBottomClientD = pageTopClientD + page.h * paint.zoom;
         if (pageRightClientD < client.left || pageLeftClientD > client.right ||
             pageBottomClientD < client.top || pageTopClientD > client.bottom) {
             continue;
@@ -3778,19 +3898,15 @@ static void DrawAnnotations(HDC hdc, const RECT& client, const pdf_magnifier::Tr
         Annotation projection;
         const auto& view = AnnotationForView(stored, projection);
         const auto& ann = ShapeRotationForPaint(view,projection);
-        double x1 = pageLeftClientD + ann.x1 * kDpi / 72.0 * viewScale;
-        double x2 = pageLeftClientD + ann.x2 * kDpi / 72.0 * viewScale;
-        double y1 = pageTopClientD + (page.heightPt - ann.y1) * kDpi / 72.0 * viewScale;
-        double y2 = pageTopClientD + (page.heightPt - ann.y2) * kDpi / 72.0 * viewScale;
-        RECT r{};
-        r.left   = static_cast<LONG>(std::round(std::min(x1, x2)));
-        r.right  = static_cast<LONG>(std::round(std::max(x1, x2)));
-        r.top    = static_cast<LONG>(std::round(std::min(y1, y2)));
-        r.bottom = static_cast<LONG>(std::round(std::max(y1, y2)));
+        const PdfPagePaintMap map = MakePdfPagePaintMap(page, pageLeftClientD, pageTopClientD, viewScale);
+        const RECT r = map.Rect(ann.x1, ann.y1, ann.x2, ann.y2);
+        const auto textRect = [&](double minX, double minY, double maxX, double maxY) {
+            return map.Rect(minX, minY, maxX, maxY);
+        };
 
         if (ann.type == Annotation::Type::TextColor) {
-            const int pageLeft = static_cast<int>(std::round(pageLeftClientD));
-            const int pageTop = static_cast<int>(std::round(pageTopClientD));
+            const int pageLeft = static_cast<int>(map.left);
+            const int pageTop = static_cast<int>(map.top);
             const auto tint = [&](const RECT& rectangle) {
                 RECT visible{};
                 if (!IntersectRect(&visible, &rectangle, &client)) return;
@@ -3810,25 +3926,12 @@ static void DrawAnnotations(HDC hdc, const RECT& client, const pdf_magnifier::Tr
                 if (!coverage.alpha.empty()) {
                     const bool painted = pdf_text_coverage::Paint(hdc, rectangle, ann.color, coverage.rect, coverage.alpha,
                         coverage.rect.right-coverage.rect.left, coverage.rect.bottom-coverage.rect.top);
-                    if (!painted) ShowSoftNotice(g_hPdfView, localization::Text(L"pdf.text_color.display_failed"), SoftNoticeKind::Warning);
+                    if (!painted) g_pdfPaintFailureNotices.textColorFailedThisPaint = true;
                 }
             };
-            if (!ann.quads.empty()) {
-                for (size_t qi = 0; qi + 7 < ann.quads.size(); qi += 8) {
-                    const double minX = std::min(std::min(ann.quads[qi + 0], ann.quads[qi + 2]), std::min(ann.quads[qi + 4], ann.quads[qi + 6]));
-                    const double maxX = std::max(std::max(ann.quads[qi + 0], ann.quads[qi + 2]), std::max(ann.quads[qi + 4], ann.quads[qi + 6]));
-                    const double minY = std::min(std::min(ann.quads[qi + 1], ann.quads[qi + 3]), std::min(ann.quads[qi + 5], ann.quads[qi + 7]));
-                    const double maxY = std::max(std::max(ann.quads[qi + 1], ann.quads[qi + 3]), std::max(ann.quads[qi + 5], ann.quads[qi + 7]));
-                    RECT qr{};
-                    qr.left = static_cast<LONG>(std::round(pageLeftClientD + minX * kDpi / 72.0 * viewScale));
-                    qr.right = static_cast<LONG>(std::round(pageLeftClientD + maxX * kDpi / 72.0 * viewScale));
-                    qr.top = static_cast<LONG>(std::round(pageTopClientD + (page.heightPt - maxY) * kDpi / 72.0 * viewScale));
-                    qr.bottom = static_cast<LONG>(std::round(pageTopClientD + (page.heightPt - minY) * kDpi / 72.0 * viewScale));
-                    tint(qr);
-                }
-            } else {
-                tint(r);
-            }
+            ForEachAnnotationTextRect(ann, [&](double minX, double minY, double maxX, double maxY) {
+                tint(textRect(minX, minY, maxX, maxY));
+            });
         } else if (ann.type == Annotation::Type::MarkerText) {
             const auto displayMode = ann.markerDisplayMode;
             const double opacity = std::clamp(ann.alpha > 0.0 ? ann.alpha : kMarkerAlphaDefault, 0.0, 1.0);
@@ -3837,60 +3940,26 @@ static void DrawAnnotations(HDC hdc, const RECT& client, const pdf_magnifier::Tr
                                                         : static_cast<BYTE>(kMarkerAlphaDefault * 255))
                 : static_cast<BYTE>(std::lround(opacity * 255.0));
             if (preview_trace::IsEnabled() && ConsumePendingMarkerTextTraceAnnotation(ann.id)) {
-                if (!ann.quads.empty()) {
-                    for (size_t qi = 0; qi + 7 < ann.quads.size(); qi += 8) {
-                        const double minX = std::min(std::min(ann.quads[qi + 0], ann.quads[qi + 2]),
-                                                     std::min(ann.quads[qi + 4], ann.quads[qi + 6]));
-                        const double maxX = std::max(std::max(ann.quads[qi + 0], ann.quads[qi + 2]),
-                                                     std::max(ann.quads[qi + 4], ann.quads[qi + 6]));
-                        const double minY = std::min(std::min(ann.quads[qi + 1], ann.quads[qi + 3]),
-                                                     std::min(ann.quads[qi + 5], ann.quads[qi + 7]));
-                        const double maxY = std::max(std::max(ann.quads[qi + 1], ann.quads[qi + 3]),
-                                                     std::max(ann.quads[qi + 5], ann.quads[qi + 7]));
-                        preview_trace::Append(L"MarkerTextTrace",
-                                              L"draw_quad annotation_id=" + ann.id + L" " +
-                                                  MarkerTextTraceRect(ann.pageIndex, minX, minY, maxX, maxY));
-                    }
-                } else {
+                const wchar_t* traceKind = ann.quads.empty() ? L"draw_rect" : L"draw_quad";
+                ForEachAnnotationTextRect(ann, [&](double minX, double minY, double maxX, double maxY) {
                     preview_trace::Append(L"MarkerTextTrace",
-                                          L"draw_rect annotation_id=" + ann.id + L" " +
-                                              MarkerTextTraceRect(ann.pageIndex,
-                                                                  std::min(ann.x1, ann.x2),
-                                                                  std::min(ann.y1, ann.y2),
-                                                                  std::max(ann.x1, ann.x2),
-                                                                  std::max(ann.y1, ann.y2)));
-                }
+                                          std::wstring(traceKind) + L" annotation_id=" + ann.id + L" " +
+                                              MarkerTextTraceRect(ann.pageIndex, minX, minY, maxX, maxY));
+                });
             }
-            if (!ann.quads.empty()) {
-                for (size_t qi = 0; qi + 7 < ann.quads.size(); qi += 8) {
-                    double minX = std::min(std::min(ann.quads[qi + 0], ann.quads[qi + 2]), std::min(ann.quads[qi + 4], ann.quads[qi + 6]));
-                    double maxX = std::max(std::max(ann.quads[qi + 0], ann.quads[qi + 2]), std::max(ann.quads[qi + 4], ann.quads[qi + 6]));
-                    double minY = std::min(std::min(ann.quads[qi + 1], ann.quads[qi + 3]), std::min(ann.quads[qi + 5], ann.quads[qi + 7]));
-                    double maxY = std::max(std::max(ann.quads[qi + 1], ann.quads[qi + 3]), std::max(ann.quads[qi + 5], ann.quads[qi + 7]));
-                    RECT qr{};
-                    qr.left   = static_cast<LONG>(std::round(pageLeftClientD + minX * kDpi / 72.0 * viewScale));
-                    qr.right  = static_cast<LONG>(std::round(pageLeftClientD + maxX * kDpi / 72.0 * viewScale));
-                    qr.top    = static_cast<LONG>(std::round(pageTopClientD + (page.heightPt - maxY) * kDpi / 72.0 * viewScale));
-                    qr.bottom = static_cast<LONG>(std::round(pageTopClientD + (page.heightPt - minY) * kDpi / 72.0 * viewScale));
-                    FillTextMarker(hdc, qr, ann.color, aUse, displayMode);
-                }
-            } else {
-                FillTextMarker(hdc, r, ann.color, aUse, displayMode);
-            }
+            ForEachAnnotationTextRect(ann, [&](double minX, double minY, double maxX, double maxY) {
+                FillTextMarker(hdc, textRect(minX, minY, maxX, maxY), ann.color, aUse, displayMode);
+            });
         } else if (ann.type == Annotation::Type::Line ||
                    ann.type == Annotation::Type::Arrow ||
                    ann.type == Annotation::Type::Wave) {
-            double sx = pageLeftClientD + ann.x1 * kDpi / 72.0 * viewScale;
-            double sy = pageTopClientD + (page.heightPt - ann.y1) * kDpi / 72.0 * viewScale;
-            double ex = pageLeftClientD + ann.x2 * kDpi / 72.0 * viewScale;
-            double ey = pageTopClientD + (page.heightPt - ann.y2) * kDpi / 72.0 * viewScale;
-            int penW = static_cast<int>(std::round(std::max(1.0, ann.width * kDpi / 72.0 * viewScale)));
-            POINT p1{ static_cast<int>(std::round(sx)), static_cast<int>(std::round(sy)) };
-            POINT p2{ static_cast<int>(std::round(ex)), static_cast<int>(std::round(ey)) };
+            int penW = static_cast<int>(std::round(std::max(1.0, map.Length(ann.width))));
+            const POINT p1 = map.Point(ann.x1, ann.y1);
+            const POINT p2 = map.Point(ann.x2, ann.y2);
             double aNorm = ann.alpha;
             if (aNorm <= 0.0) aNorm = 1.0;
             BYTE aUse = static_cast<BYTE>(std::clamp(aNorm, 0.0, 1.0) * 255.0);
-            const double ptToPx = kDpi / 72.0 * viewScale;
+            const double ptToPx = map.pxPerPt;
             if (ann.type == Annotation::Type::Arrow) {
                 if (ann.dash.empty()) DrawArrowLinePx(hdc, p1, p2, penW, ann.color, aUse, ann.arrowHead);
                 else DrawDashedArrowLinePx(hdc, p1, p2, penW, ann.color, aUse, ann.dash, ptToPx, ann.arrowHead);
@@ -3903,7 +3972,7 @@ static void DrawAnnotations(HDC hdc, const RECT& client, const pdf_magnifier::Tr
             }
         } else if (ann.type == Annotation::Type::Shape) {
             const BYTE alpha = static_cast<BYTE>(std::clamp(ann.alpha > 0 ? ann.alpha : 0.35, 0.0, 1.0) * 255.0);
-            const double scale = kDpi / 72.0 * viewScale;
+            const double scale = map.pxPerPt;
             const int penW = std::max(1, static_cast<int>(std::lround((ann.width > 0 ? ann.width : 2.5) * scale)));
             const auto drawBoundary = [&]() {
                 ui::DrawDashedShapeOutline(hdc,ann.shapeKind,r,ann.shapeRotation,penW,ShapeBoundaryColor(ann.shapeBoundary),
@@ -3931,16 +4000,9 @@ static void DrawAnnotations(HDC hdc, const RECT& client, const pdf_magnifier::Tr
             if (ann.path.size() < 2) continue;
             std::vector<POINT> pts;
             pts.reserve(ann.path.size());
-            for (const auto& p : ann.path) {
-                double px = pageLeftClientD + p.x * kDpi / 72.0 * viewScale;
-                double py = pageTopClientD + (page.heightPt - p.y) * kDpi / 72.0 * viewScale;
-                POINT pt{};
-                pt.x = static_cast<LONG>(std::round(px));
-                pt.y = static_cast<LONG>(std::round(py));
-                pts.push_back(pt);
-            }
+            for (const auto& p : ann.path) pts.push_back(map.Point(p.x, p.y));
             if (pts.size() < 2) continue;
-            int penW = static_cast<int>(std::round(std::max(1.0, ann.width * kDpi / 72.0 * viewScale)));
+            int penW = static_cast<int>(std::round(std::max(1.0, map.Length(ann.width))));
             double aNorm = ann.alpha;
             if (aNorm <= 0.0) aNorm = (ann.type == Annotation::Type::MarkerFree) ? kMarkerAlphaDefault : 1.0;
             BYTE aUse = static_cast<BYTE>(std::clamp(aNorm, 0.0, 1.0) * 255.0);
@@ -3949,32 +4011,32 @@ static void DrawAnnotations(HDC hdc, const RECT& client, const pdf_magnifier::Tr
                 DrawMultiplyStroke(hdc,pts,penW,ann.color,aUse);
             else DrawPolylineAlphaPx(hdc, pts, penW, dark, aUse);
         } else if (ann.type == Annotation::Type::LinkMarker) {
-            double cx = pageLeftClientD + ann.x1 * kDpi / 72.0 * viewScale;
-            double cy = pageTopClientD + (page.heightPt - ann.y1) * kDpi / 72.0 * viewScale;
+            const double cx = map.X(ann.x1);
+            const double cy = map.Y(ann.y1);
             double radiusPt = (ann.width > 0.0) ? ann.width : 6.0;
-            int radiusPx = static_cast<int>(std::round(radiusPt * kDpi / 72.0 * viewScale));
+            int radiusPx = static_cast<int>(std::round(map.Length(radiusPt)));
             radiusPx = std::max(3, radiusPx);
             int dotPx = std::max(1, radiusPx / 3);
             int penW = std::max(1, radiusPx / 4);
-            HPEN pen = CreatePen(PS_SOLID, penW, ann.color);
-            HGDIOBJ oldPen = SelectObject(hdc, pen);
-            HBRUSH oldBrush = static_cast<HBRUSH>(SelectObject(hdc, GetStockObject(HOLLOW_BRUSH)));
-            Ellipse(hdc,
-                    static_cast<int>(std::round(cx - radiusPx)),
-                    static_cast<int>(std::round(cy - radiusPx)),
-                    static_cast<int>(std::round(cx + radiusPx)),
-                    static_cast<int>(std::round(cy + radiusPx)));
-            HBRUSH dotBrush = CreateSolidBrush(ann.color);
-            SelectObject(hdc, dotBrush);
-            Ellipse(hdc,
-                    static_cast<int>(std::round(cx - dotPx)),
-                    static_cast<int>(std::round(cy - dotPx)),
-                    static_cast<int>(std::round(cx + dotPx)),
-                    static_cast<int>(std::round(cy + dotPx)));
-            SelectObject(hdc, oldBrush);
-            SelectObject(hdc, oldPen);
-            DeleteObject(dotBrush);
-            DeleteObject(pen);
+            ui::ScopedPen pen(CreatePen(PS_SOLID, penW, ann.color));
+            ui::ScopedBrush dotBrush(CreateSolidBrush(ann.color));
+            ui::ScopedSelectObject penSelection(hdc, pen.get());
+            {
+                ui::ScopedSelectObject ringBrush(hdc, GetStockObject(HOLLOW_BRUSH));
+                Ellipse(hdc,
+                        static_cast<int>(std::round(cx - radiusPx)),
+                        static_cast<int>(std::round(cy - radiusPx)),
+                        static_cast<int>(std::round(cx + radiusPx)),
+                        static_cast<int>(std::round(cy + radiusPx)));
+            }
+            {
+                ui::ScopedSelectObject dotSelection(hdc, dotBrush.get());
+                Ellipse(hdc,
+                        static_cast<int>(std::round(cx - dotPx)),
+                        static_cast<int>(std::round(cy - dotPx)),
+                        static_cast<int>(std::round(cx + dotPx)),
+                        static_cast<int>(std::round(cy + dotPx)));
+            }
         } else if (ann.type == Annotation::Type::MathBox) {
             if (viewScale <= 0.0) continue;
             if (page_rotation::Normalize(ann.contentRotation) != 0) {
@@ -3985,22 +4047,12 @@ static void DrawAnnotations(HDC hdc, const RECT& client, const pdf_magnifier::Tr
                     lf.lfHeight = -fontPx;
                     const auto& name = ann.fontName.empty() ? g_textFontName : ann.fontName;
                     wcsncpy_s(lf.lfFaceName, name.c_str(), LF_FACESIZE - 1);
-                    HFONT font = CreateFontIndirectW(&lf);
-                    HGDIOBJ old = font ? SelectObject(local, font) : nullptr;
+                    ui::ScopedFont font(CreateFontIndirectW(&lf));
+                    ui::ScopedSelectObject fontSelection(local, font.get());
                     SetBkMode(local, TRANSPARENT);
-                    auto node = mathrender::Parse(NormalizeMathAnnotText(ann));
                     const int pad = std::max(2, static_cast<int>(std::lround(4.0 * viewScale)));
-                    if (node) {
-                        auto layout = mathrender::Measure(*node, local, fontPx, mathrender::RenderStyle::Display);
-                        const bool shrink = layout.width > box.right - box.left - pad * 2 ||
-                                            layout.height > box.bottom - box.top - pad * 2;
-                        const int actualFont = shrink ? std::max(6, fontPx - std::max(2, fontPx / 4)) : fontPx;
-                        if (shrink) layout = mathrender::Measure(*node, local, actualFont, mathrender::RenderStyle::Display);
-                        mathrender::Draw(*node, layout, local, box.left + pad, box.top + pad, actualFont,
-                                         ann.color, mathrender::RenderStyle::Display);
-                    }
-                    if (old) SelectObject(local, old);
-                    if (font) DeleteObject(font);
+                    const RECT content{box.left + pad, box.top + pad, box.right - pad, box.bottom - pad};
+                    DrawMathAnnotationPreview(local, content, NormalizeMathAnnotText(ann), fontPx, ann.color);
                 });
                 continue;
             }
@@ -4033,30 +4085,15 @@ static void DrawAnnotations(HDC hdc, const RECT& client, const pdf_magnifier::Tr
                 } else {
                     wcsncpy_s(lf.lfFaceName, g_textFontName.c_str(), LF_FACESIZE - 1);
                 }
-                HFONT hFont = CreateFontIndirectW(&lf);
-                HGDIOBJ oldFont = hFont ? SelectObject(hdc, hFont) : nullptr;
-                SetBkMode(hdc, TRANSPARENT);
-                SetTextColor(hdc, ann.color);
-                std::wstring body = NormalizeMathAnnotText(ann);
-                auto node = mathrender::Parse(body);
-                int pad = std::max(2, static_cast<int>(std::round(4.0 * viewScale)));
-                int availW = std::max(1, static_cast<int>((r.right - r.left) - pad * 2));
-                int availH = std::max(1, static_cast<int>((r.bottom - r.top) - pad * 2));
-                if (node) {
-                    auto layout = mathrender::Measure(*node, hdc, fontPx, mathrender::RenderStyle::Display);
-                    if (layout.width > availW || layout.height > availH) {
-                        int shrink = std::max(2, fontPx / 4);
-                        int fontPx2 = std::max(6, fontPx - shrink);
-                        layout = mathrender::Measure(*node, hdc, fontPx2, mathrender::RenderStyle::Display);
-                        mathrender::Draw(*node, layout, hdc, r.left + pad, r.top + pad, fontPx2, ann.color,
-                                         mathrender::RenderStyle::Display);
-                    } else {
-                        mathrender::Draw(*node, layout, hdc, r.left + pad, r.top + pad, fontPx, ann.color,
-                                         mathrender::RenderStyle::Display);
-                    }
+                {
+                    ui::ScopedFont font(CreateFontIndirectW(&lf));
+                    ui::ScopedSelectObject fontSelection(hdc, font.get());
+                    SetBkMode(hdc, TRANSPARENT);
+                    SetTextColor(hdc, ann.color);
+                    const int pad = std::max(2, static_cast<int>(std::round(4.0 * viewScale)));
+                    const RECT content{r.left + pad, r.top + pad, r.right - pad, r.bottom - pad};
+                    DrawMathAnnotationPreview(hdc, content, NormalizeMathAnnotText(ann), fontPx, ann.color);
                 }
-                if (oldFont) SelectObject(hdc, oldFont);
-                if (hFont) DeleteObject(hFont);
                 if (prevMode != 0) {
                     SetGraphicsMode(hdc, prevMode);
                 }
@@ -4074,12 +4111,12 @@ static void DrawAnnotations(HDC hdc, const RECT& client, const pdf_magnifier::Tr
             if (!fontName.empty()) {
                 wcsncpy_s(lf.lfFaceName, fontName.c_str(), LF_FACESIZE - 1);
             }
-            HFONT hFont = CreateFontIndirectW(&lf);
-            HGDIOBJ oldFont = hFont ? SelectObject(hdc, hFont) : nullptr;
+            ui::ScopedFont font(CreateFontIndirectW(&lf));
+            std::optional<ui::ScopedSelectObject> fontSelection(std::in_place, hdc, font.get());
             SetBkMode(hdc, TRANSPARENT);
             SetTextColor(hdc, ann.color);
-            double baseOffsetX = pageLeftClientD * invScale;
-            double pageTop = pageTopClientD * invScale;
+            double baseOffsetX = map.left * invScale;
+            double pageTop = map.top * invScale;
             double x1Base = ann.x1 * kDpi / 72.0;
             double x2Base = ann.x2 * kDpi / 72.0;
             double y1Base = (page.heightPt - ann.y1) * kDpi / 72.0;
@@ -4093,25 +4130,8 @@ static void DrawAnnotations(HDC hdc, const RECT& client, const pdf_magnifier::Tr
             if (padBase * viewScale < 2.0) padBase = 2.0 / viewScale;
             int padPx = std::max(1, static_cast<int>(std::lround(padBase)));
             RECT inner{ tr.left + padPx, tr.top + padPx, tr.right - padPx, tr.bottom - padPx };
-            int innerW = inner.right - inner.left;
-            int innerH = inner.bottom - inner.top;
-            std::wstring body = NormalizeMathAnnotText(ann);
-            auto node = mathrender::Parse(body);
-            if (node && innerW > 0 && innerH > 0) {
-                auto layout = mathrender::Measure(*node, hdc, fontPx, mathrender::RenderStyle::Display);
-                if (layout.width > innerW || layout.height > innerH) {
-                    int shrink = std::max(2, fontPx / 4);
-                    int fontPx2 = std::max(minFontPx, fontPx - shrink);
-                    layout = mathrender::Measure(*node, hdc, fontPx2, mathrender::RenderStyle::Display);
-                    mathrender::Draw(*node, layout, hdc, inner.left, inner.top, fontPx2, ann.color,
-                                     mathrender::RenderStyle::Display);
-                } else {
-                    mathrender::Draw(*node, layout, hdc, inner.left, inner.top, fontPx, ann.color,
-                                     mathrender::RenderStyle::Display);
-                }
-            }
-            if (oldFont) SelectObject(hdc, oldFont);
-            if (hFont) DeleteObject(hFont);
+            DrawMathAnnotationPreview(hdc, inner, NormalizeMathAnnotText(ann), fontPx, ann.color);
+            fontSelection.reset(); // restore the font before the world transform
             if (hasOldXf) {
                 SetWorldTransform(hdc, &oldXf);
             }

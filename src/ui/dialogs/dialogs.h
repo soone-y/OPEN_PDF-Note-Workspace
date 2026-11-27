@@ -18,3 +18,5 @@ void RegisterAppExitBlockingDialog(HWND hWnd);
 void UnregisterAppExitDialog(HWND hWnd);
 void DismissAppExitDismissibleDialogs();
 bool HasAppExitBlockingDialog();
+// Brings the first exit-blocking dialog forward so a refused exit is explained.
+void ActivateAppExitBlockingDialog();

@@ -1,6 +1,7 @@
 #include <richedit.h>
 // file: core/app_core.cpp
 #include "core/app_core.h"
+#include "core/workspace_layout.h"
 #include "ui/listbox_presentation.h"
 #include "ui/themed_push_buttons.h"
 #include "core/localization.h"
@@ -327,7 +328,7 @@ std::wstring g_currentNotePath;
 std::wstring g_currentSessionPath;
 bool g_noteNormalMode = false;
 DWORD g_noteNormalCaret = 0;
-bool g_noteVimModeEnabled = false;
+bool g_noteVimModeEnabled = true;
 bool g_noteVimCaretLineRawTextVisible = false;
 bool g_noteVimClickEntersInsertMode = true;
 bool g_noteDirty = false;
@@ -1028,9 +1029,8 @@ static void WorkspaceSafeDirs(const std::filesystem::path& workspaceRoot,
     if (outPreferredTmp) outPreferredTmp->clear();
     if (outQuarantineDir) outQuarantineDir->clear();
     if (workspaceRoot.empty()) return;
-    std::filesystem::path resource = workspaceRoot / L"__pdf_note_workspace__";
-    if (outPreferredTmp) *outPreferredTmp = resource / L"__tmp__";
-    if (outQuarantineDir) *outQuarantineDir = resource / L"__escape__";
+    if (outPreferredTmp) *outPreferredTmp = workspace_layout::Tmp(workspaceRoot);
+    if (outQuarantineDir) *outQuarantineDir = workspace_layout::Failed(workspaceRoot);
 }
 
 static bool AtomicWriteUtf8WithWorkspaceDirs(const std::filesystem::path& dest,
@@ -2256,7 +2256,7 @@ WorkspaceConfig DefaultWorkspaceConfig() {
     cfg.noteRawOnly = false;
     cfg.noteRenderMath = true;
     cfg.noteWrapEnabled = true;
-    cfg.noteVimModeEnabled = false;
+    cfg.noteVimModeEnabled = true;
     cfg.noteVimCaretLineRawTextVisible = false;
     cfg.noteVimClickEntersInsertMode = true;
     cfg.noteOverlayRefreshDelayMs = 400;
@@ -2449,7 +2449,7 @@ static std::filesystem::path QuarantineCorruptWorkspaceJson(const std::filesyste
     if (root.empty() || path.empty()) return {};
     std::error_code ec;
     if (!std::filesystem::exists(path, ec) || ec) return {};
-    std::filesystem::path dir = root / L"__pdf_note_workspace__" / L"__escape__";
+    std::filesystem::path dir = workspace_layout::Failed(root);
     std::filesystem::create_directories(dir, ec);
     if (ec) return {};
     std::filesystem::path dest = MakeDamagedSettingsPath(dir, path);
@@ -2552,7 +2552,7 @@ static bool IsWorkspaceConfigKnownTopLevelField(const std::string& key) {
         "showMathList", "downKeyLastLineAction", "downKeyLastLineInsertNewline",
         "leftRightLineMoveAction", "autoPairBrackets", "fullWidthParenCaretInside", "fullWidthParenCancelNextLeft",
         "noteFontName", "noteFontPt", "noteRenderFontName", "noteRenderJpFontName",
-        "noteRenderFontPt", "noteSystem", "noteRenderEnabled", "noteRawOnly", "noteRenderMath", "clroAsciiOnly", "noteQuoteLazyContinuation", "clroListImplicitContinuation",
+        "noteRenderFontPt", "noteSystem", "noteRenderEnabled", "noteRawOnly", "noteRenderMath", "clroAsciiOnly", "noteQuoteLazyContinuation", "clroListImplicitContinuation", "clroListBodyAlignment",
         "noteWrapEnabled", "noteVimModeEnabled", "noteVimCaretLineRawTextVisible",
         "noteVimClickEntersInsertMode", "noteOverlayRefreshDelayMs", "noteFullReparseDelayMs",
         "noteMathMarginTopPercent",
@@ -3028,7 +3028,7 @@ bool IsReservedAnnotToolShortcut(const AnnotToolShortcutBinding& binding) {
         switch (binding.vk) {
         case 'S': case 'F': case 'Z': case 'Y': case 'R':
         case 'H': case 'J': case 'K': case 'L':
-        case 'A': case 'C': case 'X': case 'V': case '0':
+        case 'A': case 'C': case 'X': case 'V':
         case VK_UP: case VK_DOWN: case VK_OEM_PLUS: case VK_OEM_MINUS:
             return true;
         }
@@ -3054,6 +3054,7 @@ std::vector<AnnotToolShortcutBinding> DefaultAnnotToolShortcuts() {
         { "Ctrl+7", AnnotToolShortcutTargetKind::Detail, AnnotToolFamily::Pen, ToolMode::Freehand },
         { "Ctrl+8", AnnotToolShortcutTargetKind::Detail, AnnotToolFamily::Shape, ToolMode::Line },
         { "Ctrl+9", AnnotToolShortcutTargetKind::Detail, AnnotToolFamily::Shape, ToolMode::Shape },
+        { "Ctrl+0", AnnotToolShortcutTargetKind::Detail, AnnotToolFamily::Eraser, ToolMode::Eraser },
         { "Ctrl+Alt+1", AnnotToolShortcutTargetKind::Category, AnnotToolFamily::Select, ToolMode::Select },
         { "Ctrl+Alt+2", AnnotToolShortcutTargetKind::Category, AnnotToolFamily::Pan, ToolMode::Pan },
         { "Ctrl+Alt+3", AnnotToolShortcutTargetKind::Category, AnnotToolFamily::Magnifier, ToolMode::Magnifier },
@@ -5795,7 +5796,10 @@ static void ApplyJsonToWorkspaceConfig(const std::string& json, WorkspaceConfig&
     }
     if (auto b = ParseJsonBoolField(json, "clroAsciiOnly")) cfg.clroAsciiOnly = *b;
     if (auto b = ParseJsonBoolField(json, "noteQuoteLazyContinuation")) cfg.noteQuoteLazyContinuation = *b;
+    if (auto b = ParseJsonBoolField(json, "clroListBodyAlignment")) cfg.clroListBodyAlignment = *b;
     if (auto b = ParseJsonBoolField(json, "clroListImplicitContinuation")) cfg.clroListImplicitContinuation = *b;
+    // Legacy semantic continuation wins if a manually edited file enables both.
+    cfg.SetClroListImplicitContinuation(cfg.clroListImplicitContinuation);
     if (auto b = ParseJsonBoolField(json, "noteWrapEnabled")) {
         cfg.noteWrapEnabled = *b;
     }
@@ -6385,6 +6389,7 @@ bool SaveWorkspaceConfigToFile(const std::filesystem::path& path, const Workspac
     ofs << "  \"clroAsciiOnly\": " << (cfg.clroAsciiOnly ? "true" : "false") << ",\n";
     ofs << "  \"noteQuoteLazyContinuation\": " << (cfg.noteQuoteLazyContinuation ? "true" : "false") << ",\n";
     ofs << "  \"clroListImplicitContinuation\": " << (cfg.clroListImplicitContinuation ? "true" : "false") << ",\n";
+    ofs << "  \"clroListBodyAlignment\": " << (cfg.clroListBodyAlignment && !cfg.clroListImplicitContinuation ? "true" : "false") << ",\n";
     ofs << "  \"noteWrapEnabled\": " << (cfg.noteWrapEnabled ? "true" : "false") << ",\n";
     ofs << "  \"noteVimModeEnabled\": " << (cfg.noteVimModeEnabled ? "true" : "false") << ",\n";
     ofs << "  \"noteVimCaretLineRawTextVisible\": " << (cfg.noteVimCaretLineRawTextVisible ? "true" : "false") << ",\n";
@@ -7462,7 +7467,7 @@ bool PersistSetupTempExternalLectureDirs(const std::vector<std::wstring>& dirs,
         std::wstring blockedReason;
         if (!ReadExistingSetupJsonForAutoUpdate(setup, &json, &blockedReason)) {
             if (!blockedReason.empty()) {
-                blockedReason += L"\n\n既存 setup.json を保護するため、一時外部講義フォルダ一覧の保存を中止しました。";
+                blockedReason += L"\n\n既存 setup.json を保護するため、一時パスの外部フォルダ一覧の保存を中止しました。";
                 ShowAppCoreSoftNotice(nullptr, blockedReason, SoftNoticeKind::Warning);
             }
             if (outError) *outError = blockedReason.empty()
@@ -7800,6 +7805,7 @@ static ULONGLONG g_softNoticeDeadline = 0;
 static std::wstring g_softNoticeText;
 static SoftNoticeKind g_softNoticeKind = SoftNoticeKind::Info;
 static bool g_softNoticePressed = false;
+static bool g_softNoticePassive = false;
 
 struct UiMessageRepeatState {
     std::wstring title;
@@ -7898,12 +7904,13 @@ static void GetSoftNoticeColors(SoftNoticeKind kind, COLORREF& outBg, COLORREF& 
 static LRESULT CALLBACK SoftNoticeProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_NCHITTEST:
-        return HTCLIENT; // A click dismisses the notice, never the control beneath it.
+        return g_softNoticePassive ? HTTRANSPARENT : HTCLIENT;
     case WM_MOUSEACTIVATE:
         return MA_NOACTIVATE;
     case WM_LBUTTONDOWN:
     case WM_RBUTTONDOWN:
     case WM_MBUTTONDOWN:
+        if (g_softNoticePassive) return 0;
         g_softNoticePressed = true;
         SetCapture(hWnd);
         return 0;
@@ -8118,9 +8125,10 @@ static void PlaceSoftNoticeBottomRight(const RECT& ownerRc, const RECT& workRc,
 }
 } // namespace
 
-void ShowSoftNotice(HWND owner, const std::wstring& text, SoftNoticeKind kind) {
+static void ShowSoftNoticeImpl(HWND owner, const std::wstring& text, SoftNoticeKind kind, bool passive) {
     const std::wstring msg = NormalizeSoftNoticeText(text);
     if (msg.empty()) return;
+    if (passive && g_hSoftNotice && IsWindowVisible(g_hSoftNotice) && !g_softNoticePassive) return;
     HWND anchor = owner ? owner : GetForegroundWindow();
     if (!anchor) anchor = GetActiveWindow();
     anchor = SoftNoticeRootOwner(anchor);
@@ -8136,6 +8144,17 @@ void ShowSoftNotice(HWND owner, const std::wstring& text, SoftNoticeKind kind) {
         return;
     }
 
+    LONG_PTR exStyle = GetWindowLongPtrW(g_hSoftNotice, GWL_EXSTYLE);
+    exStyle = passive ? exStyle | WS_EX_LAYERED | WS_EX_TRANSPARENT
+                      : exStyle & ~(WS_EX_LAYERED | WS_EX_TRANSPARENT);
+    SetLastError(ERROR_SUCCESS);
+    if ((!SetWindowLongPtrW(g_hSoftNotice, GWL_EXSTYLE, exStyle) && GetLastError() != ERROR_SUCCESS) ||
+        (passive && !SetLayeredWindowAttributes(g_hSoftNotice, 0, 255, LWA_ALPHA))) {
+        HideSoftNotice(true);
+        return;
+    }
+    g_softNoticePassive = passive;
+
     g_softNoticePressed = false;
     if (GetCapture() == g_hSoftNotice) ReleaseCapture();
     g_softNoticeOwner = anchor;
@@ -8143,7 +8162,7 @@ void ShowSoftNotice(HWND owner, const std::wstring& text, SoftNoticeKind kind) {
     g_softNoticeKind = kind;
 
     RECT ownerRc{};
-    if (!anchor || !GetWindowRect(anchor, &ownerRc)) {
+    if (!anchor || (passive && (!IsWindowVisible(anchor) || IsIconic(anchor))) || !GetWindowRect(anchor, &ownerRc)) {
         ownerRc = SoftNoticeFallbackWorkRect();
     }
 
@@ -8172,10 +8191,10 @@ void ShowSoftNotice(HWND owner, const std::wstring& text, SoftNoticeKind kind) {
     int y = 0;
     POINT cursorPt{};
     RECT focusRc{};
-    if (TryGetSoftNoticeCursorPoint(anchor, &cursorPt)) {
+    if (!passive && TryGetSoftNoticeCursorPoint(anchor, &cursorPt)) {
         RECT workRc = SoftNoticeWorkRectForPoint(cursorPt);
         PlaceSoftNoticeNearPoint(cursorPt, workRc, gap, margin, w, h, &x, &y);
-    } else if (TryGetSoftNoticeFocusRect(anchor, &focusRc)) {
+    } else if (!passive && TryGetSoftNoticeFocusRect(anchor, &focusRc)) {
         RECT workRc = SoftNoticeWorkRectForRect(focusRc);
         PlaceSoftNoticeNearRect(focusRc, workRc, gap, margin, w, h, &x, &y);
     } else {
@@ -8184,7 +8203,8 @@ void ShowSoftNotice(HWND owner, const std::wstring& text, SoftNoticeKind kind) {
     }
 
     KillTimer(g_hSoftNotice, kSoftNoticeTimerId);
-    const UINT duration = ui::TransientDisplayDurationMs(msg);
+    const UINT duration = passive ? std::min<UINT>(6000, ui::TransientDisplayDurationMs(msg))
+                                  : ui::TransientDisplayDurationMs(msg);
     g_softNoticeDeadline = GetTickCount64() + duration;
     // Only the owned UI-test instance may emulate an OS timer allocation
     // failure. Use the real failure cleanup, never throw through a WindowProc.
@@ -8199,6 +8219,14 @@ void ShowSoftNotice(HWND owner, const std::wstring& text, SoftNoticeKind kind) {
                  SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOOWNERZORDER);
     InvalidateRect(g_hSoftNotice, nullptr, TRUE);
     UpdateWindow(g_hSoftNotice);
+}
+
+void ShowSoftNotice(HWND owner, const std::wstring& text, SoftNoticeKind kind) {
+    ShowSoftNoticeImpl(owner, text, kind, false);
+}
+
+void ShowPassiveSoftNotice(HWND owner, const std::wstring& text) {
+    ShowSoftNoticeImpl(owner, text, SoftNoticeKind::Info, true);
 }
 
 void DismissSoftNotice(HWND owner, const std::wstring& expectedText) {

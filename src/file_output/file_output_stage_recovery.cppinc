@@ -53,7 +53,7 @@ bool Flag(std::string_view &bytes) {
   return value == "1";
 }
 void Write(const fs::path &path, std::string_view bytes) {
-  Need(Within(path, WorkspaceEscapeRoot() / L"recovery"));
+  Need(Within(path, WorkspaceRecoveryRoot()));
   std::wstring error;
   Need(AtomicWriteVerified(path, bytes, fs::path(g_workspaceRoot), &error));
 }
@@ -108,7 +108,7 @@ fs::path Directory(const fs::path &stage) {
   Need(stage.is_absolute() && write_checks::IsSafeLocalPath(stage));
   Need(IsSamePath(stage.parent_path(), StageDir(StagedDiffKind::Note)) ||
        IsSamePath(stage.parent_path(), StageDir(StagedDiffKind::Clrop)));
-  return WorkspaceEscapeRoot() / L"recovery" / StagePathHash(stage);
+  return WorkspaceRecoveryRoot() / StagePathHash(stage);
 }
 void Validate(const recovery::Review &review) {
   Need(IsSamePath(review.directory, Directory(review.primaryStage)) &&
@@ -156,8 +156,11 @@ recovery::Candidate Decode(std::string_view bytes) {
   result.annotations = Annots(Take(bytes));
   result.note = Take(bytes);
   Need(text_encoding::DecodeUtf8Strict(result.note).has_value());
-  result.pdf = fs::u8path(Take(bytes));
-  result.destination = fs::u8path(Take(bytes));
+  // Records store portable '/' separators. Restore Windows separators: the
+  // extended "\\?\" form used to open files does not accept '/', so a resumed
+  // review could not open its PDF ("file not found") without this.
+  result.pdf = fs::u8path(Take(bytes)).make_preferred();
+  result.destination = fs::u8path(Take(bytes)).make_preferred();
   result.pdfHash = Take(bytes);
   result.destinationHash = Take(bytes);
   result.destinationExists = Flag(bytes);
@@ -413,9 +416,9 @@ void LoadManifest(recovery::Review &review, std::string_view bytes) {
   review.isNote = Flag(bytes);
   review.incomplete = Flag(bytes);
   review.recoverable = Flag(bytes);
-  review.originalTarget = fs::u8path(Take(bytes));
+  review.originalTarget = fs::u8path(Take(bytes)).make_preferred();
   for (size_t n = Count(bytes); n; --n) {
-    const auto path = fs::u8path(Take(bytes));
+    const auto path = fs::u8path(Take(bytes)).make_preferred();
     Need(IsSamePath(path.parent_path(),
                     StageDir(review.isNote ? StagedDiffKind::Note
                                            : StagedDiffKind::Clrop)));
@@ -430,7 +433,7 @@ void LoadManifest(recovery::Review &review, std::string_view bytes) {
     review.sources.push_back({UTF8ToWide(title), Annots(annotations), note});
   }
   for (size_t n = Count(bytes); n; --n) {
-    const auto original = fs::u8path(Take(bytes)),
+    const auto original = fs::u8path(Take(bytes)).make_preferred(),
                name = fs::u8path(Take(bytes));
     const auto hash = Take(bytes);
     Need(name == name.filename());
@@ -441,107 +444,27 @@ void LoadManifest(recovery::Review &review, std::string_view bytes) {
 }
 } // namespace recovery_store
 
-namespace recovery_note_write {
-using namespace recovery_store;
-fs::path Record(const recovery::Review &review, const std::wstring &token,
-                uint64_t sequence, bool reply) {
-  Need(token.size() == 32 &&
-       token.find_first_not_of(L"0123456789abcdef") == std::wstring::npos &&
-       sequence > 0 && IsSamePath(review.directory, Directory(review.primaryStage)));
-  return review.directory / (L"note_write_" + token + L"_" +
-      std::to_wstring(sequence) + (reply ? L".reply" : L".bin"));
-}
-recovery::Review Current(const recovery::Review &authorized) {
-  recovery::Review current;
-  current.primaryStage = authorized.primaryStage;
-  current.directory = authorized.directory;
-  LoadManifest(current, Bytes(current.directory / L"review.bin"));
-  current.candidate = Decode(Bytes(current.directory / L"candidate.bin"));
-  Need(current.isNote && current.recoverable && !current.candidate.saved &&
-       IsSamePath(current.originalTarget, authorized.originalTarget) &&
-       IsSamePath(current.originalTarget, current.candidate.destination) &&
-       current.candidate.targetConfirmed &&
-       (!current.incomplete || current.candidate.partialAccepted) &&
-       SourcesMatch(current));
-  return current;
-}
-std::string Header(const std::wstring &token, uint64_t sequence) {
-  return "recovery-note-write-v1\n" + WideToUTF8(token) + "\n" +
-         std::to_string(sequence) + "\n";
-}
-} // namespace recovery_note_write
-
-bool ProtectRecoveryNoteWrite(const recovery::Review &authorized,
-                             const std::wstring &token, uint64_t sequence,
-                             const std::filesystem::path &destination,
-                             std::string_view body, bool exists,
-                             uint64_t fingerprint) {
-  try {
-    using namespace recovery_note_write;
-    const auto path = Record(authorized, token, sequence, false);
-    const auto current = Current(authorized);
-    Need(IsSamePath(destination, current.originalTarget));
-    std::string bytes = Header(token, sequence);
-    Put(bytes, destination.generic_u8string());
-    Put(bytes, exists ? "1" : "0");
-    Put(bytes, std::to_string(fingerprint));
-    Put(bytes, body);
-    Need(bytes.size() <= limit);
-    // Retry of a request that failed before signalling must be byte-identical.
-    if (PathExistsWin32(path)) Need(Bytes(path) == bytes);
-    else Write(path, bytes);
-    return true;
-  } catch (...) { return false; }
-}
-bool ServeRecoveryNoteWrite(const recovery::Review &authorized,
-                           const std::wstring &token, uint64_t sequence) {
-  bool saved = false;
-  try {
-    using namespace recovery_note_write;
-    const auto request = Bytes(Record(authorized, token, sequence, false));
-    std::string_view fields(request);
-    const auto header = Header(token, sequence);
-    Need(fields.substr(0, header.size()) == header);
-    fields.remove_prefix(header.size());
-    const auto destination = fs::u8path(Take(fields));
-    const bool expectedExists = Flag(fields);
-    const auto fingerprint = ParseUint64(UTF8ToWide(Take(fields)));
-    const auto body = Take(fields);
-    Need(fields.empty() && fingerprint.has_value());
-    const auto current = Current(authorized);
-    Need(IsSamePath(destination, current.originalTarget) &&
-         current.candidate.destinationExists == expectedExists &&
-         DestinationMatches(current.candidate));
-    const auto wide = text_encoding::DecodeUtf8Strict(current.candidate.note);
-    std::string encoded;
-    std::wstring error;
-    Need(wide && text_encoding::EncodeText(*wide, current.candidate.noteEncoding,
-                                          &encoded, &error) && encoded == body);
-    bool exists = false;
-    uint64_t observed = 0;
-    Need(CaptureStageDestinationObservation(destination, &exists, &observed,
-                                             &error) &&
-         exists == expectedExists && observed == *fingerprint);
-    // Runs in the process owning the document's retained physical handle.
-    // The existing atomic writer restores it before any retry or return.
-    saved = AtomicWriteVerified(destination, body,
-                                fs::path(g_workspaceRoot), &error);
-  } catch (...) {}
-  try {
-    using namespace recovery_note_write;
-    const auto reply = Record(authorized, token, sequence, true);
-    Need(!PathExistsWin32(reply));
-    Write(reply, Header(token, sequence) + (saved ? "saved" : "failed"));
-  } catch (...) { return false; }
-  return saved;
-}
-bool ReadRecoveryNoteWriteReply(const recovery::Review &authorized,
-                               const std::wstring &token, uint64_t sequence) {
-  try {
-    using namespace recovery_note_write;
-    return Bytes(Record(authorized, token, sequence, true)) ==
-           Header(token, sequence) + "saved";
-  } catch (...) { return false; }
+bool WriteRecoveryNoteInProcess(const std::filesystem::path &destination,
+                                std::string_view bytes, bool expectedExists,
+                                uint64_t expectedFingerprint,
+                                std::wstring *error) {
+  // Same checks as the parent-served write: refuse if the destination changed
+  // since the candidate was prepared, then write atomically with verification.
+  bool exists = false;
+  uint64_t observed = 0;
+  std::wstring local;
+  if (!CaptureStageDestinationObservation(destination, &exists, &observed,
+                                          &local) ||
+      exists != expectedExists || observed != expectedFingerprint) {
+    if (error) *error = local.empty() ? localization::Text(L"recovery.app.save_failed") : local;
+    return false;
+  }
+  if (!AtomicWriteVerified(destination, std::string(bytes),
+                           std::filesystem::path(g_workspaceRoot), &local)) {
+    if (error) *error = local;
+    return false;
+  }
+  return true;
 }
 
 bool ProtectStageRecovery(const recovery::Review &review,
@@ -613,8 +536,8 @@ bool PrepareStageRecovery(const std::filesystem::path &stage,
                   std::to_wstring(GetTickCount64()) + L"_" +
                   std::to_wstring(++sequence);
       } while (PathExistsWin32(history));
-      Need(Within(review.directory, WorkspaceEscapeRoot() / L"recovery") &&
-           Within(history, WorkspaceEscapeRoot() / L"recovery") &&
+      Need(Within(review.directory, WorkspaceRecoveryRoot()) &&
+           Within(history, WorkspaceRecoveryRoot()) &&
            write_checks::IsSafeLocalPath(review.directory) &&
            write_checks::IsSafeLocalPath(history));
       Need(MoveFileW(
@@ -714,6 +637,12 @@ bool PrepareStageRecovery(const std::filesystem::path &stage,
                           {localization::Text(L"recovery.demo.original_group"),
                            review.candidate.annotations,
                            review.candidate.note});
+    // A missing note original leaves nothing to merge into. Start the final
+    // text from the newest unsaved version, so saving as-is can never write an
+    // empty file and consume the checkpoint. The user can still edit it.
+    if (review.isNote && !review.candidate.destinationExists &&
+        review.candidate.note.empty() && review.sources.size() > 1)
+      review.candidate.note = review.sources[1].note;
     Need(ProtectStageRecovery(review, review.candidate));
     Write(review.directory / L"review.bin", Manifest(review));
     *output = std::move(review);

@@ -18,13 +18,13 @@ function Resolve-PathSafe([string]$p) {
 
 $root = Resolve-PathSafe $WorkspaceRoot
 $ts = Get-Date -Format "yyyyMMdd_HHmmss"
-$outDir = Join-Path $root "__pdf_note_workspace__\__tmp__\__test_logs__"
+$outDir = Join-Path $root "__pdf_note_workspace__\__test__\save_transaction_logs"
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
 $outFile = Join-Path $outDir ("save_tx_{0}_{1}.log" -f $Label, $ts)
 
-$stageRoot = Join-Path $root "__pdf_note_workspace__\__tmp__\__stage__"
-$backupRoot = Join-Path $root "__pdf_note_workspace__\__escape__\backup"
+$stageRoot = Join-Path $root "__pdf_note_workspace__\__unsaved__"
+$backupRoot = Join-Path $root "__pdf_note_workspace__\__backup__"
 
 @(
     "timestamp: $((Get-Date).ToString("o"))"

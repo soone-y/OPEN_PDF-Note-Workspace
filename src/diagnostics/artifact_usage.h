@@ -6,7 +6,7 @@
 #include <filesystem>
 
 namespace artifact_usage {
-enum class Area : unsigned { All, Logs, Temporary, Recovery, SaveBackups, Operations, MemoBackups, Count };
+enum class Area : unsigned { All, Logs, Temporary, Unsaved, SaveBackups, Operations, MemoBackups, Count };
 inline constexpr size_t kAreaCount = static_cast<size_t>(Area::Count);
 enum class State { Complete, Partial, Canceled, Limited, Missing, Unavailable };
 struct Totals {

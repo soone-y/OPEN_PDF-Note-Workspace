@@ -1,5 +1,6 @@
 // file: pdf_view/pdf_view.cpp
 #include "pdf_view/pdf_view.h"
+#include "core/workspace_layout.h"
 #include "pdf_view/render_queue_policy.h"
 #include "pdf_view/scroll_travel.h"
 #include "pdf_view/text_edit_view_follow.h"
@@ -14,6 +15,7 @@
 #include "pdf_view/text_selection_pdfium.h"
 #include "ui/scroll_input_win32.h"
 #include "ui/empty_view_guide.h"
+#include "ui/gdi_scoped.h"
 #include "ui/shortcut_help.h"
 #include "core/annotation_rotation.h"
 #include "core/pdf_permissions.h"
@@ -26,6 +28,7 @@
 #include "core/localization.h"
 #include "core/ui_prompts.h"
 #include "math/math_render.h"
+#include "math/math_source.h"
 #include "file_output/file_output.h"
 #include "clrop/bridge.h"
 #include "clrop/json.h"
@@ -97,6 +100,7 @@ static bool PagePixelRectHasVisibleInk(const PageCache& page, const RECT& inner,
 
 static bool TextBoxReadableBackground(const Annotation& ann, COLORREF* outColor, BYTE* outAlpha);
 static void DrawTextBoxReadableBackground(HDC hdc, const RECT& r, const Annotation& ann);
+static TextBackgroundAssistMode CurrentTextBoxBackgroundAssistMode();
 static void DrawPolylineAlphaPx(HDC hdc, const std::vector<POINT>& pts, int penW, COLORREF color, BYTE alpha);
 static COLORREF DarkenColor(COLORREF c, double factor = 0.85);
 static void CommitTextEditing(HWND hwnd, bool commit);
@@ -597,6 +601,9 @@ void DismissPdfStartupGuide() {
     g_startupGuideVisibility.Dismiss();
     if (g_hPdfView) InvalidateRect(g_hPdfView, nullptr, FALSE);
 }
+
+PdfEmptyGuideProvider g_pdfEmptyGuideProvider = nullptr;
+PdfHostBackgroundPainter g_pdfHostBackgroundPainter = nullptr;
 
 static bool ShouldShowEmptyViewGuide() {
     if (!g_currentLecturePath.empty() || !g_currentSessionPath.empty() ||
@@ -1917,8 +1924,9 @@ static COLORREF DarkenColor(COLORREF c, double factor) {
 }
 
 static TextBackgroundAssistMode CurrentTextBoxBackgroundAssistMode() {
-    // A disabled toolbar leaves older text eligible for the global preference.
-    if (!g_textBoxReadableBackground) return TextBackgroundAssistMode::Inherit;
+    // Store an explicit Off: Inherit follows the live toggle, so a later "on"
+    // would retroactively add a background to text written while it was off.
+    if (!g_textBoxReadableBackground) return TextBackgroundAssistMode::Off;
     return g_textBoxReadableBackgroundInverted
         ? TextBackgroundAssistMode::Inverted
         : TextBackgroundAssistMode::Auto;

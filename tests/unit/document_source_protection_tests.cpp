@@ -94,6 +94,99 @@ void Open(const fs::path& path, const fs::path& previous = {}) {
     Check(candidate.acquired(), "acquire production document owner and source protection");
     candidate.CommitReplacing(previous);
 }
+int SingleExternalOperation(const std::wstring& mode, const fs::path& path) {
+    if (mode == L"--read-only") {
+        HANDLE reader = CreateFileW(path.c_str(), GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (reader == INVALID_HANDLE_VALUE) return 2;
+        CloseHandle(reader); return 0;
+    }
+    const bool changed = mode == L"--delete-only" ? DeleteFileW(path.c_str()) != FALSE :
+        MoveFileExW(path.c_str(), (path.wstring() + L".external-move").c_str(), 0) != FALSE;
+    return !changed && GetLastError() == ERROR_SHARING_VIOLATION ? 0 : 3;
+}
+void SingleExternalProbe(const fs::path& path, const wchar_t* mode) {
+    const auto executable = Self();
+    std::wstring command = L"\"" + executable + L"\" " + mode + L" \"" + path.wstring() + L"\"";
+    STARTUPINFOW startup{}; startup.cb = sizeof(startup);
+    PROCESS_INFORMATION child{};
+    Check(CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE,
+        CREATE_NO_WINDOW, nullptr, path.parent_path().c_str(), &startup, &child), "start owned single-operation child");
+    CloseHandle(child.hThread);
+    const DWORD wait = WaitForSingleObject(child.hProcess, 5000);
+    if (wait != WAIT_OBJECT_0) { TerminateProcess(child.hProcess, 20); WaitForSingleObject(child.hProcess, 5000); }
+    DWORD code = 99; const bool gotCode = GetExitCodeProcess(child.hProcess, &code) != FALSE;
+    CloseHandle(child.hProcess);
+    Check(wait == WAIT_OBJECT_0 && gotCode && code == 0,
+        "external operation completes while destructive requests remain denied");
+}
+void WaitForObservation(const fs::path& path) {
+    const auto key = document_source_protection::Key(path);
+    const auto deadline = GetTickCount64() + 5000;
+    bool watching = false;
+    do {
+        {
+            const std::lock_guard<std::recursive_mutex> lock(document_source_protection::mutex);
+            for (const auto& entry : document_source_protection::sources)
+                if (entry.second->path == key) watching = entry.second->observation.watching();
+        }
+        if (!watching) Sleep(10);
+    } while (!watching && GetTickCount64() < deadline);
+    Check(watching, "protected PDF is observing conflicting access");
+}
+std::optional<document_source_protection::ProtectionNotice> WaitForProtectionNotice() {
+    const auto deadline = GetTickCount64() + 5000;
+    do {
+        auto notice = document_source_protection::TakeProtectionNotice();
+        if (notice) return notice;
+        Sleep(10);
+    } while (GetTickCount64() < deadline);
+    return std::nullopt;
+}
+void AccessNoticeTests(const fs::path& root) {
+    using namespace document_source_protection;
+    ReleaseAllDocumentOpenLocks();
+    ProtectionNoticeCooldown cooldown;
+    Check(cooldown.Allow(L"first", true, 100) && !cooldown.Allow(L"first", true, 29999) &&
+          !cooldown.Allow(L"second", true, 30000) && cooldown.Allow(L"first", true, 30100),
+        "notices are coalesced across files for thirty seconds");
+    Check(cooldown.Allow(L"first", false, 30101), "changed save/close guidance can appear immediately");
+    const auto pdf = root / L"notice.pdf", stage = root / L"notice.clrop.stage";
+    Write(pdf, "notice original bytes"); Open(pdf); WaitForObservation(pdf);
+    SingleExternalProbe(pdf, L"--read-only");
+    Check(!TakeProtectionNotice(), "ordinary compatible reading stays silent");
+    DWORD error = 0;
+    Check(RetainStage(stage, pdf, &error), "retain the notice fixture for staged edits");
+    ReleaseDocumentOpenLock(pdf);
+    SingleExternalProbe(pdf, L"--delete-only");
+    auto notice = WaitForProtectionNotice();
+    Check(notice && notice->fileName == pdf.filename().wstring() && notice->hasStagedEdits,
+        "external access to a closed staged PDF explains uncommitted edits");
+    Check(Read(pdf) == "notice original bytes", "acknowledgment preserves original bytes");
+    WaitForObservation(pdf); SingleExternalProbe(pdf, L"--rename-only");
+    Check(!TakeProtectionNotice(), "repeated external requests do not repeat guidance");
+    Open(pdf); ReleaseStage(stage);
+    WaitForObservation(pdf); SingleExternalProbe(pdf, L"--delete-only");
+    notice = WaitForProtectionNotice();
+    Check(notice && !notice->hasStagedEdits, "after integration or discard guidance switches to closing the display");
+    WaitForObservation(pdf);
+    const auto moved = root / L"notice-moved.pdf";
+    Check(!Rename(pdf, moved).operationError, "owned mutation completes without waiting on its own observation");
+    Check(!TakeProtectionNotice(), "owned file movement produces no external-access guidance");
+    Open(moved, pdf); ReleaseDocumentOpenLock(moved); FreeToMove(moved);
+    // A synchronous handle cannot grant FSCTL_REQUEST_OPLOCK. Observation must
+    // fail independently while the original sharing restriction remains valid.
+    Source fallback;
+    Check(fallback.Open(Key(moved), false, &error), "open a source with advisory observation unavailable");
+    SourceAccessObservation unavailable;
+    unavailable.Bind(fallback.handle);
+    Check(!unavailable.Poll(GetTickCount64()) && !unavailable.watching(), "rejected advisory observation remains unarmed");
+    SingleExternalProbe(moved, L"--delete-only");
+    unavailable.Stop(); fallback.Close();
+    Check(Read(moved) == "notice original bytes", "observer failure preserves the protected original");
+    ReleaseAllDocumentOpenLocks();
+}
 std::wstring conflictPath;
 std::atomic<bool> injectConflict{false};
 std::atomic<HANDLE> injectedHandle{INVALID_HANDLE_VALUE};
@@ -317,6 +410,58 @@ void EmptyDeletionTests(const fs::path& root) {
         "relative paths never select a deletion target");
 }
 
+void StagedPdfProtectionTests(const fs::path& root) {
+    const auto pdf = root / L"staged-original.pdf";
+    const auto first = root / L"first.clrop.stage", second = root / L"second.clrop.stage";
+    Write(pdf, "staged PDF original");
+    DWORD error = 0;
+    Open(pdf);
+    Check(document_source_protection::RetainStage(first, pdf, &error) &&
+          document_source_protection::RetainStage(first, pdf, &error) &&
+          document_source_protection::RetainStage(second, pdf, &error),
+        "multiple checkpoints independently retain source protection, with idempotent registration");
+    ReleaseDocumentOpenLock(pdf);
+    BlockedExternally(pdf);
+    document_source_protection::ReleaseStage(first);
+    BlockedExternally(pdf);
+    document_source_protection::ReleaseStage(second);
+    FreeToMove(pdf);
+    Open(pdf);
+    Check(document_source_protection::RetainStage(first, pdf, &error), "retain a displayed PDF for a checkpoint");
+    document_source_protection::ReleaseStage(first);
+    BlockedExternally(pdf);
+    ReleaseDocumentOpenLock(pdf); FreeToMove(pdf);
+    Check(document_source_protection::RetainStage(first, pdf, &error), "adopt an earlier checkpoint without opening a display");
+    const auto moved = root / L"staged-moved.pdf";
+    Check(!document_source_protection::Rename(pdf, moved).operationError,
+        "app-owned move rebinds a checkpoint-only source handle");
+    BlockedExternally(moved);
+    document_source_protection::ReleaseStage(first); FreeToMove(moved);
+    const auto missing = root / L"missing-staged.pdf";
+    Check(!document_source_protection::RetainStage(first, missing, &error) &&
+          document_source_protection::HasPendingProtection() && !fs::exists(missing),
+        "a missing checkpoint original stays pending without being recreated");
+    document_source_protection::Release(missing);
+    Check(document_source_protection::HasPendingProtection(), "closing a missing original retains checkpoint ownership");
+    Write(missing, "externally restored original");
+    WaitForAutomaticProtection(); BlockedExternally(missing);
+    document_source_protection::ReleaseStage(first); FreeToMove(missing);
+    HANDLE external = CreateFileW(missing.c_str(), DELETE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    Check(external != INVALID_HANDLE_VALUE, "hold external delete access before adopting a checkpoint");
+    Check(!document_source_protection::RetainStage(first, missing, &error),
+        "an existing external handle leaves checkpoint protection pending");
+    {
+        std::wstring message;
+        DocumentOpenLockCandidate candidate(missing, &message);
+        Check(!candidate.acquired(), "checkpoint-only pending protection does not admit an unprotected document open");
+    }
+    CloseHandle(external);
+    WaitForAutomaticProtection(); BlockedExternally(missing);
+    document_source_protection::ReleaseStage(first); FreeToMove(missing);
+}
+
 void IdentityTests() {
     clrop::PdfId original;
     original.path = L"original.pdf"; original.size = 1000; original.pageCount = 2;
@@ -463,6 +608,7 @@ void Tests(const fs::path& root) {
     RecoveryTests(root);
     OplockTests(root);
     EmptyDeletionTests(root);
+    StagedPdfProtectionTests(root);
     const auto longPath = root / std::wstring(100, L'a') / std::wstring(100, L'b') / L"長いパス 空白.txt";
     const auto extendedPath = fs::path(ToExtendedWin32PathIfAbsoluteLocal(longPath));
     Write(extendedPath, "protected long local path"); Open(longPath);
@@ -476,8 +622,12 @@ void Tests(const fs::path& root) {
     }
     BlockedExternally(longPath);
     ReleaseDocumentOpenLock(longPath); FreeToMove(longPath);
+    AccessNoticeTests(root);
 }
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 3 && (std::wstring(argv[1]) == L"--read-only" ||
+        std::wstring(argv[1]) == L"--delete-only" || std::wstring(argv[1]) == L"--rename-only"))
+        return SingleExternalOperation(argv[1], argv[2]);
     if (argc == 3 && std::wstring(argv[1]) == L"--probe") return ExternalProbe(argv[2]);
     if (argc == 3 && std::wstring(argv[1]) == L"--probe-write") return ExternalProbe(argv[2], true);
     try {

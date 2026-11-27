@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/workspace_config.h"
+#include "note/note_render_final_gdi_measurement_provider.h"
 #include "note/note_export.h"
 #include "note/note_kernel.h"
 #include "note/note_parser.h"
@@ -158,6 +160,100 @@ inline bool Run() {
         return block.kind == note::BlockKind::Quote;
     }) == 256, "deep implicit quotes retain independent cached continuation", 0);
     std::cout << "List continuation checks=" << checks << " result=" << (ok ? "PASS" : "FAIL") << "\n";
+    return ok;
+}
+inline bool RunAlignment(HDC dc) {
+    bool ok = dc != nullptr;
+    size_t checks = 0;
+    const auto check = [&](bool value, const char* label, size_t index) {
+        ++checks;
+        if (!value) std::cerr << "list alignment: " << label << " case=" << index << "\n";
+        ok = ok && value;
+    };
+    struct Case { const wchar_t* raw; bool align; int spaces = 0; };
+    const Case cases[] = {
+        {L"- ITEM\nTARGET", true}, {L"* ITEM\nTARGET", true}, {L"+ ITEM\nTARGET", true},
+        {L"99. ITEM\nTARGET", true}, {L"3) ITEM\nTARGET", true},
+        {L"- [x] ITEM\nTARGET", true}, {L"- outer\n  - ITEM\nTARGET", true},
+        {L"- ITEM\nbody\nTARGET", true}, {L"- ITEM\n\nTARGET", false},
+        {L"- ITEM\n# heading\nTARGET", false}, {L"- ITEM\n---\nTARGET", false},
+        {L"- ITEM\n```\ncode\n```\nTARGET", false},
+        {L"- ITEM\n$$\nx\n$$\nTARGET", false},
+        {L"- ITEM\n::: box\nbody\n:::\nTARGET", false},
+        {L"- ITEM\n  TARGET", false, 2}, {L"- ITEM\n<d=0>TARGET</>", false},
+    };
+    WorkspaceConfig config;
+    check(!config.clroListBodyAlignment && !config.clroListImplicitContinuation, "default has no following-row effect", 0);
+    config.SetClroListBodyAlignment(true);
+    check(config.clroListBodyAlignment && !config.clroListImplicitContinuation, "alignment is exclusive", 0);
+    config.SetClroListImplicitContinuation(true);
+    check(!config.clroListBodyAlignment && config.clroListImplicitContinuation, "implicit continuation is exclusive", 0);
+    config.SetClroListBodyAlignment(true);
+    config.SetClroListBodyAlignment(false);
+    check(!config.clroListBodyAlignment && !config.clroListImplicitContinuation, "turning off returns to no effect", 0);
+    SIZE space{};
+    check(GetTextExtentPoint32W(dc, L" ", 1, &space) && space.cx > 0, "space measurement", 0);
+    for (const auto* file : {L"align.clro", L"align.CLRO"}) {
+        size_t index = 0;
+        for (const auto& test : cases) for (bool align : {false, true}) {
+            note::NoteMetadata meta{file, L""};
+            meta.clro_list_body_alignment = align;
+            note::NoteTextCore core;
+            core.Reset({2710}, meta, test.raw, 1, 1);
+            note::NoteRenderFinalCompleteBuildInput input;
+            input.content_kind = note::NoteContentKind::Markdown;
+            input.layout_key = {640, 96, 96, 1, 4, 8, false};
+            input.owner_input.render_active = true;
+            input.owner_input.editor_text_core_current = true;
+            input.owner_input.visible_lines = {{0}, {core.logical_line_count()}};
+            note::NoteRenderFinalGdiMeasurementProvider provider(dc);
+            std::shared_ptr<const note::NoteRenderFinalPublication> publication;
+            const auto built = note::NoteRenderFinalTransaction::BuildComplete(core, input, provider, &publication);
+            const std::wstring raw(test.raw);
+            const size_t target = raw.find(L"TARGET"), item = raw.find(L"ITEM");
+            note::NoteRenderFinalCaretGeometry targetCaret, itemCaret;
+            const bool resolved = built == note::NoteRenderFinalCompleteBuildResult::Built && publication &&
+                note::ResolveNoteRenderFinalCaret(*publication, {target}, &targetCaret) == note::NoteRenderFinalInteractionResult::Resolved &&
+                note::ResolveNoteRenderFinalCaret(*publication, {item}, &itemCaret) == note::NoteRenderFinalInteractionResult::Resolved;
+            check(resolved, "publication and exact caret positions", index);
+            if (resolved) {
+                const int expected = align && test.align ? itemCaret.x_px : 8 + test.spaces * space.cx;
+                if (targetCaret.x_px != expected) std::cerr << "actual=" << targetCaret.x_px << " expected=" << expected << "\n";
+                check(targetCaret.x_px == expected, "alignment or ordinary body origin", index);
+                note::NoteRenderLinePlacement placement;
+                check(publication->placement()->ResolveLine(targetCaret.line_index, &placement) &&
+                    std::none_of(placement.decorations.begin(), placement.decorations.end(), [](const auto& d) {
+                        return d.kind == note::NoteRenderVisualDecorationKind::ListMarker ||
+                            d.kind == note::NoteRenderVisualDecorationKind::TaskCheckbox;
+                    }), "alignment never adds a marker", index);
+            }
+            const auto model = note::MakeNoteTextModel(meta, raw, 1);
+            const auto doc = note::ParseNoteDocument(model);
+            check(ListDepth(doc, target) == 0 && core.MatchesRaw(raw) && core.content_revision() == 1,
+                  "alignment is not list membership or a source edit", index);
+            auto ordinary = model; ordinary.meta.clro_list_body_alignment = false;
+            const auto ordinaryDoc = note::ParseNoteDocument(ordinary);
+            check(note::ExportHtml(model, doc, {}) == note::ExportHtml(ordinary, ordinaryDoc, {}) &&
+                  note::ExportPlainText(model, doc, {}) == note::ExportPlainText(ordinary, ordinaryDoc, {}),
+                  "exports retain ordinary paragraph structure", index);
+            ++index;
+        }
+    }
+    note::LocalNoteKernel kernel;
+    kernel.Reset({2711}, {L"switch.clro", L""}, L"- ITEM\nTARGET", 1, 1, note::NoteContentKind::Markdown);
+    check(kernel.ApplyUserEdit({{13}, 0, L"!"}, {}, {}, note::NoteHistoryOperationKind::Typing, 1, true).applied(), "edit before switch", 0);
+    const auto root = kernel.text_core().TakeSnapshot();
+    const auto revision = kernel.text_core().content_revision();
+    check(kernel.SetClroListBodyAlignment(true) && kernel.RefreshDerived().current &&
+          kernel.text_core().MatchesSnapshot(root) && kernel.text_core().content_revision() == revision,
+          "switch preserves root and revision", 0);
+    check(kernel.SetClroListImplicitContinuation(true) && !kernel.text_core().clro_list_body_alignment(), "kernel semantic policy excludes alignment", 0);
+    check(kernel.SetClroListBodyAlignment(true) && !kernel.text_core().clro_list_implicit_continuation(), "kernel alignment excludes semantic policy", 0);
+    const auto undo = kernel.Undo(true);
+    check(undo && undo->applied() && kernel.text_core().MatchesRaw(L"- ITEM\nTARGET"), "undo survives display policy switch", 0);
+    const auto redo = kernel.Redo(true);
+    check(redo && redo->applied() && kernel.text_core().MatchesRaw(L"- ITEM\nTARGET!"), "redo survives display policy switch", 0);
+    std::cout << "List alignment checks=" << checks << " result=" << (ok ? "PASS" : "FAIL") << "\n";
     return ok;
 }
 } // namespace note_list_continuation_test

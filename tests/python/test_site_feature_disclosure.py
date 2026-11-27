@@ -37,6 +37,7 @@ class FeatureDisclosureTests(unittest.TestCase):
     def test_interaction_colors_match_on_both_sites(self) -> None:
         sources = [
             "site/cloudflare/public/index.html",
+            "site/cloudflare/public/about/index.html",
             "site/github/index.html",
             "site/github/en/index.html",
             "site/github/scripts/render_human_docs.py",

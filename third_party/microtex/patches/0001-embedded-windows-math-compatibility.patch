@@ -1,0 +1,379 @@
+--- a/lib/atom/atom_matrix.cpp
++++ b/lib/atom/atom_matrix.cpp
+@@ -574,6 +574,10 @@
+       hb->_depth = lineDepth[i] + Vspace;
+     }
+     vb->add(hb);
++    const auto gap = _matrix->_rowGaps.find(i);
++    if (i + 1 < rows && gap != _matrix->_rowGaps.end()) {
++      vb->add(sptrOf<StrutBox>(0.f, Units::fsize(gap->second, env), 0.f, 0.f));
++    }
+   }
+ 
+   totalHeight = vb->_height + vb->_depth;
+--- a/lib/core/formula.cpp
++++ b/lib/core/formula.cpp
+@@ -1,4 +1,5 @@
+ #include "core/formula.h"
++#include "atom/atom_space.h"
+ 
+ #include "atom/atom_basic.h"
+ #include "atom/atom_char.h"
+@@ -116,7 +117,8 @@
+   }
+ }
+ 
+-void ArrayFormula::addRow() {
++void ArrayFormula::addRow(const Dimen& gap) {
++  if (gap.isValid()) _rowGaps[_row] = gap;
+   addCol();
+   _array.emplace_back();
+   _row++;
+@@ -151,8 +153,13 @@
+ sptr<VRowAtom> ArrayFormula::getAsVRow() {
+   auto vr = sptrOf<VRowAtom>();
+   vr->setAddInterline(true);
++  size_t row = 0;
+   for (auto& c : _array) {
+     for (auto& j : c) vr->append(j);
++    const auto gap = _rowGaps.find(row++);
++    if (gap != _rowGaps.end()) {
++      vr->append(sptrOf<SpaceAtom>(gap->second.unit, 0.f, gap->second.val, 0.f));
++    }
+   }
+   return vr;
+ }
+--- a/lib/core/formula.h
++++ b/lib/core/formula.h
+@@ -104,6 +104,7 @@
+   std::vector<std::vector<sptr<Atom>>> _array;
+   std::map<int, std::vector<sptr<CellSpecifier>>> _rowSpecifiers;
+   std::map<std::string, std::vector<sptr<CellSpecifier>>> _cellSpecifiers;
++  std::map<size_t, Dimen> _rowGaps;
+ 
+   ArrayFormula();
+ 
+@@ -113,7 +114,7 @@
+ 
+   void insertAtomIntoCol(int col, const sptr<Atom>& atom);
+ 
+-  void addRow();
++  void addRow(const Dimen& gap = {});
+ 
+   void addRowSpecifier(const sptr<CellSpecifier>& spe);
+ 
+--- a/lib/core/parser.cpp
++++ b/lib/core/parser.cpp
+@@ -1,4 +1,6 @@
+ #include "core/parser.h"
++#include <cmath>
++#include "microtex.h"
+ 
+ #include "atom/atom.h"
+ #include "atom/atom_basic.h"
+@@ -93,9 +95,13 @@
+   _formula->add(atom);
+ }
+ 
+-void Parser::addRow() const {
++void Parser::addRow(const std::string& gap) const {
+   if (!_arrayMode) throw ex_parse("Can not add row in none-array mode!");
+-  ((ArrayFormula*)_formula)->addRow();
++  const auto dimension = gap.empty() ? Dimen{} : Units::getDimen(gap);
++  if (!gap.empty() && (!dimension.isValid() || !std::isfinite(dimension.val))) {
++    throw ex_parse("Invalid row spacing: " + gap);
++  }
++  ((ArrayFormula*)_formula)->addRow(dimension);
+ }
+ 
+ string Parser::getGroup(char openclose) {
+@@ -382,6 +388,7 @@
+ 
+   auto getArg = [&](int i) {  // NOLINT(misc-no-recursion)
+     skipWhiteSpace();
++    if (_pos >= _len) throw ex_parse("Missing macro argument");
+     try {
+       args[i] = getGroup(L_GROUP, R_GROUP);
+     } catch (ex_parse& e) {
+@@ -615,6 +622,10 @@
+ }
+ 
+ void Parser::preprocessNewCmd(string& cmd, Args& args, int& pos) {
++  // Definitions are process-global upstream. Untrusted note formulas must not
++  // redefine commands used by other notes, cached formulas or PDF exports.
++  if (!MicroTeX::isPrivilegedEnvironment())
++    throw ex_parse("Custom macro definitions are disabled in embedded formulas");
+   // The macro must exists
+   auto mac = MacroInfo::get(cmd);
+   getOptsArgs(mac->argc, mac->opt, args);
+@@ -665,7 +676,10 @@
+   char ch;
+   int spos;
+   vector<string> args;
++  size_t steps = 0;
+   while (_pos < _len) {
++    if (++steps > 1000000 || _latex.size() > 4 * 1024 * 1024)
++      throw ex_parse("Math expansion limit exceeded");
+     ch = _latex[_pos];
+     switch (ch) {
+       case ESCAPE: {
+@@ -700,6 +714,13 @@
+ }
+ 
+ void Parser::parse() {
++  static thread_local unsigned depth = 0;
++  if (depth >= 128) throw ex_parse("Math nesting limit exceeded");
++  struct DepthGuard {
++    unsigned& value;
++    explicit DepthGuard(unsigned& v) : value(v) { ++value; }
++    ~DepthGuard() { --value; }
++  } guard(depth);
+   if (_len == 0) {
+     if (_formula->_root == nullptr && !_arrayMode) _formula->add(sptrOf<EmptyAtom>());
+     return;
+--- a/lib/core/parser.h
++++ b/lib/core/parser.h
+@@ -201,7 +201,7 @@
+    *
+    * @throw ex_parse if the parser is not in array mode
+    */
+-  void addRow() const;
++  void addRow(const std::string& gap = "") const;
+ 
+   /**
+    * Parse the input string
+--- a/lib/macro/macro_def.cpp
++++ b/lib/macro/macro_def.cpp
+@@ -324,7 +324,7 @@
+   mac(1, macro_sqrt, "sqrtsign"),
+   mac(0, macro_joinrel, "joinrel"),
+   mac(0, macro_cr, "cr"),
+-  mac(0, macro_backslashcr, "\\"),
++  defMac("\\", 0, 1, macro_backslashcr),
+   mac(1, macro_hvspace, "hspace"),
+   mac(1, macro_hvspace, "vspace"),
+   mac(0, macro_underscore, "underscore"),
+--- a/lib/macro/macro_misc.cpp
++++ b/lib/macro/macro_misc.cpp
+@@ -46,11 +46,13 @@
+ 
+ macro(cr) {
+   if (tp.isArrayMode()) {
+-    tp.addRow();
++    tp.addRow(args[1]);
+   } else {
+     ArrayFormula arr;
+     arr.add(tp._formula->_root);
+-    arr.addRow();
++    const auto gap = args[1].empty() ? Dimen{} : Units::getDimen(args[1]);
++    if (!args[1].empty() && !gap.isValid()) throw ex_parse("Invalid row spacing");
++    arr.addRow(gap);
+     Parser parser(tp.isPartial(), tp.forwardBalancedGroup(), &arr, false, tp.isMathMode());
+     parser.parse();
+     arr.checkDimensions();
+--- a/lib/macro/macro_misc.h
++++ b/lib/macro/macro_misc.h
+@@ -209,7 +209,7 @@
+ /**************************************** not implemented *****************************************/
+ 
+ inline macro(includegraphics) {
+-  return nullptr;
++  throw ex_parse("External graphics are not supported in embedded formulas");
+ }
+ 
+ }  // namespace microtex
+--- a/lib/microtex.cpp
++++ b/lib/microtex.cpp
+@@ -68,7 +68,6 @@
+ 
+ FontMeta MicroTeX::init(const Init& init) {
+   if (_config->isInited) return {};
+-  std::setlocale(LC_NUMERIC, "C"); // workaround for decimal parsing on German (decimal comma) systems
+   auto meta = std::visit(InitVisitor(), init);
+   _config->defaultMathFontName = meta.name;
+   _config->isInited = true;
+@@ -81,7 +80,6 @@
+ 
+ FontMeta MicroTeX::init(const FontSrc& mathFontSrc) {
+   if (_config->isInited) return {};
+-  std::setlocale(LC_NUMERIC, "C"); // workaround for decimal parsing on German (decimal comma) systems
+   auto meta = FontContext::addFont(mathFontSrc);
+   if (!meta.isMathFont) {
+     throw ex_invalid_param("'" + meta.name + "' is not a math font!");
+--- a/lib/otf/otfconfig.h
++++ b/lib/otf/otfconfig.h
+@@ -4,6 +4,11 @@
+ #define GLYPH_RENDER_TYPE_BOTH 0
+ #define GLYPH_RENDER_TYPE_PATH 1
+ #define GLYPH_RENDER_TYPE_TYPEFACE 2
++
++// The application ships CLM outlines and uses native Windows text for fallback.
++#ifndef GLYPH_RENDER_TYPE
++#define GLYPH_RENDER_TYPE GLYPH_RENDER_TYPE_PATH
++#endif
+ 
+ // clang-format off
+ // if have glyph render path
+--- a/lib/render/render.cpp
++++ b/lib/render/render.cpp
+@@ -1,6 +1,9 @@
+ #include "render.h"
+ 
+ #include <functional>
++#include <cmath>
++#include <limits>
++#include <stdexcept>
+ 
+ #include "atom/atom.h"
+ #include "box/box_single.h"
+@@ -88,15 +91,24 @@
+ 
+ int Render::getHeight() const {
+   auto box = _data->root;
+-  return (int)(box->vlen() * _data->fixedScale);
++  const double value = double(box->vlen()) * _data->fixedScale;
++  if (!std::isfinite(value) || value < 0 || value > std::numeric_limits<int>::max())
++    throw std::runtime_error("Invalid math height");
++  return static_cast<int>(std::ceil(value));
+ }
+ 
+ int Render::getDepth() const {
+-  return (int)(_data->root->_depth * _data->fixedScale);
++  const double value = double(_data->root->_depth) * _data->fixedScale;
++  if (!std::isfinite(value) || value < 0 || value > std::numeric_limits<int>::max())
++    throw std::runtime_error("Invalid math depth");
++  return static_cast<int>(std::ceil(value));
+ }
+ 
+ int Render::getWidth() const {
+-  return (int)(_data->root->_width * _data->fixedScale);
++  const double value = double(_data->root->_width) * _data->fixedScale;
++  if (!std::isfinite(value) || value < 0 || value > std::numeric_limits<int>::max())
++    throw std::runtime_error("Invalid math width");
++  return static_cast<int>(std::ceil(value));
+ }
+ 
+ float Render::getBaseline() const {
+--- a/lib/unimath/uni_symbol.cpp
++++ b/lib/unimath/uni_symbol.cpp
+@@ -800,6 +800,7 @@
+   {0x022D5, rel,     "hash"},
+   {0x00302, acc,     "hat"},
+   {0x02A6F, rel,     "hatapprox"},
++  {0x0210F, ord,     "hbar"},
+   {0x02661, ord,     "heartsuit"},
+   {0x022B9, ord,     "hermitmatrix"},
+   {0x02394, ord,     "hexagon"},
+--- a/lib/utils/string_utils.h
++++ b/lib/utils/string_utils.h
+@@ -6,6 +6,8 @@
+ #include <climits>
+ #include <functional>
+ #include <map>
++#include <locale>
++#include <sstream>
+ #include <string>
+ #include <vector>
+ 
+@@ -29,8 +31,10 @@
+ 
+ template <class T>
+ inline void valueOf(const std::string& s, T& val) {
+-  char* endptr = nullptr;
+-  val = strtod(s.c_str(), &endptr);
++  std::istringstream input(s);
++  input.imbue(std::locale::classic());
++  val = T{};
++  input >> val;
+ }
+ 
+ inline bool str2int(const char* str, size_t len, int& res, int radix) {
+@@ -47,19 +51,19 @@
+ 
+ /** Transform a string to lowercase */
+ inline std::string& toLower(std::string& src) {
+-  std::transform(src.begin(), src.end(), src.begin(), ::tolower);
++  std::transform(src.begin(), src.end(), src.begin(), [](unsigned char c) { return ::tolower(c); });
+   return src;
+ }
+ 
+ /** Ignore left side whitespace in a string */
+ inline std::string& ltrim(std::string& s) {
+-  s.erase(s.begin(), std::find_if(s.begin(), s.end(), [](char c) { return !isspace(c); }));
++  s.erase(s.begin(), std::find_if(s.begin(), s.end(), [](unsigned char c) { return !isspace(c); }));
+   return s;
+ }
+ 
+ /** Ignore right side whitespace in a string */
+ inline std::string& rtrim(std::string& s) {
+-  s.erase(std::find_if(s.rbegin(), s.rend(), [](char c) { return !isspace(c); }).base(), s.end());
++  s.erase(std::find_if(s.rbegin(), s.rend(), [](unsigned char c) { return !isspace(c); }).base(), s.end());
+   return s;
+ }
+ 
+--- a/platform/gdi_win/graphic_win32.cpp
++++ b/platform/gdi_win/graphic_win32.cpp
+@@ -1,10 +1,14 @@
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++#include <windows.h>
++#undef TRANSPARENT
+ #include "graphic_win32.h"
+ 
+ #include "utils/exceptions.h"
+ #include "utils/nums.h"
+ #include "utils/utils.h"
+ // fix error C4430: missing type specifier - int assumed. Note: C++ does not support default-int
+-#include <comdef.h>
+ #include <gdiplus.h>
+ #include <windows.h>
+ 
+@@ -14,14 +18,18 @@
+ std::wstring microtex::win32ToWideString(const std::string& str) {
+   std::wstring wstr;
+   auto l = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, nullptr, 0);
+-  wstr.resize(l + 10);
+-  MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, &wstr[0], (int)wstr.size());
++  if (l <= 0) throw microtex::ex_invalid_state("Invalid UTF-8 text");
++  wstr.resize(l);
++  MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, &wstr[0], l);
++  wstr.resize(l - 1);
+   return wstr;
+ }
+ 
+ /**************************************************************************************************/
+ 
+ std::map<std::string, sptr<Font_win32>> Font_win32::_win32Faces;
++
++void Font_win32::clearCache() { _win32Faces.clear(); }
+ 
+ sptr<Font_win32> Font_win32::getOrCreate(const std::string& file) {
+   auto it = _win32Faces.find(file);
+@@ -195,14 +203,14 @@
+ void Graphics2D_win32::setStroke(const Stroke& s) {
+   _stroke = s;
+   _pen->SetWidth(s.lineWidth);
+-  Gdiplus::LineCap c;
++  Gdiplus::LineCap c = Gdiplus::LineCapFlat;
+   switch (s.cap) {
+     case CAP_BUTT: c = Gdiplus::LineCapFlat; break;
+     case CAP_ROUND: c = Gdiplus::LineCapRound; break;
+     case CAP_SQUARE: c = Gdiplus::LineCapSquare; break;
+   }
+   _pen->SetLineCap(c, c, Gdiplus::DashCapRound);
+-  Gdiplus::LineJoin j;
++  Gdiplus::LineJoin j = Gdiplus::LineJoinMiter;
+   switch (s.join) {
+     case JOIN_BEVEL: j = Gdiplus::LineJoinBevel; break;
+     case JOIN_ROUND: j = Gdiplus::LineJoinRound; break;
+--- a/platform/gdi_win/graphic_win32.h
++++ b/platform/gdi_win/graphic_win32.h
+@@ -43,6 +43,7 @@
+   bool operator==(const Font& f) const override;
+ 
+   static sptr<Font_win32> getOrCreate(const std::string& file);
++  static void clearCache();
+ 
+   ~Font_win32() noexcept override;
+ };

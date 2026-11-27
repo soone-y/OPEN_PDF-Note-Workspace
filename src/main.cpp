@@ -4,6 +4,8 @@
 #include "core/localization.h"
 #include "core/fault_injection.h"
 #include "core/preview_trace.h"
+#include "core/workspace_relocation.h"
+#include "core/workspace_layout.h"
 #include "core/font_list.h"
 #include "core/private_fonts.h"
 #include "help/help.h"
@@ -128,11 +130,16 @@ static_assert(std::atomic<unsigned>::is_always_lock_free);
 static std::atomic<unsigned> s_startupMonitorEvents{0};
 // MainWndProc timer ID; keep unique with the MainWndProc timer registry in core/app_core.h.
 static constexpr UINT_PTR kExitRetryTimerId = 0x5E11;
+static constexpr ULONGLONG kExitSaveWaitPromptMs = 30000;
 // MainWndProc: only active while cooperative process-exit observations exist.
 static constexpr UINT_PTR kProcessShutdownObserveTimerId = 0x50C;
 static std::vector<ProcessShutdownObservation> s_processShutdownObservations;
 static bool s_exitInProgress = false;
 static bool s_exitPending = false;
+// Start of the current wait for an active save before exit, and whether the
+// user was already asked during this wait (so a stuck save cannot trap exit).
+static ULONGLONG s_exitPendingSinceTick = 0;
+static bool s_exitWaitPrompted = false;
 static bool s_systemEndSessionObserved = false;
 static constexpr int kManagedAbnormalExitCode = 3;
 struct ManagedAbnormalExitState {
@@ -255,6 +262,7 @@ static bool ShowDirectoryHierarchyPopup(HWND owner,
 static bool IsOfficeFileListPath(const std::wstring& path);
 static bool CanOpenPdfListPathInApp(const std::wstring& path);
 static std::wstring FirstOpenablePdfListPath();
+static std::wstring SoleCurrentSessionFilePath(const std::vector<FileEntry>& files);
 static void RestorePdfListSelectionToCurrent();
 static bool PromptOfficeFileListAction(HWND owner, const std::wstring& officePath);
 static LRESULT CALLBACK PdfNoteListProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,
@@ -273,7 +281,31 @@ namespace {
 static bool PromptStayOrOpenDiffManager(HWND hWnd,
                                         const std::wstring& blockedAction,
                                         const std::wstring& failureDetail) {
-    if (recovery::HasPendingStageRecovery()) return false;
+    // A failed integration queues its recovery window. Do not let it open on
+    // its own after an aborted operation: explain and let the user choose.
+    if (recovery::HasPendingStageRecovery()) {
+        const std::filesystem::path stage = recovery::TakePendingStageRecovery();
+        SaveLastPdfViewInfo();
+        if (!hWnd) return false;
+        SilentDialogOptions dialog;
+        dialog.title = localization::Text(L"main.ui.ea6a7d5bcb5c").c_str();
+        dialog.message = localization::Format(L"main.staged_diff.operation_needs_recovery", {
+            { L"ACTION", blockedAction }
+        });
+        if (!failureDetail.empty()) {
+            dialog.message += L"\n\n";
+            dialog.message += failureDetail;
+        }
+        dialog.kind = SoftNoticeKind::Warning;
+        dialog.buttons = SilentDialogButtons::YesNo;
+        dialog.defaultResult = SilentDialogResult::No;
+        dialog.escapeResult = SilentDialogResult::No;
+        dialog.yesLabel = localization::Text(L"ui.layout.exit_save_failed.recover");
+        dialog.noLabel = localization::Text(L"main.ui.0684d9a0cd66").c_str();
+        if (ShowSilentDialog(hWnd, dialog) == SilentDialogResult::Yes)
+            recovery::RequestStageRecovery(hWnd, stage);
+        return false;
+    }
     // A blocked switch can be the last action before the user restarts the app.
     // Keep the PDF restore point current even though the document itself stays open.
     SaveLastPdfViewInfo();
@@ -319,7 +351,7 @@ std::unordered_map<std::wstring, std::wstring> g_lastNoteBySession;
 std::unordered_map<std::wstring, std::wstring> g_lastPdfBySession;
 std::wstring g_lastStartupTargetSaved;
 static bool s_restoringStartupLastOpen = false;
-const wchar_t kLectureSettingsDirName[] = L"__pdf_note_workspace__";
+const wchar_t kLectureSettingsDirName[] = L"__pdf_note_workspace__";  // workspace_layout::kRootName
 static constexpr wchar_t kLectureLastOpenFileName[] = L"lecture_last_open.txt";
 static HBRUSH s_hShortcutTagBrush = nullptr;
 static COLORREF s_shortcutTagBrushColor = CLR_INVALID;
@@ -810,6 +842,24 @@ static std::wstring SessionBaseLabel(const SessionEntry& session) {
 std::wstring SessionDisplayLabelForEntry(const SessionEntry& session,
                                                 const std::vector<SessionEntry>& sessions,
                                                 const std::wstring& lecturePath) {
+    if (const auto origin = PinnedSessionLecturePath(session.path); !origin.empty()) {
+        auto name = IsDirectFilesSessionPath(session.path, origin) ? DirectFilesSessionLabel()
+                                                                 : NestedSessionLabel(session, origin);
+        if (name.empty()) name = SessionBaseLabel(session);
+        // Use the batch labels: the single-lecture helper probes each lecture
+        // path and would multiply filesystem work for every pinned row.
+        const auto lectureLabels = LectureDisplayLabelsForPaths(g_lectures);
+        const auto originKey = identity_path_scope::LocalPath(origin);
+        auto lectureLabel = FilenameOrPath(std::filesystem::path(origin));
+        for (size_t i = 0; i < g_lectures.size(); ++i) {
+            if (originKey && identity_path_scope::LocalPath(g_lectures[i]) == originKey) {
+                lectureLabel = lectureLabels[i];
+                break;
+            }
+        }
+        return localization::Text(L"main.ui.5581ff31a58e") +
+            lectureLabel + L" / " + name;
+    }
     if (IsDirectFilesSessionPath(session.path, lecturePath)) {
         return DirectFilesSessionLabel();
     }
@@ -852,6 +902,10 @@ std::vector<std::wstring> SessionDisplayLabelsForEntries(const std::vector<Sessi
     result.reserve(sessions.size());
     for (size_t index = 0; index < sessions.size(); ++index) {
         const auto& session = sessions[index];
+        if (!PinnedSessionLecturePath(session.path).empty()) {
+            result.push_back(SessionDisplayLabelForEntry(session, sessions, lecturePath));
+            continue;
+        }
         if (!session.path.empty() && !lectureKey.empty() && SessionKeyFromPath(session.path) == lectureKey) {
             result.push_back(DirectFilesSessionLabel());
             continue;
@@ -1139,9 +1193,6 @@ static void DebugAppendLayoutLog(const wchar_t*, HWND, int, int) {}
 static void EnableOwnerDrawButton(HWND hWnd);
 void ApplyOwnerDrawUi(HWND hWnd);
 
-// (moved to `src/main/bootstrap.cppinc`)
-
-
 void UpdateSessionLastOpenTargetsAfterOpen() {
     RememberCurrentSessionFiles();
     (void)SaveStartupLastOpenTarget();
@@ -1155,13 +1206,13 @@ static std::filesystem::path LectureSettingsDir() {
 static std::filesystem::path SessionLastOpenFilePath() {
     auto settingsDir = LectureSettingsDir();
     if (settingsDir.empty()) return {};
-    return settingsDir / L"__tmp__" / L"session_last_open.txt";
+    return settingsDir / workspace_layout::kRecentName / L"session_last_open.txt";
 }
 
 static std::filesystem::path StartupLastOpenTargetFilePath() {
     auto settingsDir = LectureSettingsDir();
     if (settingsDir.empty()) return {};
-    const auto path = settingsDir / L"__tmp__" / L"startup_last_open.txt";
+    const auto path = settingsDir / workspace_layout::kRecentName / L"startup_last_open.txt";
     const auto local = identity_path_scope::LocalPath(path.wstring());
     if (!local || !identity_path_scope::NoReparseAncestors(*local)) return {};
     return path;
@@ -1169,7 +1220,7 @@ static std::filesystem::path StartupLastOpenTargetFilePath() {
 
 static std::filesystem::path PdfViewPositionsFilePath() {
     if (g_workspaceRoot.empty()) return {};
-    return std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__" / L"__tmp__" / L"pdf_view_positions.txt";
+    return workspace_layout::Recent(std::filesystem::path(g_workspaceRoot)) / L"pdf_view_positions.txt";
 }
 
 static std::wstring EscapeSessionLastOpenField(const std::wstring& src) {
@@ -1231,17 +1282,23 @@ static bool SaveSessionLastOpenMap() {
         if (itPdf != g_lastPdfBySession.end()) pdf = itPdf->second;
         auto itNote = g_lastNoteBySession.find(key);
         if (itNote != g_lastNoteBySession.end()) note = itNote->second;
-        std::wstring line = EscapeSessionLastOpenField(key) + L"\t" +
-                            EscapeSessionLastOpenField(pdf) + L"\t" +
-                            EscapeSessionLastOpenField(note) + L"\n";
+        // Paths inside the workspace are stored relative to it so the record
+        // survives renaming or moving the workspace folder.
+        const std::filesystem::path workspaceRoot(g_workspaceRoot);
+        auto recordPath = [&](const std::wstring& value) {
+            return value.empty() ? value
+                                 : workspace_relocation::ToRecordPath(value, workspaceRoot);
+        };
+        std::wstring line = EscapeSessionLastOpenField(recordPath(key)) + L"\t" +
+                            EscapeSessionLastOpenField(recordPath(pdf)) + L"\t" +
+                            EscapeSessionLastOpenField(recordPath(note)) + L"\n";
         out += WideToUTF8(line);
     }
     std::filesystem::path preferredTmp;
     std::filesystem::path quarantineDir;
     if (!g_workspaceRoot.empty()) {
-        std::filesystem::path resource = std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__";
-        preferredTmp = resource / L"__tmp__";
-        quarantineDir = resource / L"__escape__";
+        preferredTmp = workspace_layout::Tmp(std::filesystem::path(g_workspaceRoot));
+        quarantineDir = workspace_layout::Failed(std::filesystem::path(g_workspaceRoot));
     }
     std::wstring err;
     return write_checks::ObservedWriteUtf8(g_workspaceRoot, path, out, preferredTmp, quarantineDir, &err);
@@ -1267,6 +1324,22 @@ void LoadSessionLastOpenMap() {
         std::wstring pdf;
         std::wstring note;
         if (ParseSessionLastOpenLine(line, &key, &pdf, &note)) {
+            // Relative values were written for paths inside the workspace.
+            const std::filesystem::path workspaceRoot(g_workspaceRoot);
+            auto resolve = [&](std::wstring& value) {
+                if (value.empty()) return;
+                const auto resolved =
+                    workspace_relocation::FromRecordPath(value, workspaceRoot);
+                value = resolved ? resolved->wstring() : std::wstring{};
+            };
+            resolve(key);
+            resolve(pdf);
+            resolve(note);
+            if (key.empty()) {
+                pos = end + 1;
+                continue;
+            }
+            key = SessionKeyFromPath(key);
             std::error_code ec;
             if (!pdf.empty() && std::filesystem::exists(pdf, ec) && !ec) {
                 g_lastPdfBySession[key] = pdf;
@@ -1293,7 +1366,7 @@ static bool ResetLectureLastOpenTimes(std::filesystem::path* outBackupPath) {
         return true; // already clean
     }
 
-    std::filesystem::path escape = std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__" / L"__escape__";
+    std::filesystem::path escape = BackupRootPath();
     std::filesystem::path stampDir = escape / NowTimestampString();
     std::filesystem::create_directories(stampDir, ec);
     if (ec) return false;
@@ -1333,7 +1406,7 @@ static bool ResetSessionLastOpenTimes(std::filesystem::path* outBackupPath) {
         return true; // already clean
     }
 
-    std::filesystem::path escape = std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__" / L"__escape__";
+    std::filesystem::path escape = BackupRootPath();
     std::filesystem::path stampDir = escape / NowTimestampString();
     std::filesystem::create_directories(stampDir, ec);
     if (ec) return false;
@@ -1498,7 +1571,7 @@ void ShowOtherPackageHeadlessProcessDiagnostics(HWND hWnd) {
 static std::vector<std::filesystem::path> ListEscapeBackupsByPrefix(const std::wstring& expectedNamePrefix) {
     const ULONGLONG startTick = preview_trace::TickNow();
     std::vector<std::filesystem::path> paths;
-    auto escapeRoot = EscapeRootPath();
+    auto escapeRoot = BackupRootPath();
     if (escapeRoot.empty()) {
         preview_trace::Append(
             L"ListEscapeBackupsByPrefix",
@@ -1561,7 +1634,7 @@ static bool PickEscapeBackupFile(HWND owner,
         if (outErr) *outErr = localization::Text(L"main.ui.ed98441f5586").c_str();
         return false;
     }
-    std::filesystem::path escapeRoot = EscapeRootPath();
+    std::filesystem::path escapeRoot = BackupRootPath();
     std::error_code ec;
     if (!std::filesystem::exists(escapeRoot, ec) || ec || !std::filesystem::is_directory(escapeRoot, ec)) {
         if (outErr) *outErr = localization::Text(L"main.ui.cc57d833f286").c_str();
@@ -1612,9 +1685,8 @@ static bool RestoreTempDataFromEscape(HWND owner,
 
     std::filesystem::path preferredTmp;
     std::filesystem::path quarantineDir;
-    std::filesystem::path resource = std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__";
-    preferredTmp = resource / L"__tmp__";
-    quarantineDir = resource / L"__escape__";
+    preferredTmp = workspace_layout::Tmp(std::filesystem::path(g_workspaceRoot));
+    quarantineDir = workspace_layout::Failed(std::filesystem::path(g_workspaceRoot));
     std::wstring writeErr;
     if (!write_checks::ObservedWriteUtf8(g_workspaceRoot, targetPath, data, preferredTmp, quarantineDir, &writeErr)) {
         if (outErr) {
@@ -1633,7 +1705,7 @@ static bool BackupTempFileToEscape(const std::filesystem::path& src, std::filesy
     std::error_code ec;
     if (!std::filesystem::exists(src, ec)) return true;
     if (ec) return false;
-    std::filesystem::path escape = EscapeRootPath();
+    std::filesystem::path escape = BackupRootPath();
     std::filesystem::path stampDir = escape / NowTimestampString();
     std::filesystem::create_directories(stampDir, ec);
     if (ec) return false;
@@ -1740,9 +1812,8 @@ static bool SaveLectureOpenMap(const std::filesystem::path& path,
     std::filesystem::path preferredTmp;
     std::filesystem::path quarantineDir;
     if (!g_workspaceRoot.empty()) {
-        std::filesystem::path resource = std::filesystem::path(g_workspaceRoot) / L"__pdf_note_workspace__";
-        preferredTmp = resource / L"__tmp__";
-        quarantineDir = resource / L"__escape__";
+        preferredTmp = workspace_layout::Tmp(std::filesystem::path(g_workspaceRoot));
+        quarantineDir = workspace_layout::Failed(std::filesystem::path(g_workspaceRoot));
     }
     std::wstring err;
     return write_checks::ObservedWriteUtf8(g_workspaceRoot, path, out, preferredTmp, quarantineDir, &err);
@@ -2359,7 +2430,27 @@ static std::wstring FirstOpenablePdfListPath() {
     for (const auto& file : g_pdfFiles) {
         if (CanOpenPdfListPathInApp(file.path)) return file.path;
     }
-    return L"";
+    return {};
+}
+
+static bool IsDirectSessionFilePath(const std::filesystem::path& file,
+                                    const std::filesystem::path& session) {
+    const auto parent = file.parent_path();
+    return parent == session || parent == session / L"pdf" || parent == session / L"note";
+}
+
+static std::wstring SoleCurrentSessionFilePath(const std::vector<FileEntry>& files) {
+    const auto session = identity_path_scope::LocalPath(g_currentSessionPath);
+    if (!session) return {};
+    std::wstring sole;
+    for (const auto& file : files) {
+        const auto path = identity_path_scope::LocalPath(file.path);
+        if (!path) continue;
+        if (!IsDirectSessionFilePath(*path, *session)) continue;
+        if (!sole.empty()) return {};
+        sole = file.path;
+    }
+    return sole;
 }
 
 static void TracePdfSelectionRoute(const wchar_t* step, HWND owner, int selectedIndex = -2) {
@@ -2564,14 +2655,14 @@ static bool MoveDirectoryToDeletedItemsEscape(const std::filesystem::path& sourc
     if (outErr) outErr->clear();
     if (source.empty()) return false;
 
-    std::filesystem::path escapeRoot = EscapeRootPath();
+    std::filesystem::path escapeRoot = BackupRootPath();
     if (escapeRoot.empty()) {
         if (outErr) *outErr = localization::Text(L"main.ui.71e7f9a08fe1").c_str();
         return false;
     }
 
     std::error_code ec;
-    std::filesystem::path deletedRoot = escapeRoot / L"deleted_items" / NowTimestampString();
+    std::filesystem::path deletedRoot = workspace_layout::Deleted(std::filesystem::path(g_workspaceRoot)) / NowTimestampString();
     std::filesystem::create_directories(deletedRoot, ec);
     if (ec) {
         if (outErr) {
@@ -2594,6 +2685,7 @@ static bool MoveDirectoryToDeletedItemsEscape(const std::filesystem::path& sourc
         return false;
     }
     if (outMovedPath) *outMovedPath = dest;
+    UpdatePinsAfterDirectoryChange(source, {});
     return true;
 }
 
@@ -2699,6 +2791,7 @@ static bool RenameLectureDirectoryFromContext(HWND owner,
         return false;
     }
 
+    UpdatePinsAfterDirectoryChange(lecturePath, dest);
     bool prioritySaveFailed = false;
     if (auto priority = g_config.lecturePriorities.find(lecturePath.filename().wstring());
         priority != g_config.lecturePriorities.end()) {
@@ -2733,6 +2826,8 @@ static bool RenameLectureDirectoryFromContext(HWND owner,
             if (!remappedNote.empty()) OpenNoteIfDifferent(owner, remappedNote);
         }
     } else {
+        const bool refreshed = RefreshWorkspaceList(g_hSessionList);
+        (void)refreshed;
         SyncLeftPaneSelection();
         RefreshMainWindowUiState(owner);
     }
@@ -2811,6 +2906,7 @@ static bool RenameSessionDirectoryFromContext(HWND owner,
         return false;
     }
 
+    UpdatePinsAfterDirectoryChange(sessionPath, dest);
     LoadSessions(lecturePath);
     if (wasCurrentSession) {
         ClearPdfAndNoteSelection();
@@ -2885,6 +2981,8 @@ static bool DeleteLectureDirectoryFromContext(HWND owner,
             RefreshMainWindowUiState(owner);
         }
     } else {
+        const bool refreshed = RefreshWorkspaceList(g_hSessionList);
+        (void)refreshed;
         SyncLeftPaneSelection();
         RefreshMainWindowUiState(owner);
     }
@@ -3764,10 +3862,15 @@ static bool FocusNotePaneForPaneNav(HWND owner) {
     return true;
 }
 
+// Ctrl+h / Ctrl+j / Ctrl+k name a destination pane (list / note / PDF), not
+// a direction, so every pane resolves them the same way. Pressing the key of
+// the current pane is consumed and keeps the focus there.
 bool HandlePaneDirectionalNavigation(HWND owner, PaneNavContext context, HWND source, WPARAM vkey) {
     switch (context) {
     case PaneNavContext::LeftPaneList:
         switch (vkey) {
+        case 'H':
+            return true;
         case 'J':
             if (source == g_hNoteList) return OpenOrFocusSelectedNoteAtFileStart(owner);
             return FocusNotePaneForPaneNav(owner);
@@ -3793,6 +3896,8 @@ bool HandlePaneDirectionalNavigation(HWND owner, PaneNavContext context, HWND so
             return FocusListPaneForPaneNav(g_hPdfList);
         case 'J':
             return FocusNotePaneForPaneNav(owner);
+        case 'K':
+            return true;
         default:
             return false;
         }
@@ -3801,6 +3906,11 @@ bool HandlePaneDirectionalNavigation(HWND owner, PaneNavContext context, HWND so
         case 'H':
             ExitNoteNormalModeForPaneSwitch();
             return FocusListPaneForPaneNav(g_hNoteList);
+        case 'J':
+            // From the main window (standard input after Esc) this enters the
+            // note; inside the note it keeps the current mode and caret.
+            if (GetFocus() == g_hNoteEdit) return true;
+            return FocusNotePaneForPaneNav(owner);
         case 'K':
             ExitNoteNormalModeForPaneSwitch();
             return FocusPdfPaneForPaneNav(owner);
@@ -4140,8 +4250,34 @@ static constexpr size_t kDirectoryHierarchyMaxLines = 600;
 static constexpr int kDirectoryHierarchyMaxDepth = 6;
 static std::unordered_set<std::wstring> s_hierarchyTempPdfKeys;
 static std::unordered_set<std::wstring> s_hierarchyTempNoteKeys;
-static std::unordered_set<std::wstring> s_pinnedTempPdfKeys;
-static std::unordered_set<std::wstring> s_pinnedTempNoteKeys;
+struct WorkspaceFilePins {
+    std::unordered_set<std::wstring> pdfKeys;
+    std::unordered_set<std::wstring> noteKeys;
+};
+static std::unordered_map<std::wstring, WorkspaceFilePins> s_filePinsByWorkspace;
+static WorkspaceFilePins& CurrentWorkspaceFilePins() {
+    const auto workspace = identity_path_scope::LocalPath(g_workspaceRoot);
+    return s_filePinsByWorkspace[workspace ? workspace->wstring() : L""];
+}
+static std::unordered_set<std::wstring>& CurrentPinnedFileKeys(bool isNote) {
+    auto& pins = CurrentWorkspaceFilePins();
+    return isNote ? pins.noteKeys : pins.pdfKeys;
+}
+static bool HasRegisteredPinnedFileRoot(const std::filesystem::path& file) {
+    const auto local = identity_path_scope::LocalPath(file.wstring());
+    return local && std::any_of(g_lectures.begin(), g_lectures.end(), [&](const auto& path) {
+        const auto lecture = identity_path_scope::LocalPath(path);
+        return lecture && identity_path_scope::Below(*local, *lecture);
+    });
+}
+struct PinnedSessionEntry {
+    std::wstring workspaceKey;
+    std::wstring sessionKey;
+    std::wstring lecturePath;
+    SessionEntry session;
+};
+// UI-thread-owned bookmarks only: never serialized and never a write permission.
+static std::vector<PinnedSessionEntry> s_pinnedSessions;
 static std::wstring s_hierarchyTempOriginLectureKey;
 
 static bool StartsWithInsensitive(const std::wstring& text, const std::wstring& prefix) {
@@ -4386,8 +4522,112 @@ static void AddTemporaryOpenedFileToFileList(const std::wstring& path,
 bool IsPinnedTemporaryFilePath(const std::wstring& path, bool isNote) {
     const std::wstring key = NormalizePathKeyForList(path);
     if (key.empty()) return false;
-    const auto& keys = isNote ? s_pinnedTempNoteKeys : s_pinnedTempPdfKeys;
+    const auto& keys = CurrentPinnedFileKeys(isNote);
     return keys.find(key) != keys.end();
+}
+
+std::wstring PinnedSessionLecturePath(const std::wstring& path) {
+    if (s_pinnedSessions.empty() || path.empty() || g_workspaceRoot.empty()) return {};
+    // Label generation must not probe the filesystem for every row.
+    const auto workspace = identity_path_scope::LocalPath(g_workspaceRoot);
+    const auto selected = identity_path_scope::LocalPath(path);
+    if (!workspace || !selected) return {};
+    const auto workspaceKey = workspace->wstring();
+    const auto key = selected->wstring();
+    for (const auto& pin : s_pinnedSessions)
+        if (pin.workspaceKey == workspaceKey && pin.sessionKey == key)
+            return pin.lecturePath;
+    return {};
+}
+
+bool PinSessionPath(const std::wstring& path) {
+    if (!PinnedSessionLecturePath(path).empty()) return true;
+    const auto lecture = identity_path_scope::LocalPath(g_currentLecturePath);
+    const auto selected = identity_path_scope::LocalPath(path);
+    const auto workspace = identity_path_scope::LocalPath(g_workspaceRoot);
+    if (!workspace || !lecture || !selected ||
+        (*selected != *lecture && !identity_path_scope::Below(*selected, *lecture)) ||
+        !identity_path_scope::NoReparseAncestors(*selected) ||
+        !DirectoryExistsWin32(*selected) || FindLectureIndexByPath(g_currentLecturePath) < 0) return false;
+    const auto index = FindSessionIndexByPath(path);
+    if (index < 0) return false;
+    s_pinnedSessions.push_back({workspace->wstring(), selected->wstring(),
+                               g_currentLecturePath, g_sessions[static_cast<size_t>(index)]});
+    return true;
+}
+
+bool UnpinSessionPath(const std::wstring& path) {
+    const auto workspace = identity_path_scope::LocalPath(g_workspaceRoot);
+    const auto selected = identity_path_scope::LocalPath(path);
+    if (!workspace || !selected) return false;
+    const auto workspaceKey = workspace->wstring();
+    const auto key = selected->wstring();
+    const auto previous = s_pinnedSessions.size();
+    s_pinnedSessions.erase(std::remove_if(s_pinnedSessions.begin(), s_pinnedSessions.end(),
+        [&](const auto& pin) {
+            return pin.workspaceKey == workspaceKey && pin.sessionKey == key;
+        }), s_pinnedSessions.end());
+    return previous != s_pinnedSessions.size();
+}
+
+void AppendPinnedSessionsToCurrentList() {
+    const auto workspace = identity_path_scope::LocalPath(g_workspaceRoot);
+    if (!workspace) return;
+    const auto workspaceKey = workspace->wstring();
+    for (const auto& pin : s_pinnedSessions) {
+        if (pin.workspaceKey != workspaceKey) continue;
+        const auto lecture = identity_path_scope::LocalPath(pin.lecturePath);
+        const bool registered = lecture && std::any_of(g_lectures.begin(), g_lectures.end(), [&](const auto& path) {
+            return identity_path_scope::LocalPath(path) == lecture;
+        });
+        if (!registered) continue;
+        const bool found = std::any_of(g_sessions.begin(), g_sessions.end(), [&](const auto& session) {
+            const auto path = identity_path_scope::LocalPath(session.path);
+            return path && path->wstring() == pin.sessionKey;
+        });
+        if (!found) g_sessions.push_back(pin.session);
+    }
+}
+
+void UpdatePinsAfterDirectoryChange(const std::filesystem::path& source,
+                                    const std::filesystem::path& destination) {
+    const auto sourcePath = identity_path_scope::LocalPath(source.wstring());
+    if (!sourcePath) return;
+    const auto remap = [&](const std::wstring& value) -> std::optional<std::wstring> {
+        const auto path = identity_path_scope::LocalPath(value);
+        if (!path || (*path != *sourcePath && !identity_path_scope::Below(*path, *sourcePath))) return {};
+        if (destination.empty()) return std::wstring{};
+        const auto relative = path->lexically_relative(*sourcePath);
+        return (*path == *sourcePath ? destination : destination / relative).wstring();
+    };
+    for (auto& workspacePins : s_filePinsByWorkspace) {
+        for (auto* keys : {&workspacePins.second.pdfKeys, &workspacePins.second.noteKeys}) {
+            std::unordered_set<std::wstring> updated;
+            for (const auto& key : *keys) {
+                const auto replacement = remap(key);
+                if (!replacement) updated.insert(key);
+                else if (!replacement->empty()) updated.insert(NormalizePathKeyForList(*replacement));
+            }
+            keys->swap(updated);
+        }
+    }
+    s_pinnedSessions.erase(std::remove_if(s_pinnedSessions.begin(), s_pinnedSessions.end(), [&](auto& pin) {
+        const auto session = remap(pin.session.path);
+        if (session) {
+            if (session->empty()) return true;
+            pin.session.path = *session;
+            const auto key = identity_path_scope::LocalPath(*session);
+            if (!key) return true;
+            pin.sessionKey = key->wstring();
+            pin.session.displayName = std::filesystem::path(*session).filename().wstring();
+        }
+        const auto lecture = remap(pin.lecturePath);
+        if (lecture) {
+            if (lecture->empty()) return true;
+            pin.lecturePath = *lecture;
+        }
+        return false;
+    }), s_pinnedSessions.end());
 }
 
 bool IsTemporaryFilePathInCurrentList(const std::wstring& path, bool isNote) {
@@ -4395,20 +4635,20 @@ bool IsTemporaryFilePathInCurrentList(const std::wstring& path, bool isNote) {
     if (key.empty()) return false;
     const auto& searchKeys = isNote ? s_searchTempNoteKeys : s_searchTempPdfKeys;
     const auto& hierarchyKeys = isNote ? s_hierarchyTempNoteKeys : s_hierarchyTempPdfKeys;
-    const auto& pinnedKeys = isNote ? s_pinnedTempNoteKeys : s_pinnedTempPdfKeys;
     return searchKeys.find(key) != searchKeys.end() ||
-           hierarchyKeys.find(key) != hierarchyKeys.end() ||
-           pinnedKeys.find(key) != pinnedKeys.end();
+           hierarchyKeys.find(key) != hierarchyKeys.end();
 }
 
 bool PinTemporaryFilePath(const std::wstring& path, bool isNote) {
     const std::filesystem::path file(path);
-    if (path.empty() || (isNote ? !IsNoteFile(file) : !IsPdfOrImageFile(file))) return false;
+    if (g_workspaceRoot.empty() || !HasRegisteredPinnedFileRoot(file) ||
+        !identity_path_scope::NoReparseAncestors(file) || (isNote ? !IsNoteFile(file)
+                              : !(IsPdfOrImageFile(file) || IsOfficeImportSourcePath(file)))) return false;
     std::error_code ec;
     if (!std::filesystem::is_regular_file(file, ec) || ec) return false;
     const std::wstring key = NormalizePathKeyForList(path);
     if (key.empty()) return false;
-    auto& keys = isNote ? s_pinnedTempNoteKeys : s_pinnedTempPdfKeys;
+    auto& keys = CurrentPinnedFileKeys(isNote);
     keys.insert(key);
     return true;
 }
@@ -4416,8 +4656,20 @@ bool PinTemporaryFilePath(const std::wstring& path, bool isNote) {
 bool UnpinTemporaryFilePath(const std::wstring& path, bool isNote) {
     const std::wstring key = NormalizePathKeyForList(path);
     if (key.empty()) return false;
-    auto& keys = isNote ? s_pinnedTempNoteKeys : s_pinnedTempPdfKeys;
-    return keys.erase(key) != 0;
+    auto& keys = CurrentPinnedFileKeys(isNote);
+    if (keys.erase(key) == 0) return false;
+    const auto file = identity_path_scope::LocalPath(path);
+    const auto session = identity_path_scope::LocalPath(g_currentSessionPath);
+    if (!(file && session && IsDirectSessionFilePath(*file, *session)) &&
+        !IsTemporaryFilePathInCurrentList(path, isNote)) {
+        // Do not leave an unlabelled foreign file masquerading as local after
+        // unpinning. The open document and its unsaved edits remain untouched.
+        auto& files = isNote ? g_noteFiles : g_pdfFiles;
+        files.erase(std::remove_if(files.begin(), files.end(), [&](const auto& entry) {
+            return NormalizePathKeyForList(entry.path) == key;
+        }), files.end());
+    }
+    return true;
 }
 
 bool KeepCurrentNoteOpenAcrossDirectoryChange() {
@@ -4431,17 +4683,19 @@ void AppendPinnedTemporaryFilesToCurrentLists() {
         for (const auto& key : keys) {
             if (key.empty()) continue;
             const std::filesystem::path path(key);
+            if (!HasRegisteredPinnedFileRoot(path) || !identity_path_scope::NoReparseAncestors(path)) continue;
             std::error_code ec;
             if (!std::filesystem::is_regular_file(path, ec) || ec) continue;
-            if (isNote ? !IsNoteFile(path) : !IsPdfOrImageFile(path)) continue;
+            if (isNote ? !IsNoteFile(path)
+                       : !(IsPdfOrImageFile(path) || IsOfficeImportSourcePath(path))) continue;
             const bool found = std::any_of(files.begin(), files.end(), [&](const FileEntry& entry) {
                 return NormalizePathKeyForList(entry.path) == key;
             });
             if (!found) files.push_back({path.wstring(), IsPdfFile(path)});
         }
     };
-    append(g_pdfFiles, s_pinnedTempPdfKeys, false);
-    append(g_noteFiles, s_pinnedTempNoteKeys, true);
+    append(g_pdfFiles, CurrentPinnedFileKeys(false), false);
+    append(g_noteFiles, CurrentPinnedFileKeys(true), true);
 }
 
 bool RemoveTemporaryFilePathFromCurrentList(const std::wstring& path, bool isNote) {
@@ -4450,10 +4704,11 @@ bool RemoveTemporaryFilePathFromCurrentList(const std::wstring& path, bool isNot
     auto& files = isNote ? g_noteFiles : g_pdfFiles;
     auto& searchKeys = isNote ? s_searchTempNoteKeys : s_searchTempPdfKeys;
     auto& hierarchyKeys = isNote ? s_hierarchyTempNoteKeys : s_hierarchyTempPdfKeys;
-    auto& pinnedKeys = isNote ? s_pinnedTempNoteKeys : s_pinnedTempPdfKeys;
-    const bool wasTemporary = searchKeys.erase(key) != 0 ||
-                              hierarchyKeys.erase(key) != 0 ||
-                              pinnedKeys.erase(key) != 0;
+    auto& pinnedKeys = CurrentPinnedFileKeys(isNote);
+    const auto removedSearch = searchKeys.erase(key);
+    const auto removedHierarchy = hierarchyKeys.erase(key);
+    const auto removedPin = pinnedKeys.erase(key);
+    const bool wasTemporary = removedSearch || removedHierarchy || removedPin;
     if (!wasTemporary) return false;
 
     files.erase(std::remove_if(files.begin(), files.end(), [&](const FileEntry& entry) {
@@ -4519,7 +4774,9 @@ static bool RemoveHierarchyTemporaryFilesFromList(std::vector<FileEntry>& files,
     const auto before = files.size();
     files.erase(std::remove_if(files.begin(), files.end(),
                                [&](const FileEntry& file) {
-                                   return tempKeys.find(NormalizePathKeyForList(file.path)) != tempKeys.end();
+                                   const bool isNote = IsNoteFile(std::filesystem::path(file.path));
+                                   return tempKeys.find(NormalizePathKeyForList(file.path)) != tempKeys.end() &&
+                                       !IsPinnedTemporaryFilePath(file.path, isNote);
                                }),
                 files.end());
     return files.size() != before;
@@ -5316,7 +5573,11 @@ static void OnLectureSelChange(HWND hWnd) {
         g_currentLecturePath = nextLecture;
         LoadSessions(g_currentLecturePath);
         timing.Mark(L"LoadSessions");
-        if (g_sessions.empty()) {
+        const bool hasLocalSessions = std::any_of(g_sessions.begin(), g_sessions.end(), [&](const auto& session) {
+            const auto origin = PinnedSessionLecturePath(session.path);
+            return origin.empty() || NormalizePathKeyForList(origin) == NormalizePathKeyForList(g_currentLecturePath);
+        });
+        if (!hasLocalSessions) {
             // Direct files mode: list PDF/notes directly under the selected lecture directory.
             SessionEntry direct;
             direct.displayName = std::filesystem::path(g_currentLecturePath).filename().wstring();
@@ -5333,11 +5594,9 @@ static void OnLectureSelChange(HWND hWnd) {
             SendMessageW(g_hNoteList, LB_RESETCONTENT, 0, 0);
             g_pdfFiles.clear();
             g_noteFiles.clear();
-            if (keepPinnedNote) {
-                AppendPinnedTemporaryFilesToCurrentLists();
-                RebuildFileListBox(g_hPdfList, g_pdfFiles);
-                RebuildFileListBox(g_hNoteList, g_noteFiles);
-            }
+            AppendPinnedTemporaryFilesToCurrentLists();
+            RebuildFileListBox(g_hPdfList, g_pdfFiles);
+            RebuildFileListBox(g_hNoteList, g_noteFiles);
             InvalidateRect(g_hPdfList, nullptr, TRUE);
             InvalidateRect(g_hNoteList, nullptr, TRUE);
             timing.Mark(L"ClearFileLists");
@@ -5385,9 +5644,32 @@ static void OnSessionSelChange(HWND hWnd) {
     fault_injection::MaybeThrow(L"OnSessionSelChange:start");
     int sel = static_cast<int>(SendMessageW(g_hSessionList, LB_GETCURSEL, 0, 0));
     if (sel < 0 || sel >= static_cast<int>(g_sessions.size())) return;
-    const auto& target = g_sessions[static_cast<size_t>(sel)];
+    const auto target = g_sessions[static_cast<size_t>(sel)];
     SwitchTimingScope timing(L"session_switch", target.path);
     timing.Mark(L"selected");
+    const auto origin = PinnedSessionLecturePath(target.path);
+    if (!origin.empty() && NormalizePathKeyForList(origin) != NormalizePathKeyForList(g_currentLecturePath)) {
+        const auto lecture = identity_path_scope::LocalPath(origin);
+        const auto selected = identity_path_scope::LocalPath(target.path);
+        const int lectureIndex = FindLectureIndexByPath(origin);
+        // Validate before changing context. Missing/replaced/unregistered paths
+        // leave the current documents intact; a pin never expands write scope.
+        if (!lecture || !selected || lectureIndex < 0 ||
+            (*selected != *lecture && !identity_path_scope::Below(*selected, *lecture)) ||
+            !identity_path_scope::NoReparseAncestors(*selected) || !DirectoryExistsWin32(*selected)) {
+            SyncLeftPaneSelection();
+            ShowSoftNotice(hWnd, localization::Text(L"ui.directory_list.folder_read_failed"), SoftNoticeKind::Warning);
+            return;
+        }
+        const bool changedLecture = SetListboxSelAndNotify(g_hLectureList, lectureIndex);
+        if (!changedLecture) OnLectureSelChange(hWnd);
+        if (NormalizePathKeyForList(g_currentLecturePath) != NormalizePathKeyForList(origin)) return;
+        const int sessionIndex = FindSessionIndexByPath(target.path);
+        if (sessionIndex < 0) return;
+        const bool changedSession = SetListboxSelAndNotify(g_hSessionList, sessionIndex);
+        if (!changedSession) OnSessionSelChange(hWnd);
+        return;
+    }
     auto curCanon = g_currentSessionPath.empty() ? std::filesystem::path{} : CanonicalOrSelf(std::filesystem::path(g_currentSessionPath));
     auto tgtCanon = CanonicalOrSelf(std::filesystem::path(target.path));
     bool samePath = (!curCanon.empty() && tgtCanon == curCanon);
@@ -5585,8 +5867,8 @@ void AutoOpenSingleSessionFiles(HWND hWnd) {
     if (ParseSessionAutoOpenMode(g_config.sessionAutoOpenMode) == SessionAutoOpenMode::Off) {
         return;
     }
-    const std::wstring autoOpenPdfPath = FirstOpenablePdfListPath();
-    const std::wstring autoOpenNotePath = g_noteFiles.size() == 1 ? g_noteFiles.front().path : L"";
+    const std::wstring autoOpenPdfPath = SoleCurrentSessionFilePath(g_pdfFiles);
+    const std::wstring autoOpenNotePath = SoleCurrentSessionFilePath(g_noteFiles);
     const auto openNote = [&]() {
         if (!autoOpenNotePath.empty()) {
             if (LoadNoteFile(hWnd, autoOpenNotePath)) {
@@ -5597,7 +5879,7 @@ void AutoOpenSingleSessionFiles(HWND hWnd) {
     // Preserve the original order if note loading can change PDF geometry.
     const bool noteFirst = g_bottomPanePin == BottomPanePin::Math;
     if (noteFirst) openNote();
-    if (g_pdfFiles.size() == 1 && !autoOpenPdfPath.empty()) {
+    if (!autoOpenPdfPath.empty() && CanOpenPdfListPathInApp(autoOpenPdfPath)) {
         if (g_pdfPreviewActive) {
             DisableIntegratedPdfPreview(hWnd, true);
         }
@@ -5614,10 +5896,10 @@ void AutoOpenSingleSessionFiles(HWND hWnd) {
 
 static bool FocusAutoOpenedSoleNoteForEditing() {
     if (ParseSessionAutoOpenMode(g_config.sessionAutoOpenMode) == SessionAutoOpenMode::Off ||
-        !g_hNoteEdit || !IsWindow(g_hNoteEdit) || g_noteFiles.size() != 1) {
+        !g_hNoteEdit || !IsWindow(g_hNoteEdit)) {
         return false;
     }
-    const std::wstring& soleNotePath = g_noteFiles.front().path;
+    const auto soleNotePath = SoleCurrentSessionFilePath(g_noteFiles);
     if (soleNotePath.empty() || g_currentNotePath.empty() ||
         NormalizePathKey(soleNotePath) != NormalizePathKey(g_currentNotePath)) {
         return false;
@@ -7348,7 +7630,7 @@ void ApplySessionAutoOpenPreference(const SessionEntry& session,
 std::filesystem::path LectureLastOpenFilePath() {
     auto settingsDir = LectureSettingsDir();
     if (settingsDir.empty()) return {};
-    return settingsDir / L"__tmp__" / kLectureLastOpenFileName;
+    return settingsDir / workspace_layout::kRecentName / kLectureLastOpenFileName;
 }
 
 LectureSortMode ParseLectureSortMode(const std::wstring& mode) {
@@ -7368,9 +7650,12 @@ static std::wstring FileDisplayLabel(const std::wstring& filePath, const std::ws
                                      const std::wstring& parent) {
     if (filePath.empty()) return L"-";
 
+    const auto& pinnedPdfKeys = CurrentPinnedFileKeys(false);
+    const auto& pinnedNoteKeys = CurrentPinnedFileKeys(true);
+
     const bool hasTemporaryFiles = !s_searchTempPdfKeys.empty() || !s_searchTempNoteKeys.empty() ||
         !s_hierarchyTempPdfKeys.empty() || !s_hierarchyTempNoteKeys.empty() ||
-        !s_pinnedTempPdfKeys.empty() || !s_pinnedTempNoteKeys.empty();
+        !pinnedPdfKeys.empty() || !pinnedNoteKeys.empty();
     const std::wstring pathKey = hasTemporaryFiles ? NormalizePathKeyForList(filePath) : L"";
     const bool searchTemp =
         (!pathKey.empty() &&
@@ -7382,8 +7667,8 @@ static std::wstring FileDisplayLabel(const std::wstring& filePath, const std::ws
           s_hierarchyTempNoteKeys.find(pathKey) != s_hierarchyTempNoteKeys.end()));
     const bool pinnedTemp =
         (!pathKey.empty() &&
-         (s_pinnedTempPdfKeys.find(pathKey) != s_pinnedTempPdfKeys.end() ||
-          s_pinnedTempNoteKeys.find(pathKey) != s_pinnedTempNoteKeys.end()));
+         (pinnedPdfKeys.find(pathKey) != pinnedPdfKeys.end() ||
+          pinnedNoteKeys.find(pathKey) != pinnedNoteKeys.end()));
     std::wstring prefix;
     if (pinnedTemp) {
         prefix = localization::Text(L"main.ui.5581ff31a58e").c_str();
@@ -7541,7 +7826,9 @@ std::wstring BuildStatusDisplayText() {
     if (document_source_protection::HasRecoveryFailure()) {
         text = localization::Text(L"workspace.source_recovery_failed_status") + L" | " + text;
     } else if (document_source_protection::HasPendingProtection()) {
-        text = localization::Text(L"workspace.source_protection_pending_status") + L" | " + text;
+        const bool missing = !document_source_protection::MissingStagedOriginals().empty();
+        text = localization::Text(missing ? L"workspace.source_missing_status"
+                                          : L"workspace.source_protection_pending_status") + L" | " + text;
     }
     return text;
 }
@@ -7845,7 +8132,7 @@ static std::wstring BuildManagedAbnormalExitReportText(bool noteHadDirty,
                                                        bool annotHadDirty,
                                                        bool annotStageOk) {
     std::wstringstream ss;
-    const auto escapeRoot = EscapeRootPath();
+    const auto managedRoot = workspace_layout::Root(std::filesystem::path(g_workspaceRoot));
     if (IsEnglishUi()) {
         ss << L"This app performed a managed abnormal exit.\n";
         ss << L"The main window has already been closed.\n\n";
@@ -7860,8 +8147,8 @@ static std::wstring BuildManagedAbnormalExitReportText(bool noteHadDirty,
         AppendManagedAbnormalExitPathBlock(ss, L"Current PDF original", CurrentLogicalPdfPath(), L"(none)");
         AppendManagedAbnormalExitPathBlock(
             ss,
-            L"Emergency backup root (__pdf_note_workspace__\\__escape__)",
-            escapeRoot.wstring(),
+            L"Management folder (__pdf_note_workspace__)",
+            managedRoot.wstring(),
             L"(not created)");
         AppendManagedAbnormalExitStagePaths(ss);
         ss << L"\nOriginal files were not overwritten by this abnormal-exit path.\n\n";
@@ -7885,8 +8172,8 @@ static std::wstring BuildManagedAbnormalExitReportText(bool noteHadDirty,
         AppendManagedAbnormalExitPathBlock(ss, L"現在の PDF 原本", CurrentLogicalPdfPath(), L"(なし)");
         AppendManagedAbnormalExitPathBlock(
             ss,
-            L"緊急退避ルート (__pdf_note_workspace__\\__escape__)",
-            escapeRoot.wstring(),
+            L"管理フォルダー (__pdf_note_workspace__)",
+            managedRoot.wstring(),
             L"(未作成)");
         AppendManagedAbnormalExitStagePaths(ss);
         ss << L"\nこの異常終了経路では原本ファイルを上書きしていません。\n\n";
@@ -8764,19 +9051,14 @@ bool HandleMainPdfZoomShortcutInLoop(HWND owner, const MSG& msg) {
 
     const bool zoomIn = (msg.wParam == VK_OEM_PLUS) || (msg.wParam == VK_ADD);
     const bool zoomOut = (msg.wParam == VK_OEM_MINUS) || (msg.wParam == VK_SUBTRACT);
-    const bool zoomReset = msg.wParam == '0';
-    if (!zoomIn && !zoomOut && !zoomReset) return false;
+    if (!zoomIn && !zoomOut) return false;
 
     RECT rc{};
     GetClientRect(g_hPdfView, &rc);
     POINT focusPt{ (rc.right - rc.left) / 2, (rc.bottom - rc.top) / 2 };
-    if (zoomReset) {
-        SetPdfScale(g_hPdfView, 1.0, focusPt);
-    } else {
-        const double factor = zoomIn ? 1.15 : (1.0 / 1.15);
-        const double base = (std::isfinite(g_pdf.scale) && g_pdf.scale > 0.0) ? g_pdf.scale : 1.0;
-        SetPdfScale(g_hPdfView, base * factor, focusPt);
-    }
+    const double factor = zoomIn ? 1.15 : (1.0 / 1.15);
+    const double base = (std::isfinite(g_pdf.scale) && g_pdf.scale > 0.0) ? g_pdf.scale : 1.0;
+    SetPdfScale(g_hPdfView, base * factor, focusPt);
     return true;
 }
 

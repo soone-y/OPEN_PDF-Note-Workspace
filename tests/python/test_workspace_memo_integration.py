@@ -84,7 +84,8 @@ class WorkspaceMemoIntegration(unittest.TestCase):
         text = source("src/ui/core/main_view_layout.cppinc")
         for function in ("HandleAppExit", "HandleManagedAbnormalExit"):
             body = text[text.index(f"static bool {function}(HWND hWnd) {{"):]
-            self.assertLess(body.index("SaveWorkspaceMemoForExit()"), body.index("FinalizeAppExitState("))
+            # Interactive or not (HandleAppExit asks separately), the memo save comes first.
+            self.assertLess(body.index("SaveWorkspaceMemoForExit("), body.index("FinalizeAppExitState("))
         body = text[text.index("static void ReloadWorkspaceFromRoot(HWND hWnd,"):]
         self.assertLess(body.index("PrepareWorkspaceMemoRootChange()"), body.index("AcquireWorkspaceWriteLock("))
         self.assertLess(body.index("AcquireWorkspaceWriteLock("), body.index("ResetWorkspaceMemoForRootChange()"))

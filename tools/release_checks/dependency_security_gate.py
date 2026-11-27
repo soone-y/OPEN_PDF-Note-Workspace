@@ -16,7 +16,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_REVIEW = Path(__file__).with_name("dependency_security_review.json")
 ALLOWED_DECISIONS = {"pass", "blocked"}
-REQUIRED_COMPONENTS = {"PDFium", "LibreOffice custom runtime", "MD4C", "zlib runtime"}
+REQUIRED_COMPONENTS = {"PDFium", "LibreOffice custom runtime", "MD4C", "zlib runtime", "MicroTeX"}
 ALLOWED_SOURCE_HOSTS = {
     "chromereleases.googleblog.com",
     "chromium.googlesource.com",
@@ -36,6 +36,7 @@ LOCAL_PATCHES = (
     ("third_party/md4c", "patches/0005-clro-line-boundaries.patch"),
     ("third_party/md4c", "patches/0006-code-fence-source-extents.patch"),
     ("third_party/pdfium", "patches/0001-fix-ijg-notice-link.patch"),
+    ("third_party/microtex", "patches/0001-embedded-windows-math-compatibility.patch"),
 )
 
 
@@ -122,6 +123,11 @@ def local_version(component: dict, evidence: Path) -> str:
         if not re.fullmatch(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?", version):
             raise ValueError("zlib VERSION is malformed")
         return version
+    if name == "MicroTeX":
+        version = evidence.read_text(encoding="utf-8").splitlines()[0].strip()
+        if not re.fullmatch(r"openmath [0-9a-f]{40}", version):
+            raise ValueError("MicroTeX VERSION must pin openmath and a full upstream commit")
+        return version
     raise ValueError(f"unsupported reviewed component: {name!r}")
 
 
@@ -142,6 +148,33 @@ def repository_path(value: object, field: str) -> Path:
     except ValueError as exc:
         raise ValueError(f"{field} escapes the repository") from exc
     return path
+
+
+def validate_microtex_sources(root: Path) -> list[str]:
+    """Bind the reviewed digest inventory to every vendored source/resource."""
+    vendor = root / "third_party/microtex"
+    manifest = vendor / "FILES.json"
+    try:
+        files = json.loads(manifest.read_text(encoding="utf-8"))["files"]
+        if not isinstance(files, dict) or not files:
+            raise ValueError("empty source inventory")
+        actual = {p.relative_to(vendor).as_posix() for p in vendor.rglob("*")
+                  if p.is_file() and p != manifest}
+        errors = []
+        if set(files) != actual:
+            errors.append("MicroTeX: vendored source inventory changed")
+        for relative, digest in files.items():
+            path = vendor / relative
+            if (not isinstance(relative, str) or ":" in relative or "\\" in relative or
+                    not path.resolve().is_relative_to(vendor.resolve()) or
+                    path.is_symlink() or not path.is_file() or
+                    not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+                errors.append(f"MicroTeX: invalid source inventory entry: {relative}")
+            elif file_sha256(path) != digest:
+                errors.append(f"MicroTeX: vendored source changed: {relative}")
+        return errors
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        return [f"MicroTeX: cannot validate source inventory ({error})"]
 
 
 def validate(review: dict) -> list[str]:
@@ -178,6 +211,8 @@ def validate(review: dict) -> list[str]:
         if name in names:
             errors.append(f"duplicate component: {name}")
         names.add(name)
+        if name == "MicroTeX":
+            errors.extend(validate_microtex_sources(REPO_ROOT))
         if component.get("decision") not in ALLOWED_DECISIONS:
             errors.append(f"{name}: decision must be 'pass' or 'blocked'")
         if not isinstance(component.get("required_action"), str) or not component["required_action"].strip():

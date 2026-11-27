@@ -34,7 +34,7 @@ Diagnostic logs are for investigation and are stored in the workspace's `__pdf_n
 
 The debug-log section of general settings shows the size and stop state at the time of inspection. To resume, preserve any diagnostic logs you need, then explicitly use the developer menu's log-deletion command. Creating a ZIP alone does not reduce the original logs. ZIP copies and the separately managed `write_checks.log` are outside this budget. Log-setting changes, including Office conversion, apply on the next launch.
 
-The `__tmp__` and `__escape__` directories can contain unsaved and recovery data. Do not delete the entire management directory to clean up logs.
+Folders such as `__unsaved__` and `__backup__` can contain unsaved and recovery data. Do not delete the entire management directory to clean up logs. `__pdf_note_workspace__/DELETE_OR_KEEP.txt` lists which folders may be deleted.
 
 ## Inspect log and generated-file sizes
 

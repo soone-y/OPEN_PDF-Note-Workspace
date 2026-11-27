@@ -11,14 +11,21 @@ def source(path: str) -> str:
 
 
 class AnnotationShortcutContractTests(unittest.TestCase):
-    def test_ctrl_digits_name_stable_tools_and_leave_zoom_zero(self):
+    def test_ctrl_digits_name_stable_tools_and_zero_selects_eraser(self):
         core = source("src/core/app_core.cpp")
-        rows = re.findall(r'\{ "Ctrl\+([1-9])", AnnotToolShortcutTargetKind::Detail, '
+        rows = re.findall(r'\{ "Ctrl\+([0-9])", AnnotToolShortcutTargetKind::Detail, '
                           r'AnnotToolFamily::\w+, ToolMode::(\w+) \}', core)
-        self.assertEqual(rows, list(zip("123456789", (
+        self.assertEqual(rows, list(zip("1234567890", (
             "Select", "Pan", "Magnifier", "TextBox", "MarkerText", "MarkerFree",
-            "Freehand", "Line", "Shape"))))
-        self.assertNotIn('{ "Ctrl+0",', core)
+            "Freehand", "Line", "Shape", "Eraser"))))
+        reserved = core.split("bool IsReservedAnnotToolShortcut(", 1)[1].split(
+            "std::vector<AnnotToolShortcutBinding> DefaultAnnotToolShortcuts()", 1)[0]
+        self.assertNotIn("'0'", reserved)
+        # Ctrl+0 no longer resets PDF zoom; Ctrl+E fits the page instead.
+        self.assertNotIn("msg.wParam == '0'", source("src/main.cpp"))
+        self.assertNotIn("case '0':", source("src/pdf_view/input.cppinc"))
+        editor = source("src/settings/settings_shortcut_editor.cppinc")
+        self.assertIn("binding.vk < '0' || binding.vk > '9'", editor)
 
     def test_direct_dispatch_and_toolbar_ignore_only_bar_visibility(self):
         main = source("src/main.cpp")
@@ -118,7 +125,7 @@ class AnnotationShortcutContractTests(unittest.TestCase):
         probe = source("src/features/automation/annotation_shortcut_tests.cppinc")
         for check in ("AnnotToolUiState::Hidden", "AnnotToolUiState::Disabled", "std::reverse",
                       "DocKind::Image", "ReplaceAnnotToolShortcutBindings({})", "SyncUserToolShortcutsToRuntime()",
-                      "FILE_SHARE_READ", "before != after", "Ctrl+0", "duplicates"):
+                      "FILE_SHARE_READ", "before != after", "Ctrl+S", "duplicates"):
             self.assertIn(check, probe)
         self.assertIn("annotation_shortcuts:independent_ok cases=34",
                       source("tests/scripts/run_ui_automation_fault_tests.ps1"))

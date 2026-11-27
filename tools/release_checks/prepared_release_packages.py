@@ -15,11 +15,21 @@ SOURCE_RECEIPT = "release_source_inputs.json"
 PACKAGE_RECEIPT = "release_packages_receipt.json"
 
 
+RELEASE_ALLOWLIST = "docs/internal/public_repo_release_allowlist_2026-11-13.txt"
+RELEASE_ARTIFACT_MANIFEST = "docs/internal/public_repo_release_artifact_manifest_2026-08-12.tsv"
+
+
+def release_snapshot_plan(repository: Path):
+    """Validate the release snapshot inputs without hashing or writing anything."""
+    return build_snapshot_plan(repository, parse_allowlist(repository / RELEASE_ALLOWLIST), git_tracked_files(repository),
+                               parse_artifact_manifest(repository, repository / RELEASE_ARTIFACT_MANIFEST))
+
+
 def source_identity(repository: Path) -> dict:
-    policy = repository / "docs/internal/public_repo_release_allowlist_2026-11-13.txt"
-    artifacts = repository / "docs/internal/public_repo_release_artifact_manifest_2026-08-12.tsv"
+    policy = repository / RELEASE_ALLOWLIST
+    artifacts = repository / RELEASE_ARTIFACT_MANIFEST
     gitignore = repository / "docs/internal/public_repo_gitignoreテンプレート_2026-07-02.gitignore"
-    plan = build_snapshot_plan(repository, parse_allowlist(policy), git_tracked_files(repository), parse_artifact_manifest(repository, artifacts))
+    plan = release_snapshot_plan(repository)
     rows = [{"path": relative.as_posix(), "size": source.stat().st_size, "sha256": sha256_file(source)} for source, relative in plan.files]
     rows.sort(key=lambda row: row["path"])
     return {"schema_version": 1, "allowlist_sha256": sha256_file(policy), "artifact_manifest_sha256": sha256_file(artifacts),
@@ -56,7 +66,7 @@ def seal(root: Path, repository: Path, locale: str, version: str, components: di
         raise ValueError("cannot prepare a completed or snapshot-bearing set")
     initial = json.loads((root / SOURCE_RECEIPT).read_text(encoding="utf-8"))
     if initial != source_identity(repository):
-        raise ValueError("release source inputs changed during packing")
+        raise ValueError("梱包中に release の入力ファイルが変更されました。作業を止めてから再実行してください (release source inputs changed during packing)")
     rows = file_records(root)
     receipt = {"schema_version": 1, "phase": "PREPARED_ONLY", "version": version, "locale": locale,
                "components": components, "tree_sha256": tree_sha256(rows), "files": rows}
@@ -72,7 +82,7 @@ def adopt(source: Path, destination: Path, repository: Path, locale: str, versio
         raise ValueError("release finalization destination must be a new empty directory")
     receipt = read_prepared(source, version, locale)
     if json.loads((source / SOURCE_RECEIPT).read_text(encoding="utf-8")) != source_identity(repository):
-        raise ValueError("release source inputs changed before finalization")
+        raise ValueError("確定前に release の入力ファイルが変更されました。作り直してください (release source inputs changed before finalization)")
     # Both directories are validated siblings. Remove only our empty target,
     # then use a same-parent rename; no copy/delete fallback can lose input.
     destination.rmdir()
@@ -89,22 +99,30 @@ def adopt(source: Path, destination: Path, repository: Path, locale: str, versio
             if destination.exists() or read_prepared(source, version, locale) != receipt:
                 raise ValueError("prepared adoption inputs changed during rename retry") from error
             if json.loads((source / SOURCE_RECEIPT).read_text(encoding="utf-8")) != source_identity(repository):
-                raise ValueError("release source inputs changed during rename retry") from error
+                raise ValueError("確定処理中に release の入力ファイルが変更されました (release source inputs changed during rename retry)") from error
     return receipt
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("begin", "seal", "adopt"))
+    parser.add_argument("operation", choices=("preflight", "begin", "seal", "adopt"))
     parser.add_argument("--repository", type=Path, required=True)
-    parser.add_argument("--root", type=Path, required=True)
+    parser.add_argument("--root", type=Path)
     parser.add_argument("--destination", type=Path)
     parser.add_argument("--locale", choices=("ja", "en"))
     parser.add_argument("--version")
     for name in ("release", "release-lite", "release-zip", "release-lite-zip"):
         parser.add_argument("--" + name)
     args = parser.parse_args(argv)
+    if args.operation != "preflight" and args.root is None:
+        parser.error(f"{args.operation} requires --root")
     try:
+        if args.operation == "preflight":
+            # Read-only gate run before the long build so untracked allowlisted
+            # inputs are reported in seconds instead of after compilation.
+            release_snapshot_plan(args.repository.resolve())
+            print("Release source preflight: PASS")
+            return 0
         if args.operation == "begin":
             write_new_json(args.root / SOURCE_RECEIPT, source_identity(args.repository))
         elif args.operation == "seal":
@@ -114,7 +132,7 @@ def main(argv=None) -> int:
             if args.destination is None: raise ValueError("adopt requires a destination")
             adopt(args.root, args.destination, args.repository, args.locale, args.version)
     except (OSError, ValueError, RuntimeError, KeyError) as error:
-        print(f"Release preparation failed: {error}", file=sys.stderr)
+        print(f"release 準備に失敗しました (Release preparation failed): {error}", file=sys.stderr)
         return 1
     print("Release preparation: PASS (not a publish approval)")
     return 0

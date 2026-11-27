@@ -82,6 +82,9 @@ class DependencySecurityGateTests(unittest.TestCase):
         review["reviewed_on"] = today.isoformat()
         review["review_valid_until"] = (today + timedelta(days=1)).isoformat()
         for component in review["components"]:
+            if component["name"] == "MicroTeX":
+                shutil.copytree(REPO_ROOT / "third_party/microtex", self.root / "third_party/microtex")
+                continue
             self.copy_tracked_input(Path(component["evidence_file"]))
             for artifact in component["artifacts"]:
                 path = self.root / artifact["path"]
@@ -112,6 +115,14 @@ class DependencySecurityGateTests(unittest.TestCase):
         code, errors = self.run_gate(review, "--check-record-only")
         self.assertEqual(1, code)
         self.assertIn("reviewed artifact is missing", errors)
+
+    def test_microtex_source_inventory_rejects_unreviewed_source(self) -> None:
+        self.fixture_review()
+        self.assertEqual([], self.gate.validate_microtex_sources(self.root))
+        source = self.root / "third_party/microtex/lib/core/parser.cpp"
+        source.write_bytes(source.read_bytes() + b"\n// unreviewed change\n")
+        self.assertTrue(any("vendored source changed" in error
+                            for error in self.gate.validate_microtex_sources(self.root)))
 
     def test_blocked_review_fails_closed(self) -> None:
         review = self.fixture_review()

@@ -23,10 +23,19 @@ foreach ($executable in @("pdf_note_workspace.exe", "readonly_viewer.exe")) {
     $observedExe = $false
     foreach ($artifact in $artifacts) {
         $name = $artifact.Groups[1].Value
-        if ([IO.Path]::GetFileName($name) -ne $name) { throw "Invalid artifact receipt path: $name" }
+        $mathResources = @('resources/math/xits/XITSMath-Regular.clm2',
+            'licenses/microtex/LICENSE.txt', 'licenses/xits/OFL.txt',
+            'licenses/xits/FONTLOG.txt', 'licenses/xits/README.txt')
+        if ([IO.Path]::GetFileName($name) -ne $name -and $name -cnotin $mathResources) {
+            throw "Invalid artifact receipt path: $name"
+        }
         if ($name -eq $executable) { $observedExe = $true }
         elseif ($name.EndsWith(".dll", [StringComparison]::OrdinalIgnoreCase)) {
             Copy-Item -LiteralPath (Join-Path $binDir $name) -Destination (Join-Path $appDir $name)
+        } elseif ($name -cin $mathResources) {
+            $target = Join-Path $appDir $name
+            New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
+            Copy-Item -LiteralPath (Join-Path $binDir $name) -Destination $target
         } else { throw "Unexpected runtime artifact: $name" }
         if ((Get-FileHash -LiteralPath (Join-Path $appDir $name)).Hash -ne $artifact.Groups[2].Value) {
             throw "Copied executable/runtime differs from build receipt: $name"

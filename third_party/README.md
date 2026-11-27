@@ -17,10 +17,11 @@
 | `pdfium/` | PDF の読み込み、描画、テキスト抽出、PDF 書き出し | SDK ヘッダ、import lib、`pdfium.dll`、ライセンス文書 | `pdfium.dll` と PDFium 関連ライセンスを同梱 |
 | `md4c/` | ノート本文の Markdown 解析 | `md4c.c`, `md4c.h` を含む vendor ソースとライセンス文書 | バイナリには静的に組み込まれ、ライセンス文書を同梱 |
 | `libreoffice/` | docx/pptx など Office 文書から PDF へのローカル変換、同梱フォントのアプリ内 private font 利用 | 比較・フォント参照用 image、通信機能を除いた custom runtime、再現用入力、ライセンス文書 | 通常版は検証済み runtime を `lo/` へ配置。Lite 版は変換 runtime を含めない。選択 private font は両 edition に同梱 |
+| `microtex/` | ノートと PDF 数式注釈の数式組版・描画 | 固定 commit の C++ ソース、Windows GDI+ backend、局所 patch、`UPSTREAM.json`、MIT ライセンス、XITS Math の CLM2 と OFL 文書 | バイナリには静的に組み込まれ、`resources/math/xits/` の font と `licenses/microtex/`、`licenses/xits/` を同梱 |
 | `zlib/` | DOCX staging ZIP の展開・検証 | 1.4 のヘッダ、import library、DLL、版・ライセンス証跡 | 固定した `zlib1.dll` とライセンスを同梱 |
 | `mingw_runtime_licenses/` | MinGW-w64 runtime DLL のライセンス証跡 | `libstdc++`, `libgcc`, `winpthread` 向けライセンス文書 | runtime DLL と対応ライセンスを同梱 |
 
-2026-11-13時点の採用版は、PDFium `159.0.8152.0`、アプリ側MD4C `0.6.0` + 固定commit・日本語patch、zlib `1.4`、LibreOffice custom runtime `26.2.6.3`。固定版・hashの正本は各依存の `VERSION` とmanifest、[ライセンス一覧](../LICENSES_INDEX.md)、[第三者notice](../THIRD_PARTY_NOTICES.md)で確認する。LibreOffice内蔵MD4Cは別のUTF-8 `0.5.3`で、custom patch `0050`により必要なallocation失敗処理をbackport済み。アプリ側の更新だけで内蔵コピーも更新済みと扱わない。
+2026-11-25時点の採用版は、PDFium `160.0.8179.0`、アプリ側MD4C `0.6.0` + 固定commit・日本語patch、zlib `1.4`、LibreOffice custom runtime `26.2.7.3`。2026-11-24にMicroTeX openmath commit `086f4eb740270b28bd0c61a0a359aea9300d61ae` + 局所patchとXITS Math CLM2を追加した。固定版・hashの正本は各依存の `VERSION` とmanifest、[ライセンス一覧](../LICENSES_INDEX.md)、[第三者notice](../THIRD_PARTY_NOTICES.md)で確認する。LibreOffice内蔵MD4Cは別のUTF-8 `0.5.3`で、custom patch `0050`により必要なallocation失敗処理をbackport済み。アプリ側の更新だけで内蔵コピーも更新済みと扱わない。
 
 ## 共通ルール
 
@@ -131,6 +132,14 @@ MD4C はノート本文の Markdown 解析依存です。本アプリでは Mark
 - Markdown 内 URL を解析しても、アプリ側で外部通信や外部起動へつなげません
 - 解析失敗や未対応構文は、保存や原本変更に進めず、静かな視覚通知または内部ログで扱います
 
+## `microtex/`
+
+- `VERSION` と `UPSTREAM.json` に上流 commit、archive と原本ファイルの SHA-256 を固定します。局所変更は `patches/` に記録し、更新時も保持します
+- `scripts/build/build_sources.json` の固定 source を静的にリンクします。`lib/wrapper/` の C API はビルド対象外です
+- font と許諾文の配置は `scripts/build/sync_microtex_assets.ps1` が build・検査・梱包で共通に行い、コピー前後に hash を確認します
+- 自動 font 探索、特権 macro、ユーザー定義 macro/環境、上流の診断 log を無効にします。外部通信・外部プロセス起動を行いません
+- 詳細は [`microtex/README.md`](microtex/README.md) を参照します
+
 ## `zlib/`
 
 - `VERSION` に上流 tag、commit、ビルド方法、DLL/import library の SHA-256 を固定します
@@ -146,12 +155,12 @@ LibreOffice は Office 文書を PDF に変換するためのローカル変換�
 ### 保持対象
 
 - `VERSION`
-  - 採用 custom runtime `26.2.6.3`、公式core archive・runtime hash、適用patch系列の証跡
+  - 採用 custom runtime `26.2.7.3`、公式core archive・runtime hash、適用patch系列の証跡
 - `README.md`
   - 採用runtimeの再現入力、headless条件、安全条件と旧imageの時点記録
 - `custom_runtime/instdir/`
   - 検証済み変換runtime。実行入口は `program/soffice.com`。大きい実体はGit無視
-- `custom_build/` と `source_archives_26.2.6.3.manifest.tsv` / `external_tarballs_26.2.6.3.manifest.tsv`
+- `custom_build/` と `source_archives_26.2.7.3.manifest.tsv` / `external_tarballs_26.2.7.3.manifest.tsv`
   - build・通信除外・配布縮小の入力、49patch、公式coreと使用83archiveのhash。archive本体・build tree・machine-local設定は公開snapshotへ含めない
 - `image/`
   - 旧 `26.2.3.2` 管理者展開物。選択font・license参照と比較専用。変換runtimeとして採用・配布しない
@@ -160,7 +169,7 @@ LibreOffice は Office 文書を PDF に変換するためのローカル変換�
 
 ### ローカル変更
 
-変換runtimeは公式core sourceから通信・更新・クラッシュ報告・AVMedia・OpenCL・scripting等を除外したcustom buildです。公式MSIの送信ファイルだけを削除したimageで代用しません。現在のpatch系列は0001–0041 / 0043–0051（0042は予約番号）で、公式との重複を比較し、日本語変換修正を保持します。
+変換runtimeは公式core sourceから通信・更新・クラッシュ報告・AVMedia・OpenCL・scripting等を除外したcustom buildです。公式MSIの送信ファイルだけを削除したimageで代用しません。現在のpatch系列は0001–0016 / 0018–0041 / 0043–0051の49件（0017はlibxml2 2.15でHTTP clientが削除されたため撤回、0042は予約番号）で、公式との重複を比較し、日本語変換修正を保持します。
 
 配布用コピーは `custom_build/release_reduction_manifest.json` で縮小します。Math/Calcの変換構成と保護pathは保持し、Calcの再削減は別の品質比較・利用者判断へ分離します。旧imageの削除一覧は過去の比較記録であり、採用runtimeの削減根拠に流用しません。構成変更時はこの説明、`libreoffice/README.md`、manifest、`THIRD_PARTY_NOTICES.md`を同期します。
 

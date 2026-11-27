@@ -17,6 +17,13 @@ from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+# Child PowerShell 5.1 output follows the shared console code page (932 on a
+# Japanese desktop, or 65001 after any script sets [Console]::OutputEncoding).
+# Decode child output as UTF-8 with replacement: assertions match ASCII markers,
+# and an undecodable localized error line must not turn a result into None.
+# Contract scripts that rerun every safety scan per case take over 30 s on a
+# busy desktop; the timeout only guards against a hang.
+SCAN_CONTRACT_TIMEOUT = 120
 
 
 def load_module(name: str, relative: str):
@@ -95,7 +102,7 @@ New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Ou
             environment = os.environ.copy()
             environment.update(PDF_NOTE_CONTRACT_REPO_ROOT=str(REPO_ROOT), PDF_NOTE_CONTRACT_FIXTURE=temporary)
             generated = subprocess.run([shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)], capture_output=True,
-                                       text=True, env=environment, timeout=30)
+                                       text=True, encoding="utf-8", errors="replace", env=environment, timeout=30)
             self.assertEqual(generated.returncode, 0, generated.stderr)
             fixture = root / "tests/scripts/run_repo_checks.ps1"
             for case, aggregate, mode in (("multiple", True, "multiple"), ("success", True, "success"),
@@ -106,7 +113,7 @@ New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Ou
                     args = [shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(fixture), "-LogDir", str(log_dir), "-FailureTailLines", "1"]
                     if aggregate:
                         args += ["-ContinueOnFailure"]
-                    result = subprocess.run(args, capture_output=True, text=True, env=environment, timeout=60)
+                    result = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace", env=environment, timeout=60)
                     data = json.loads((log_dir / "summary.json").read_text(encoding="utf-8-sig"))
                     self.assertEqual(result.returncode, 0 if mode == "success" else (130 if mode == "interrupt" else 1), result.stdout + result.stderr)
                     self.assertGreater(data["counts"]["selected"], 30)
@@ -128,7 +135,7 @@ New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Ou
             skipped = subprocess.run([shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(fixture),
                                       "-ContinueOnFailure", "-OnlyStep", "Atomic Write Tests", "-SkipAtomicWrite",
                                       "-LogDir", str(skipped_logs)],
-                                     capture_output=True, text=True, env=environment, timeout=30)
+                                     capture_output=True, text=True, encoding="utf-8", errors="replace", env=environment, timeout=30)
             self.assertEqual(skipped.returncode, 1)
             disabled = json.loads((skipped_logs / "summary.json").read_text(encoding="utf-8-sig"))
             self.assertEqual(disabled["counts"], {"selected": 1, "pass": 0, "fail": 0, "not_run": 1})
@@ -140,7 +147,7 @@ New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Ou
             blocked_logs.write_text("keep this evidence", encoding="utf-8")
             broken = subprocess.run([shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(fixture),
                                      "-ContinueOnFailure", "-LogDir", str(blocked_logs)],
-                                    capture_output=True, text=True, env=environment, timeout=30)
+                                    capture_output=True, text=True, encoding="utf-8", errors="replace", env=environment, timeout=30)
             self.assertEqual(broken.returncode, 1)
             self.assertEqual(blocked_logs.read_text(encoding="utf-8"), "keep this evidence")
             self.assertIn(f"Selected={data['counts']['selected']}; PASS=0; FAIL={data['counts']['selected']}; NOT_RUN=0", broken.stdout)
@@ -163,15 +170,20 @@ $functionsFile = Join-Path (Split-Path -Parent $env:PDF_NOTE_FAKE_CHECK_HOST) 'f
 . $functionsFile
 function Get-Process { param($Id, $ErrorAction) [pscustomobject]@{ Path = $env:PDF_NOTE_FAKE_CHECK_HOST } }
 function Write-Info { param($Message) Write-Host $Message }
-foreach ($code in @(0, 7)) {
-    $env:PDF_NOTE_FAKE_CHECK_EXIT = [string]$code
+$fullMarker = Join-Path (Split-Path -Parent $env:PDF_NOTE_FAKE_CHECK_HOST) 'full_called.txt'
+foreach ($case in @(@('PASS', 0), @('PASS', 7), @('FAIL', 0), @('MISSING', 0))) {
+    $env:PDF_NOTE_FAKE_FAST_STATUS = $case[0]
+    $env:PDF_NOTE_FAKE_CHECK_EXIT = [string]$case[1]
+    Remove-Item -LiteralPath $fullMarker -ErrorAction SilentlyContinue
     $failed = $false
     try { Invoke-FullRepositoryChecks }
     catch {
         if ($_.Exception.Message -notlike '*final confirmation word will not be issued*') { throw }
         $failed = $true
     }
-    if ($failed -ne ($code -ne 0)) { throw 'Publish accepted failed checks or rejected success' }
+    $expectFailure = $case[0] -ne 'PASS' -or $case[1] -ne 0
+    if ($failed -ne $expectFailure) { throw 'Publish accepted failed checks or rejected success' }
+    if ((Test-Path -LiteralPath $fullMarker) -ne ($case[0] -eq 'PASS')) { throw 'Full checks ran after failed fast gates, or were skipped after passing ones' }
 }
 Write-Host 'PUBLISH_AGGREGATE_CONTRACT_PASS'
 '''
@@ -181,18 +193,43 @@ Write-Host 'PUBLISH_AGGREGATE_CONTRACT_PASS'
             entry.parent.mkdir(parents=True)
             entry.write_text("throw 'Real checks must not be called by this fixture'", encoding="utf-8")
             host = root / "fake_host.ps1"
-            host.write_text("if ($args -notcontains '-ContinueOnFailure') { throw 'Aggregate mode missing' }\n"
-                            "if (@($args | Where-Object { $_ -like '-Skip*' -or $_ -eq '-OnlyStep' }).Count) "
-                            "{ throw 'Publish requested partial checks' }\n"
-                            "Write-Output 'fixture summary emitted'\n"
-                            "$global:LASTEXITCODE = [int]$env:PDF_NOTE_FAKE_CHECK_EXIT\n", encoding="utf-8")
+            # The fast-gate call passes its step list in -Command and reports
+            # through summary.json; the full call must stay unfiltered.
+            host.write_text(r"""
+if ($args -contains '-Command') {
+    $cmd = [string]$args[[array]::IndexOf($args, '-Command') + 1]
+    foreach ($gate in @('Text Integrity Gate', 'Dependency Security Gate', 'Codebase Validation',
+                        'Repository Script and Text Gate', 'Safety Scans')) {
+        if ($cmd -notlike "*'$gate'*") { throw "Fast gate missing: $gate" }
+    }
+    foreach ($flag in @('-OnlyStep', '-SkipBuild', '-ContinueOnFailure', '-LogDir')) {
+        if ($cmd -notlike "*$flag*") { throw "Fast gate flag missing: $flag" }
+    }
+    $match = [regex]::Match($cmd, "-LogDir '((?:[^']|'')+)'")
+    if (-not $match.Success) { throw 'Fast gate log directory missing' }
+    $dir = $match.Groups[1].Value.Replace("''", "'")
+    if ($env:PDF_NOTE_FAKE_FAST_STATUS -ne 'MISSING') {
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        $pass = if ($env:PDF_NOTE_FAKE_FAST_STATUS -eq 'PASS') { 5 } else { 4 }
+        @{ status = $env:PDF_NOTE_FAKE_FAST_STATUS; counts = @{ pass = $pass } } | ConvertTo-Json |
+            Set-Content -LiteralPath (Join-Path $dir 'summary.json') -Encoding UTF8
+    }
+    $global:LASTEXITCODE = 1
+    return
+}
+if ($args -notcontains '-ContinueOnFailure') { throw 'Aggregate mode missing' }
+if (@($args | Where-Object { $_ -like '-Skip*' -or $_ -eq '-OnlyStep' }).Count) { throw 'Publish requested partial checks' }
+Set-Content -LiteralPath (Join-Path $PSScriptRoot 'full_called.txt') -Value 'called'
+Write-Output 'fixture summary emitted'
+$global:LASTEXITCODE = [int]$env:PDF_NOTE_FAKE_CHECK_EXIT
+""", encoding="utf-8")
             script = root / "publish_contract.ps1"
             script.write_text(command, encoding="utf-8")
             environment = os.environ.copy()
             environment.update(PDF_NOTE_CONTRACT_REPO_ROOT=str(REPO_ROOT), PDF_NOTE_FAKE_CHECK_HOST=str(host))
             result = subprocess.run([shutil.which("powershell.exe") or shutil.which("powershell"),
                                      "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
-                                    capture_output=True, text=True, env=environment, timeout=30)
+                                    capture_output=True, text=True, encoding="utf-8", errors="replace", env=environment, timeout=30)
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             self.assertIn("PUBLISH_AGGREGATE_CONTRACT_PASS", result.stdout)
 
@@ -327,7 +364,7 @@ Write-Host 'EVIDENCE_CONTRACT_PASS'
             environment.update(PDF_NOTE_CONTRACT_REPO_ROOT=str(REPO_ROOT), PDF_NOTE_CONTRACT_FIXTURE=temporary)
             result = subprocess.run([shutil.which("powershell.exe") or shutil.which("powershell"),
                                      "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
-                                    capture_output=True, text=True, env=environment, timeout=30)
+                                    capture_output=True, text=True, encoding="utf-8", errors="replace", env=environment, timeout=30)
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             for marker in ("EVIDENCE_CONTRACT_PASS", "evidence-line-34", "Evidence file was not created",
                            "16 MiB", "Unable to read diagnostic evidence"):
@@ -372,7 +409,7 @@ Write-Host 'WORKFLOW_CONTRACT_PASS'
         environment["PDF_NOTE_CONTRACT_REPO_ROOT"] = str(REPO_ROOT)
         result = subprocess.run([shutil.which("powershell.exe") or shutil.which("powershell"),
                                  "-NoProfile", "-Command", command],
-                                capture_output=True, text=True, env=environment, timeout=30)
+                                capture_output=True, text=True, encoding="utf-8", errors="replace", env=environment, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertIn("WORKFLOW_CONTRACT_PASS", result.stdout)
 
@@ -436,7 +473,7 @@ if (-not $rejected) { throw 'Duplicated vertical orientation evidence accepted' 
 '''
         env = dict(os.environ, PDF_NOTE_REEDIT_GATE_REPO=str(REPO_ROOT))
         result = subprocess.run([powershell, "-NoProfile", "-Command", command],
-                                capture_output=True, text=True, timeout=30, env=env, cwd=REPO_ROOT)
+                                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30, env=env, cwd=REPO_ROOT)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     @unittest.skipUnless(shutil.which("powershell.exe") or shutil.which("powershell"), "requires PowerShell")
@@ -483,7 +520,7 @@ foreach ($index in 0..($lines.Count - 1)) {
 '''
         env = dict(os.environ, PDF_NOTE_IME_GATE_REPO=str(REPO_ROOT))
         result = subprocess.run([powershell, "-NoProfile", "-Command", command],
-                                capture_output=True, text=True, timeout=30, env=env, cwd=REPO_ROOT)
+                                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30, env=env, cwd=REPO_ROOT)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     @unittest.skipUnless(shutil.which("powershell.exe") or shutil.which("powershell"), "requires PowerShell")
@@ -495,7 +532,7 @@ foreach ($index in 0..($lines.Count - 1)) {
             with self.subTest(options=options):
                 result = subprocess.run([powershell, "-NoProfile", "-ExecutionPolicy", "Bypass",
                                          "-File", str(script), *options],
-                                        capture_output=True, text=True, timeout=30, cwd=REPO_ROOT)
+                                        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30, cwd=REPO_ROOT)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("-ImeGeometryOnly requires -MathRenderOnly", result.stderr)
 
@@ -538,7 +575,7 @@ if (-not $rejected) { throw 'Legacy post-close evidence accepted as pre-destroy 
 '''
         env = dict(os.environ, PDF_NOTE_DIALOG_OWNER_GATE_REPO=str(REPO_ROOT))
         result = subprocess.run([powershell, "-NoProfile", "-Command", command],
-                                capture_output=True, text=True, timeout=30, env=env, cwd=REPO_ROOT)
+                                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30, env=env, cwd=REPO_ROOT)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     @unittest.skipUnless(shutil.which("powershell.exe") or shutil.which("powershell"), "requires PowerShell")
@@ -603,7 +640,7 @@ foreach ($script:case in @('default', 'skip_ui', 'missing', 'partial', 'failed',
                        PDF_NOTE_CLOSE_CONTRACT_LOG=str(Path(temporary) / "child.log"))
             result = subprocess.run([shutil.which("powershell.exe") or shutil.which("powershell"),
                                      "-NoProfile", "-Command", command],
-                                    capture_output=True, text=True, timeout=30, env=env, cwd=REPO_ROOT)
+                                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30, env=env, cwd=REPO_ROOT)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def run_quietly(self, function, arguments):
@@ -838,7 +875,7 @@ Write-Output ('RESULT:' + ($results | ConvertTo-Json -Depth 4 -Compress))
             result = subprocess.run([
                 shutil.which("powershell.exe") or shutil.which("powershell"), "-NoProfile",
                 "-ExecutionPolicy", "Bypass", "-File", str(script),
-            ], capture_output=True, text=True, encoding="utf-8", env=environment, timeout=30)
+            ], capture_output=True, text=True, encoding="utf-8", env=environment, timeout=SCAN_CONTRACT_TIMEOUT)
             self.assertEqual(result.returncode, 0, result.stderr)
             data = json.loads(next(line[len("RESULT:"):] for line in result.stdout.splitlines()
                                    if line.startswith("RESULT:")))
@@ -876,7 +913,7 @@ New-Item -ItemType Directory -Force -Path $scanRoot | Out-Null
 $results = @{}
 Push-Location -LiteralPath $scanRoot
 try {
-    foreach ($relative in @('src/recovery/stage_recovery_window.cpp', 'tools/recovery_demo/demo_ui.cpp', 'tests/python/test_site_validation.py')) {
+    foreach ($relative in @('src/recovery/stage_recovery_window.cpp', 'src/recovery/standalone_recovery.cpp', 'tools/recovery_demo/demo_ui.cpp', 'tests/python/test_site_validation.py')) {
         $path = Join-Path $scanRoot $relative
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null
         $original = [IO.File]::ReadAllText((Join-Path $env:PDF_NOTE_CONTRACT_REPO_ROOT $relative))
@@ -886,6 +923,11 @@ try {
             extra_call = $original + "`nvoid forbidden() { GetOpenFileNameW(nullptr); }`n"
             extra_same_line = [regex]::Replace($original, '(?m)^(.*GetOpenFileNameW.*)$', '$1 GetSaveFileNameW(nullptr);')
             other_file = $original
+        }
+        if ($relative.EndsWith('standalone_recovery.cpp')) {
+            $cases.changed_api = $original.Replace('IFileOpenDialog *dialog = nullptr;', 'IFileSaveDialog *dialog = nullptr;')
+            $cases.extra_call = $original + "`nvoid forbidden() { IFileOpenDialog *other = nullptr; }`n"
+            $cases.extra_same_line = [regex]::Replace($original, '(?m)^(\s*IFileOpenDialog \*dialog = nullptr;)\s*$', '$1 CLSID_FileSaveDialog;')
         }
         if ($relative.EndsWith('.py')) {
             $cases.changed_api = $original.Replace('AssertionError("network forbidden")', 'None')
@@ -913,15 +955,15 @@ Write-Output ('RESULT:' + ($results | ConvertTo-Json -Compress))
             result = subprocess.run([
                 shutil.which("powershell.exe") or shutil.which("powershell"), "-NoProfile",
                 "-ExecutionPolicy", "Bypass", "-File", str(script),
-            ], capture_output=True, text=True, encoding="utf-8", env=environment, timeout=30)
+            ], capture_output=True, text=True, encoding="utf-8", env=environment, timeout=SCAN_CONTRACT_TIMEOUT)
             self.assertEqual(result.returncode, 0, result.stderr)
             data = json.loads(next(line[len("RESULT:"):] for line in result.stdout.splitlines()
                                    if line.startswith("RESULT:")))
             expected = {"exact_calls": False, "changed_api": True, "extra_call": True,
                         "extra_same_line": True, "other_file": True}
             self.assertEqual(data, {name: expected for name in (
-                "src/recovery/stage_recovery_window.cpp", "tools/recovery_demo/demo_ui.cpp",
-                "tests/python/test_site_validation.py")})
+                "src/recovery/stage_recovery_window.cpp", "src/recovery/standalone_recovery.cpp",
+                "tools/recovery_demo/demo_ui.cpp", "tests/python/test_site_validation.py")})
 
     @unittest.skipUnless((shutil.which("powershell.exe") or shutil.which("powershell")) and shutil.which("rg"),
                          "requires PowerShell and ripgrep")
@@ -1024,7 +1066,7 @@ Write-Output ('RESULT:' + ($results | ConvertTo-Json -Compress))
             result = subprocess.run([
                 shutil.which("powershell.exe") or shutil.which("powershell"), "-NoProfile",
                 "-ExecutionPolicy", "Bypass", "-File", str(script),
-            ], capture_output=True, text=True, encoding="utf-8", env=environment, timeout=30)
+            ], capture_output=True, text=True, encoding="utf-8", env=environment, timeout=SCAN_CONTRACT_TIMEOUT)
             self.assertEqual(result.returncode, 0, result.stderr)
             data = json.loads(next(line[len("RESULT:"):] for line in result.stdout.splitlines()
                                    if line.startswith("RESULT:")))
@@ -1061,14 +1103,14 @@ Write-Output ('RESULT:' + ($results | ConvertTo-Json -Compress))
         runner = REPO_ROOT / "tests/scripts/run_repo_checks.ps1"
         command = [shutil.which("powershell.exe") or shutil.which("powershell"),
                    "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(runner)]
-        listing = subprocess.run(command + ["-ListSteps"], capture_output=True, text=True, timeout=30)
+        listing = subprocess.run(command + ["-ListSteps"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
         self.assertEqual(listing.returncode, 0, listing.stderr)
         self.assertIn("Atomic Write Tests", listing.stdout.splitlines())
-        unknown = subprocess.run(command + ["-OnlyStep", "not a step"], capture_output=True, text=True, timeout=30)
+        unknown = subprocess.run(command + ["-OnlyStep", "not a step"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
         self.assertNotEqual(unknown.returncode, 0)
         self.assertIn("Unknown step", unknown.stderr)
         skipped = subprocess.run(command + ["-OnlyStep", "Atomic Write Tests", "-SkipAtomicWrite"],
-                                 capture_output=True, text=True, timeout=30)
+                                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
         self.assertNotEqual(skipped.returncode, 0)
         self.assertIn("not executed", skipped.stdout)
 
@@ -1124,7 +1166,7 @@ Write-Output ('RESULT:' + ($results | ConvertTo-Json -Depth 3 -Compress))
             result = subprocess.run([
                 shutil.which("powershell.exe") or shutil.which("powershell"), "-NoProfile",
                 "-ExecutionPolicy", "Bypass", "-File", str(script),
-            ], capture_output=True, text=True, env=environment, timeout=30)
+            ], capture_output=True, text=True, encoding="utf-8", errors="replace", env=environment, timeout=30)
             self.assertEqual(result.returncode, 0, result.stderr)
             data = json.loads(next(line[len("RESULT:"):] for line in result.stdout.splitlines() if line.startswith("RESULT:")))
             for name, item in data.items():
@@ -1187,7 +1229,7 @@ Write-Output ('RESULT:' + ($results | ConvertTo-Json -Depth 5 -Compress))
             result = subprocess.run([
                 shutil.which("powershell.exe") or shutil.which("powershell"), "-NoProfile",
                 "-ExecutionPolicy", "Bypass", "-File", str(script),
-            ], capture_output=True, text=True, env=environment, timeout=30)
+            ], capture_output=True, text=True, encoding="utf-8", errors="replace", env=environment, timeout=30)
             self.assertEqual(result.returncode, 0, result.stderr)
             data = json.loads(next(line[len("RESULT:"):] for line in result.stdout.splitlines()
                                    if line.startswith("RESULT:")))
@@ -1246,7 +1288,7 @@ Write-Output ('RESULT:' + ($results | ConvertTo-Json -Depth 4 -Compress))
             result = subprocess.run([
                 shutil.which("powershell.exe") or shutil.which("powershell"), "-NoProfile",
                 "-ExecutionPolicy", "Bypass", "-File", str(script),
-            ], capture_output=True, text=True, env=environment, timeout=30)
+            ], capture_output=True, text=True, encoding="utf-8", errors="replace", env=environment, timeout=30)
             self.assertEqual(result.returncode, 0, result.stderr)
             data = json.loads(next(line[len("RESULT:"):] for line in result.stdout.splitlines()
                                    if line.startswith("RESULT:")))
@@ -1276,7 +1318,7 @@ Write-Output ('RESULT:' + ($results | ConvertTo-Json -Depth 4 -Compress))
             with self.subTest(options=options):
                 result = subprocess.run([shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
                                          str(script), "-OfficeReductionAcceptance", *options],
-                                        capture_output=True, text=True, timeout=30, cwd=REPO_ROOT)
+                                        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30, cwd=REPO_ROOT)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("Office reduction acceptance", result.stderr)
 

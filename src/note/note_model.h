@@ -75,6 +75,8 @@ struct NoteMetadata {
     bool clro_ascii_only = false;
     bool quote_lazy_continuation = false;
     bool clro_list_implicit_continuation = false;
+    // Presentation only; unmarked rows remain ordinary paragraphs.
+    bool clro_list_body_alignment = false;
 };
 
 struct NoteTextModel {

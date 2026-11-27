@@ -268,6 +268,26 @@ struct PageCache {
         bool haveStrokeColor = false;
     };
     std::vector<ReadablePath> readablePaths;
+    // Display-only memo of the readable-text overlay: for each glyph / path,
+    // the sampled background color, or kSkip when nothing is drawn. Valid only
+    // while every key field still matches the page bitmap, the extracted
+    // lists and the view scale; any mismatch recomputes all decisions.
+    struct ReadableOverlayMemo {
+        static constexpr COLORREF kSkip = 0xFFFFFFFFu; // outside the RGB range
+        const uint8_t* pixels = nullptr;
+        size_t pixelBytes = 0;
+        uint64_t generation = 0;
+        int bmpW = 0, bmpH = 0;
+        bool coarse = false;
+        double scale = 0.0;
+        const ReadableGlyph* glyphs = nullptr;
+        size_t glyphCount = 0;
+        const ReadablePath* paths = nullptr;
+        size_t pathCount = 0;
+        std::vector<COLORREF> glyphBackground;
+        std::vector<COLORREF> pathBackground;
+    };
+    ReadableOverlayMemo readableOverlayMemo;
 };
 
 struct TextLineLayout {
@@ -325,6 +345,26 @@ struct Annotation {
     MarkerDisplayMode markerDisplayMode = MarkerDisplayMode::Multiply;
     AnnotationBlendMode blendMode = AnnotationBlendMode::Normal; // Shape / MarkerFree, v2
 };
+
+// Visits each text rectangle of a marker-text / text-color annotation in PDF
+// points as visit(minX, minY, maxX, maxY): one per complete quad (8 values), or
+// the x1/y1/x2/y2 box when the annotation has no quads. A trailing incomplete
+// quad is ignored, and non-empty quads never fall back to the box.
+template <class Visit>
+inline void ForEachAnnotationTextRect(const Annotation& ann, Visit&& visit) {
+    const auto& q = ann.quads;
+    if (q.empty()) {
+        visit(std::min(ann.x1, ann.x2), std::min(ann.y1, ann.y2),
+              std::max(ann.x1, ann.x2), std::max(ann.y1, ann.y2));
+        return;
+    }
+    for (size_t qi = 0; qi + 7 < q.size(); qi += 8) {
+        visit(std::min(std::min(q[qi + 0], q[qi + 2]), std::min(q[qi + 4], q[qi + 6])),
+              std::min(std::min(q[qi + 1], q[qi + 3]), std::min(q[qi + 5], q[qi + 7])),
+              std::max(std::max(q[qi + 0], q[qi + 2]), std::max(q[qi + 4], q[qi + 6])),
+              std::max(std::max(q[qi + 1], q[qi + 3]), std::max(q[qi + 5], q[qi + 7])));
+    }
+}
 
 [[nodiscard]] inline ShapeLineStyle AnnotationShapeLineStyle(const Annotation& ann) noexcept {
     return ShapeLineStyleFor(ShapeKindIsOpen(ann.shapeKind)?ShapeBoundary::None:ann.shapeBoundary,!ann.dash.empty());

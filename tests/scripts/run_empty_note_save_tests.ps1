@@ -19,6 +19,8 @@ $appDir = Join-Path $fixture 'app'
 $null = New-Item -ItemType Directory -Path $appDir
 $ownedAppName = 'pdf_note_empty_' + [IO.Path]::GetFileName($fixture) + '.exe'
 Copy-Item -LiteralPath $binary -Destination (Join-Path $appDir $ownedAppName)
+. (Join-Path $repoRoot "scripts/build/sync_microtex_assets.ps1")
+Sync-MicrotexAssets -SourceRoot $repoRoot -DestinationRoot $appDir | Out-Null
 Get-ChildItem -LiteralPath (Split-Path -Parent $binary) -Filter '*.dll' -File | ForEach-Object {
     Copy-Item -LiteralPath $_.FullName -Destination $appDir
 }

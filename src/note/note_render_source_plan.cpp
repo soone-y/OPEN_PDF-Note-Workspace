@@ -7,6 +7,7 @@
 #include <exception>
 #include <limits>
 #include <new>
+#include <optional>
 #include <utility>
 
 namespace note {
@@ -1389,6 +1390,10 @@ NoteRenderSourcePlanBuildResult NoteRenderSourcePlan::Build(
                                                             std::max(0, block.level));
                         break;
                     case BlockKind::ListItem:
+                        // CLRO row markers own their physical row only. Even
+                        // a parser-owned multiline item must not leak a gutter
+                        // into unmarked source rows when continuation is OFF.
+                        if (explicitListLines && line != firstLine.value) break;
                         AddLineDecorationFlag(&decoration,
                                               NoteRenderSourceLineDecorationListItem);
                         decoration.list_depth = std::max(decoration.list_depth, listDepths[index]);
@@ -1661,6 +1666,56 @@ NoteRenderSourcePlanBuildResult NoteRenderSourcePlan::Build(
                 if (line == std::numeric_limits<size_t>::max()) {
                     return NoteRenderSourcePlanBuildResult::InconsistentSyntax;
                 }
+            }
+        }
+
+        if (explicitListLines && document.metadata().clro_list_body_alignment) {
+            // One forward pass derives visual alignment. No extra list AST,
+            // source indentation, marker glyph or export nesting is created.
+            std::optional<NoteRenderSourceLineDecoration> anchor;
+            constexpr uint32_t listFlags = NoteRenderSourceLineDecorationListItem |
+                NoteRenderSourceLineDecorationOrderedListItem | NoteRenderSourceLineDecorationTaskItem;
+            constexpr uint32_t stops = NoteRenderSourceLineDecorationHeading |
+                NoteRenderSourceLineDecorationQuote | NoteRenderSourceLineDecorationCodeBlock |
+                NoteRenderSourceLineDecorationCodeFence | NoteRenderSourceLineDecorationHorizontalRule |
+                NoteRenderSourceLineDecorationTable | NoteRenderSourceLineDecorationContainerOpening |
+                NoteRenderSourceLineDecorationContainerClosing;
+            for (size_t line = 0; line < lines.size(); ++line) {
+                auto& decoration = lines[line].decoration;
+                const auto& location = lineLocations[line];
+                const auto text = std::wstring_view(rawSource).substr(location.start.value,
+                    location.content_end - location.start);
+                if (text.find_first_not_of(L" \t\u3000") == std::wstring_view::npos ||
+                    (decoration.flags & stops) != 0) { anchor.reset(); continue; }
+                bool blockMath = false;
+                for (size_t index : lineReferences[line].math_indices) {
+                    MathSpan math;
+                    if (!document.ResolveMath(sourceLines, index, &math))
+                        return NoteRenderSourcePlanBuildResult::InconsistentSyntax;
+                    blockMath = blockMath || math.kind == MathKind::Block;
+                }
+                if (blockMath) { anchor.reset(); continue; }
+                if (decoration.has(NoteRenderSourceLineDecorationListItem) && !decoration.list_continuation) {
+                    anchor = decoration;
+                    continue;
+                }
+                if (!anchor || anchor->container_depth != decoration.container_depth) { anchor.reset(); continue; }
+                // Explicit source/style indentation takes precedence over the
+                // optional alignment. It remains visible source, not a gutter.
+                if (text.front() == L' ' || text.front() == L'\t' || text.front() == L'\u3000') continue;
+                bool explicitIndent = false;
+                for (size_t index : lineReferences[line].style_indices) {
+                    StyleSpan style;
+                    if (!document.ResolveStyle(sourceLines, index, &style))
+                        return NoteRenderSourcePlanBuildResult::InconsistentSyntax;
+                    explicitIndent = explicitIndent || style.kind == StyleKind::Indent;
+                }
+                if (explicitIndent) continue;
+                decoration.flags |= anchor->flags & listFlags;
+                decoration.list_depth = anchor->list_depth;
+                decoration.ordered_list_number = anchor->ordered_list_number;
+                decoration.task_checked = anchor->task_checked;
+                decoration.list_continuation = true;
             }
         }
 

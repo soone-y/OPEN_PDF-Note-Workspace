@@ -17,6 +17,9 @@ enum class SoftNoticeKind {
 };
 
 void ShowSoftNotice(HWND owner, const std::wstring& text, SoftNoticeKind kind = SoftNoticeKind::Info);
+// Brief bottom-right guidance: no activation or mouse interception. Does not
+// replace an already visible ordinary notice; never opens a fallback dialog.
+void ShowPassiveSoftNotice(HWND owner, const std::wstring& text);
 
 // Hide only the matching owner's notice when its interaction resumes. Allow
 // the next explicit attempt to show the same guidance again immediately.

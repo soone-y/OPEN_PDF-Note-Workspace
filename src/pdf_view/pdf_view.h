@@ -2,6 +2,7 @@
 #pragma once
 #include "core/annot_commands.h"
 #include "core/app_core.h"
+#include "ui/empty_view_guide.h"
 
 struct PreEditToolbarState {
     bool valid = false;
@@ -95,6 +96,15 @@ void SetModeButtons();
 
 // PdfView ウィンドウプロシージャ
 LRESULT CALLBACK PdfViewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
+// A host other than the main window (the recovery review) replaces the
+// main app's empty-view shortcut guide with its own state and usage while
+// no document is shown. nullptr keeps the main app's guide.
+using PdfEmptyGuideProvider = empty_view_guide::Content (*)();
+extern PdfEmptyGuideProvider g_pdfEmptyGuideProvider;
+// Paints behind pages and guidance (the recovery review's watermark).
+using PdfHostBackgroundPainter = void (*)(HDC dc, const RECT &area);
+extern PdfHostBackgroundPainter g_pdfHostBackgroundPainter;
 
 // インラインテキスト編集を終了（commit=trueなら確定、falseなら破棄）
 void EndInlineTextEditing(HWND pdfWnd, bool commit);

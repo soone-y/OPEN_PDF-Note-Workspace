@@ -109,6 +109,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       flex-wrap: wrap;
     }}
 
+    .portal-identity {{ flex-basis: 100%; margin: 0; font-size: 1rem; font-weight: 600; }}
+
     .site-menu {{ position: relative; min-width: 0; max-width: 100%; }}
 
     .site-menu summary {{
@@ -465,6 +467,7 @@ html[data-contrast="high"] {{ --action:#00573f; --opened:#9a4e00; }}
 
 <div class="container">
   <div class="doc-header">
+    <p class="portal-identity"><a href="{portal_home_href}">{portal_label}</a></p>
     <div class="header-tools">
 {language_switch_html}
       <label class="contrast-toggle"><input id="contrast-toggle" type="checkbox"><span>{contrast_label}</span></label>
@@ -576,7 +579,15 @@ def simple_markdown_to_html(md_text: str, root_rel: str) -> str:
     heading_counts: dict[str, int] = {}
 
     def heading_id(source: str) -> str:
-        normalized = re.sub(r"[`*_]", "", source).strip().lower()
+        # Like GitHub, drop emphasis markers but keep code-span text as written,
+        # so `__pdf_note_workspace__` keeps its underscores in the id.
+        parts = re.split(r"(`[^`]*`)", source)
+        text = "".join(
+            part[1:-1] if len(part) >= 2 and part.startswith("`") and part.endswith("`")
+            else re.sub(r"[`*_]", "", part)
+            for part in parts
+        )
+        normalized = text.strip().lower()
         normalized = re.sub(r"\s+", "-", normalized)
         # \w already includes Japanese letters. Broad kana ranges also retain
         # punctuation such as ・, breaking Markdown links that omit punctuation.
@@ -1258,6 +1269,8 @@ def convert_md_file_to_html(md_path: Path, site_dir: Path) -> Path:
         search_title=search_title,
         metadata_html=metadata_html,
         language_code=language_code,
+        portal_home_href=f"{root_rel}en/index.html" if language_code == "en" else f"{root_rel}index.html",
+        portal_label="Documentation portal" if language_code == "en" else "文書ポータル",
         contrast_label="High contrast" if language_code == "en" else "高コントラスト",
         skip_label="Skip to content" if language_code == "en" else "本文へ移動",
         root_rel=root_rel,

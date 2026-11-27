@@ -9,5 +9,6 @@ struct EscapeBackupPresence {
     bool hasSavedFileBackup = false;
 };
 
-std::filesystem::path EscapeRootPath();
+// __pdf_note_workspace__/__backup__: saved-file backups and state-file copies.
+std::filesystem::path BackupRootPath();
 EscapeBackupPresence ScanEscapeBackupPresence();

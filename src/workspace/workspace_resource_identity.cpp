@@ -1,4 +1,5 @@
 #include "workspace/workspace_resource_identity.h"
+#include "core/workspace_layout.h"
 
 #include "clrop/hash.h"
 #include "core/atomic_write.h"
@@ -250,10 +251,9 @@ void AppendU64(std::string& out, std::uint64_t value) {
         if (outError) *outError = L"workspace resource catalog exceeds the readable size limit";
         return false;
     }
-    const std::filesystem::path resource = state.workspaceRoot / L"__pdf_note_workspace__";
     std::wstring error;
     if (!write_checks::ObservedWriteBytes(state.workspaceRoot, state.storePath, bytes.data(), bytes.size(),
-                                        resource / L"__tmp__", resource / L"__escape__", &error)) {
+                                        workspace_layout::Tmp(state.workspaceRoot), workspace_layout::Failed(state.workspaceRoot), &error)) {
         state.dirty = true;
         if (outError) *outError = error;
         return false;

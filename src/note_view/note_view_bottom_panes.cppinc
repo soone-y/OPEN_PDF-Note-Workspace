@@ -108,6 +108,7 @@ bool GetNoteStatusAssistControlRect(NoteStatusAssistControl control, RECT* outRe
     case NoteStatusAssistControl::ClickInsert: index = projection.assistLayout.vimClickInsertIdx; break;
     case NoteStatusAssistControl::CurrentDisplay: index = projection.assistLayout.noteDisplayIdx; break;
     case NoteStatusAssistControl::ClroAsciiOnly: index = projection.assistLayout.clroAsciiOnlyIdx; break;
+    case NoteStatusAssistControl::ListBodyAlignment: index = projection.assistLayout.listBodyAlignmentIdx; break;
     case NoteStatusAssistControl::ListImplicitContinuation: index = projection.assistLayout.listImplicitContinuationIdx; break;
     case NoteStatusAssistControl::QuoteLazyContinuation: index = projection.assistLayout.quoteLazyContinuationIdx; break;
     case NoteStatusAssistControl::BottomSpace: index = projection.assistLayout.bottomSpaceIdx; break;
@@ -181,7 +182,10 @@ static bool ExecuteBottomPaneCommand(HWND hWnd, const BottomPaneCommand& command
         ToggleClroSyntaxSetting(g_config.clroAsciiOnly, L"settings.note.clro_ascii_save_failed");
         return true;
     case BottomPaneCommandKind::ToggleListImplicitContinuation:
-        ToggleClroSyntaxSetting(g_config.clroListImplicitContinuation, L"settings.note.clro_list_save_failed");
+        ToggleClroSyntaxSetting(g_config.clroListImplicitContinuation, L"settings.note.clro_list_save_failed", &g_config.clroListBodyAlignment);
+        return true;
+    case BottomPaneCommandKind::ToggleListBodyAlignment:
+        ToggleClroSyntaxSetting(g_config.clroListBodyAlignment, L"settings.note.clro_list_save_failed", &g_config.clroListImplicitContinuation);
         return true;
     case BottomPaneCommandKind::ToggleQuoteLazyContinuation:
         ToggleClroSyntaxSetting(g_config.noteQuoteLazyContinuation, L"settings.note.quote_lazy_save_failed");

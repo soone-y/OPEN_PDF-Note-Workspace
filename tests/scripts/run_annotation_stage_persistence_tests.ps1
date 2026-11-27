@@ -16,7 +16,7 @@ $evidenceRoot = if ($OutputRoot) {
 $runRoot = Join-Path $evidenceRoot ([Guid]::NewGuid().ToString('N'))
 $null = New-Item -ItemType Directory -Path $runRoot
 $results = [System.Collections.Generic.List[object]]::new()
-$expectedScenarios = 28
+$expectedScenarios = 29
 $testExe = Join-Path $runRoot 'stage_persistence_host.exe'
 $priorTemp = $env:TEMP; $priorTmp = $env:TMP; $priorPath = $env:PATH
 $sourceBefore = @(); $sourceAfter = @()
@@ -46,7 +46,7 @@ function Protected-Snapshot([string]$workspace) {
 function Recovery-PayloadSnapshot([string]$workspace) {
     $payloads = @()
     foreach ($file in (Get-ChildItem -LiteralPath $workspace -Recurse -File)) {
-        # A rejected checkpoint can be quarantined under __escape__. Preserve its
+        # A rejected checkpoint can be quarantined under __failed__. Preserve its
         # type, filename, and bytes while allowing only that owned relocation.
         $kind = if ($file.Name -like '*.clrop.stage') { 'checkpoint' }
                 elseif ($file.Name -like '*.clrop.stage.meta.txt') { 'metadata' }
@@ -119,14 +119,14 @@ function Fixture([string]$name, [string]$seed = 'seed') {
     return $workspace
 }
 function Journal-Files([string]$workspace) {
-    @(Get-ChildItem -LiteralPath (Join-Path $workspace '__pdf_note_workspace__/__tmp__/__stage__/clrop_journal') -Filter 'clropj_*.json' -File | Sort-Object Name)
+    @(Get-ChildItem -LiteralPath (Join-Path $workspace '__pdf_note_workspace__/__unsaved__/clrop_journal') -Filter 'clropj_*.json' -File | Sort-Object Name)
 }
 function Reject-And-Preserve([string]$workspace) {
     $before = Protected-Snapshot $workspace
     $recoveryBefore = @(Recovery-PayloadSnapshot $workspace)
     try {
         Phase 'reject' $workspace
-        $stageDirectory = Join-Path $workspace '__pdf_note_workspace__/__tmp__/__stage__/clrop'
+        $stageDirectory = Join-Path $workspace '__pdf_note_workspace__/__unsaved__/clrop'
         $activeCheckpoints = @()
         if (Test-Path -LiteralPath $stageDirectory) {
             $activeCheckpoints = @(Get-ChildItem -LiteralPath $stageDirectory -File -Filter '*.clrop.stage')
@@ -138,7 +138,7 @@ function Reject-And-Preserve([string]$workspace) {
             # directory. There is then no active input to integrate; requiring a
             # later resolver lookup would mistake this successful quarantine for
             # a test-host failure.
-            $escapeDirectory = Join-Path $workspace '__pdf_note_workspace__/__escape__'
+            $escapeDirectory = Join-Path $workspace '__pdf_note_workspace__/__failed__'
             $quarantined = @()
             if (Test-Path -LiteralPath $escapeDirectory) {
                 $quarantined = @(Get-ChildItem -LiteralPath $escapeDirectory -File -Filter '*.clrop.stage')
@@ -318,12 +318,18 @@ try {
     Case 'journal_write_denial_keeps_previous_recovery' {
         $workspace = Fixture 'journal_write_denial'
         $before = Protected-Snapshot $workspace
-        $directory = Join-Path $workspace '__pdf_note_workspace__/__tmp__/__stage__/clrop_journal'
+        $directory = Join-Path $workspace '__pdf_note_workspace__/__unsaved__/clrop_journal'
         $acl = (Get-Acl -LiteralPath $directory).Sddl
         Phase 'journal-denied' $workspace
         if ($acl -cne (Get-Acl -LiteralPath $directory).Sddl) { throw 'Owned journal directory ACL was not restored.' }
         Assert-Protected $before $workspace
         Phase 'load' $workspace
+    }
+    Case 'closed_pdf_stays_protected_until_checkpoint_discard' {
+        $workspace = Fixture 'closed_pdf_stage_protection'
+        $before = Protected-Snapshot $workspace
+        Phase 'stage-protection' $workspace
+        Assert-Protected $before $workspace
     }
     Case 'integration_lock_failure_keeps_original_and_recovery' {
         $workspace = Fixture 'integration_lock_failure'
@@ -338,7 +344,7 @@ try {
         $pdf = (Get-FileHash -LiteralPath (Join-Path $workspace 'sample.pdf')).Hash
         Phase 'integrate' $workspace
         if ($pdf -cne (Get-FileHash -LiteralPath (Join-Path $workspace 'sample.pdf')).Hash) { throw 'Integration changed PDF bytes.' }
-        $backupRoot = Join-Path $workspace '__pdf_note_workspace__/__escape__/backup'
+        $backupRoot = Join-Path $workspace '__pdf_note_workspace__/__backup__'
         $matching = @(Get-ChildItem -LiteralPath $backupRoot -Recurse -File | Where-Object { (Get-FileHash -LiteralPath $_.FullName).Hash -ceq $original })
         if ($matching.Count -eq 0) { throw 'No byte-identical original CLROP backup was retained.' }
     }

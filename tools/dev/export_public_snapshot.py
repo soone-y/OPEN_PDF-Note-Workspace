@@ -349,13 +349,17 @@ def build_snapshot_plan(
         if len(unique) > 20:
             preview += f", ... ({len(unique) - 20} more)"
         raise ValueError(
-            "allowlisted directories contain files that are not tracked by Git; "
-            f"review and add or remove them before snapshot creation: {preview}"
+            "公開対象のフォルダーに Git 未追跡のファイルがあります。git add するか削除してから再実行してください "
+            "(allowlisted directories contain files that are not tracked by Git; "
+            f"review and add or remove them before snapshot creation): {preview}"
         )
     unused_artifacts = sorted(set(artifacts) - used_artifacts)
     if unused_artifacts:
         preview = ", ".join(path.as_posix() for path in unused_artifacts[:20])
-        raise ValueError(f"artifact manifest entries are outside the active allowlist: {preview}")
+        raise ValueError(
+            "artifact manifest に公開対象外のエントリがあります "
+            f"(artifact manifest entries are outside the active allowlist): {preview}"
+        )
 
     return SnapshotPlan(
         directories=tuple(sorted(directory_set)),
