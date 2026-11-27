@@ -372,6 +372,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       overflow-x: auto;
     }}
 
+    /* 横幅に余裕がある画面では、表だけ本文幅(42em)を越えて右側の余白まで広げ、横スクロールを避ける。 */
+    @media (min-width: 760px) {{
+      .table-scroll {{
+        width: max-content;
+        min-width: 100%;
+        max-width: min(1180px, calc(100vw - 12px - max(0px, (100vw - 904px) / 2) - 28px - 40px));
+      }}
+    }}
+
     .table-scroll table {{
       width: 100%;
       border-collapse: collapse;
@@ -702,7 +711,7 @@ def simple_markdown_to_html(md_text: str, root_rel: str) -> str:
             source_cells = [c.strip() for c in line.split("|")[1:-1]]
             if source_cells and all(re.fullmatch(r":?-{3,}:?", c) for c in source_cells):
                 continue  # セル全体が区切り指定の行だけをスキップ
-            cells = [format_inline(c, root_rel) for c in source_cells]
+            cells = [allow_path_breaks_in_code(format_inline(c, root_rel)) for c in source_cells]
             if not in_table:
                 html_lines.append('<div class="table-scroll"><table>')
                 in_table = True
@@ -890,6 +899,18 @@ def render_mermaid_flowchart(lines: list[str]) -> str | None:
             f'<span class="flowchart-arrow" aria-hidden="true">→</span>{node_html(node_labels.get(target, target))}</div>'
         )
     return '<figure class="flowchart-diagram" aria-label="フロー図"><figcaption>フロー図</figcaption>' + "\n".join(edge_html) + "</figure>"
+
+
+def allow_path_breaks_in_code(cell_html: str) -> str:
+    """表のセル内のコード表記で、パス区切り「/」の直後だけを改行可能にする。
+
+    語の途中では分割せず、長いパスが列幅を押し広げて表が横スクロールになるのを防ぐ。
+    """
+    return re.sub(
+        r"<code>([^<]*)</code>",
+        lambda m: "<code>" + m.group(1).replace("/", "/<wbr>") + "</code>",
+        cell_html,
+    )
 
 
 def format_inline(text: str, root_rel: str) -> str:
